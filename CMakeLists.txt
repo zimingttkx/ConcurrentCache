@@ -8,7 +8,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_executable(ConcurrentCache main.cpp
         src/base/log.h
         src/base/config.h
-        src/base/signal.h)
+        src/base/signal.h
+        src/network/buffer.h)
 
 # 包含目录
 include_directories(${CMAKE_SOURCE_DIR}/src)
