@@ -19,7 +19,8 @@ file(GLOB_RECURSE SOURCES
 )
 
 # 6. 生成可执行文件
-add_executable(concurrentcache-server ${SOURCES})
+add_executable(concurrentcache-server ${SOURCES}
+        src/network/channel.h)
 
 # 7. 链接库 Windows平台下pthread不存在，需要条件编译
 if(UNIX)
