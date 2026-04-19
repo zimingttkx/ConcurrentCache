@@ -166,7 +166,7 @@ namespace cc_server {
             );
             // 更新读写指针
             // 写指针减去已读长度 读指针归零
-            writer_idx -= reader_idx_;
+            writer_idx_ -= reader_idx_;
             reader_idx_ = 0;
         }
     };
