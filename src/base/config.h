@@ -59,7 +59,7 @@ namespace cc_server {
             if (config_data_.find(key) != config_data_.end()) {
                 return config_data_[key];
             }
-            retrun default_value;
+            return default_value;
         }
 
         // 获取整数类型的配置项
