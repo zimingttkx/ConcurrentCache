@@ -13,7 +13,8 @@ file(GLOB_RECURSE SOURCES
 )
 
 add_executable(concurrentcache-server ${SOURCES}
-        src/network/event_loop.cpp)
+        src/network/event_loop.cpp
+        src/network/connection.h)
 
 if(UNIX)
     target_link_libraries(concurrentcache-server pthread)
