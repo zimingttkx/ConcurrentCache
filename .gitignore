@@ -17,3 +17,4 @@ droid/
 build/
 xml/
 .idea/
+.claude-code-gui/
