@@ -26,7 +26,7 @@ namespace cc_server {
         if (instance.callbacks_.find(signal_num) != instance.callbacks_.end()) {
             instance.callbacks_[signal_num]();
         } else {
-            LOG_ERROR("收到未处理的信号:" + std::to_string(signal_num));
+            LOG_ERROR("收到未处理的信号: %d", signal_num);
         }
     }
 }

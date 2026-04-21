@@ -14,10 +14,10 @@ namespace cc_server {
         // 返回值：成功 = epoll的文件描述符（>=0），失败 = -1
         epoll_fd_ = epoll_create1(0);
         if (epoll_fd_ < 0) {
-            LOG_ERROR("epoll_create1() failed: {}", strerror(errno));
+            LOG_ERROR("epoll_create1() failed: %s", strerror(errno));
             return;
         }
-        LOG_INFO("epoll created, fd={}", epoll_fd_);
+        LOG_INFO("epoll created, fd=%d", epoll_fd_);
 
         // 2. 创建 wakeup pipe（后面会用到）
         // 如果创建失败，要关闭已经创建的 epoll，避免资源泄露
@@ -35,7 +35,7 @@ namespace cc_server {
         ev.data.fd = wakeup_fd_;             // 存 fd，后面区分是谁
 
         if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, wakeup_fd_, &ev) < 0) {
-            LOG_ERROR("epoll_ctl ADD wakeup_fd_ failed: {}", strerror(errno));
+            LOG_ERROR("epoll_ctl ADD wakeup_fd_ failed: %s", strerror(errno));
             return;
         }
 
@@ -65,7 +65,7 @@ namespace cc_server {
         // pipe[0] = 读端（EventLoop 监听这个）
         // pipe[1] = 写端（其他线程写入来唤醒 EventLoop）
         if (::pipe(wakeup_pipe_) < 0) {
-            LOG_ERROR("pipe() failed: {}", strerror(errno));
+            LOG_ERROR("pipe() failed: %s", strerror(errno));
             return false;
         }
 
@@ -78,7 +78,7 @@ namespace cc_server {
 
         wakeup_fd_ = wakeup_pipe_[0];  // 读端交给 EventLoop 监听
 
-        LOG_DEBUG("wakeup pipe created: read={}, write={}", wakeup_pipe_[0], wakeup_pipe_[1]);
+        LOG_DEBUG("wakeup pipe created: read=%d, write=%d", wakeup_pipe_[0], wakeup_pipe_[1]);
         return true;
     }
 

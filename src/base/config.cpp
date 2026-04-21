@@ -18,7 +18,7 @@ namespace cc_server {
     bool Config::load(const std::string &filename) {
         std::ifstream file(filename);
         if (!file.is_open()) {
-            LOG_ERROR("Failed to open config file:" + filename);
+            LOG_ERROR("Failed to open config file: %s", filename.c_str());
             return false;
         }
         std::string line;
@@ -34,7 +34,7 @@ namespace cc_server {
             }
         }
         file.close();
-        LOG_INFO("Config file loaded successfully:" + filename);
+        LOG_INFO("Config file loaded successfully: %s", filename.c_str());
         return true;
     }
 
@@ -52,7 +52,7 @@ namespace cc_server {
             try {
                 return std::stoi(config_data_[key]);
             } catch (...) {
-                LOG_ERROR("Invalid integer value for key:" + key);
+                LOG_ERROR("Invalid integer value for key: %s", key.c_str());
             }
         }
         return default_value;
