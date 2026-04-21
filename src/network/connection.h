@@ -35,7 +35,8 @@ namespace cc_server {
         // IO 事件处理
         void handle_read();
         void handle_write();
-        void send_response();
+        void send_response(const char* data, size_t len);
+        void send_response(const std::string& response);
         void close();
 
         // 缓冲区访问
