@@ -57,4 +57,4 @@ namespace cc_server {
     };
 }
 
-#endif CONCURRENTCACHE_NETWORK_SOCKET_H
+#endif  // CONCURRENTCACHE_NETWORK_SOCKET_H
