@@ -29,7 +29,8 @@ namespace cc_server {
           loop_(loop),                 // 保存 EventLoop 指针
           channel_(nullptr),           // 先设为 nullptr，后面 new
           input_buffer_(),            // 构造空输入缓冲区
-          output_buffer_()            // 构造空输出缓冲区
+          output_buffer_(),             // 构造空输出缓冲区
+          resp_parser_()             // 构造 RESP 解析器
     {
         // ========== 步骤 1：创建 Channel ==========
         // Channel 负责监听这个客户端连接的 IO 事件
@@ -142,6 +143,18 @@ namespace cc_server {
             // input_buffer_ 现在缓存了所有收到的数据
             // 业务层可以从这里按"消息"为单位读取
             input_buffer_.append(temp_buffer, bytes_read);
+            // 协议解析 调用RespParaser解析命令
+            std::vector<RespValue> commands = resp_parser_.parse(input_buffer());
+            for (auto & cmd : commands) {
+                if (command_callback_) {
+                    command_callback_(cmd, this);
+                }
+            }
+            if (!resp_parser_.error().empty()) {
+                LOG_ERROR("RESP parse error: %s", resp_parser_.error().c_str());
+                send_response(RespEncoder::encode_error(resp_parser_.error()));
+                resp_parser_.reset();  // 重置解析器状态，准备下一次解析
+            }
 
             LOG_DEBUG("handle_read: read %zd bytes from fd=%d",
                       bytes_read, client_socket_.fd());
