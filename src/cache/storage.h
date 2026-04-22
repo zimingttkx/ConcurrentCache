@@ -1,6 +1,7 @@
 #ifndef CONCURRENTCACHE_CACHE_STORAGE_H
 #define CONCURRENTCACHE_CACHE_STORAGE_H
 
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <shared_mutex>
@@ -21,7 +22,7 @@ namespace cc_server {
         static GlobalStorage& instance();
 
         /** @brief 获取键对应的值，不存在返回空字符串 */
-        std::string get(const std::string& key);
+        std::optional<std::string> get(const std::string& key);
 
         /** @brief 设置键值对，键已存在则更新 */
         void set(const std::string& key, const std::string& value);

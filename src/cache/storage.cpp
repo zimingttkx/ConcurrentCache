@@ -18,13 +18,13 @@ namespace cc_server {
     // @return 键对应的值，不存在返回空字符串
     // @note 线程安全：使用共享锁，允许多读并发
     // =========================================================================
-    std::string GlobalStorage::get(const std::string& key) {
+    std::optional<std::string> GlobalStorage::get(const std::string& key) {
         std::shared_lock<std::shared_mutex> lock(mutex_);  // 共享锁：多个读可并发
         auto it = store_.find(key);
         if (it != store_.end()) {
             return it->second;
         }
-        return "";
+        return std::nullopt;  // 使用 std::nullopt 表示不存在
     }
 
     // =========================================================================
