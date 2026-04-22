@@ -1,11 +1,12 @@
-#ifndef CONCURRENTCACHE_NETWORK_CONNECT_H
-#define CONCURRENTCACHE_NETWORK_CONNECT_H
+#ifndef CONCURRENTCACHE_NETWORK_CONNECTION_H
+#define CONCURRENTCACHE_NETWORK_CONNECTION_H
 
 #include "socket.h"
 #include "base/log.h"
 #include "event_loop.h"
 #include "channel.h"
 #include "buffer.h"
+#include "protocol/resp.h"
 
 namespace cc_server {
     /**
@@ -17,6 +18,7 @@ namespace cc_server {
      * - 通过 EventLoop 的 epoll 事件驱动
      * - 业务层从 input_buffer_ 读取请求，将响应写入 output_buffer_
      */
+    using CommandCallback = std::function<void(const RespValue& cmd, Connection* conn)>;
     class Connection {
     private:
         Socket client_socket_;
@@ -24,6 +26,8 @@ namespace cc_server {
         Channel* channel_;
         Buffer input_buffer_;
         Buffer output_buffer_;
+        RespParser resp_parser_; // RESP 协议解析器
+        CommandCallback command_callback_; // 命令处理回调函数
 
     public:
         Connection(int client_fd, EventLoop* loop);
@@ -42,6 +46,10 @@ namespace cc_server {
         // 缓冲区访问
         Buffer* input_buffer();
         Buffer* output_buffer();
+
+        void set_command_callback(CommandCallback cb) {
+            command_callback_ = std::move(cb);
+        }
 
         // 获取 fd
         int fd() const;
