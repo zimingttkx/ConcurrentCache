@@ -224,4 +224,5 @@ namespace cc_server {
 #define LOG_WARN(fmt, ...)  cc_server::Logger::instance().log(cc_server::LogLevel::WARN,  fmt, ##__VA_ARGS__)
 #define LOG_ERROR(fmt, ...) cc_server::Logger::instance().log(cc_server::LogLevel::ERROR, fmt, ##__VA_ARGS__)
 
-} // namespace cc_server
+}
+#endif
