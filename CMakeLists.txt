@@ -18,7 +18,11 @@ add_executable(concurrentcache-server ${SOURCES}
         src/protocol/resp.h
         src/protocol/resp.cpp
         src/cache/storage.h
-        src/cache/storage.cpp)
+        src/cache/storage.cpp
+        src/command/command.h
+        src/command/string_cmd.h
+        src/command/command_factory.h
+        src/command/command_factory.cpp)
 
 if(UNIX)
     target_link_libraries(concurrentcache-server pthread)
