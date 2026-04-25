@@ -71,6 +71,9 @@ namespace cc_server {
            */
           std::unordered_map<int, Channel*> channels_;
 
+          time_t last_config_check_time_; // 上次检查配置文件的时间戳（秒级） 用于定时检查配置文件是否修改
+          const int config_check_interval_ = 10; // 默认10秒检测一次
+
 
     public:
         // 构造函数 创建epoll实例和wakeup_pipe
@@ -195,6 +198,8 @@ namespace cc_server {
            * - 失败返回false，错误信息通过LOG_ERROR输出
            */
         bool create_wakeup_pipe();
+
+        void check_config_reload();
 
     };
 }

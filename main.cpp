@@ -7,6 +7,7 @@
 #include "src/network/connection.h"
 #include "src/command/command_factory.h"
 #include "src/base/log.h"
+#include "base/config.h"
 
 using namespace cc_server;
 
@@ -48,6 +49,13 @@ int main() {
     Logger::instance().setFile("logs/server.log");
 
     LOG_INFO(main, "=== ConcurrentCache Server Starting ===");
+
+    if (!Config::instance().load("conf/concurrentcache.conf")) {
+        LOG_ERROR(main, "Failed to load configuration");
+        return 1;
+    }
+
+    Config::instance().addObserver("log_level", &Logger::instance());
 
     // 创建事件循环
     EventLoop loop;

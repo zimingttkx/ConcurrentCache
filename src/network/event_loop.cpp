@@ -1,5 +1,6 @@
 #include "event_loop.h"
 #include "channel.h"
+#include "base/config.h"
 
 namespace cc_server {
 
@@ -7,7 +8,8 @@ namespace cc_server {
     EventLoop::EventLoop()
         : epoll_fd_(-1),          // 一开始没有epoll，标记为-1表示无效
           wakeup_fd_(-1),         // 一开始没有pipe，初始化-1
-          quit_(false) {          // 默认不退出
+          quit_(false),
+          last_config_check_time_(time(nullptr)){          // 默认不退出
 
         // 1. 创建 epoll 实例
         // epoll_create1(0) = 雇一个"前台"
@@ -97,6 +99,8 @@ namespace cc_server {
                 static_cast<int>(events_.size()),   // 最多存多少
                 100                                  // 等100ms就超时
             );
+
+            check_config_reload();
 
             // 处理返回值
             if (n < 0) {
@@ -211,6 +215,17 @@ namespace cc_server {
             }
             // n > 0：读到数据了，继续读，直到没数据
         }
+    }
+
+    void EventLoop::check_config_reload() {
+        time_t now = time(nullptr);
+        if (difftime(now, last_config_check_time_) < config_check_interval_) {
+            return;
+        }
+        last_config_check_time_ = now;
+        Config::instance().reload();
+
+        LOG_INFO(event_loop, "config check interval changed");
     }
 
 }

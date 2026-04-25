@@ -40,6 +40,8 @@
 #include <sstream>            // std::ostringstream，字符串拼接
 #include <vector>             // std::vector，存储多个Sink
 #include <cstdarg>            // 可变参数，va_list/va_start/va_end
+#include "config.h"
+#include <cstdarg>
 
 namespace cc_server {
 
@@ -198,7 +200,7 @@ enum class LogLevel {
  * 3. 模块化：每个日志都带模块名，便于过滤
  * 4. 热加载：实现 ConfigObserver，配置文件改了就自动更新级别
  */
-class Logger {
+class Logger : public ConfigObserver {
 public:
     /**
      * @brief 析构函数
@@ -231,6 +233,9 @@ public:
      * - setLevel(ERROR) → 只输出 ERROR/FATAL
      */
     void setLevel(LogLevel level);
+
+
+    void onConfigChange(const std::string& key, const std::string& value) override;
 
     /**
      * @brief 设置日志输出文件
@@ -300,7 +305,6 @@ public:
      * - 把字符串转成 LogLevel 枚举
      * - 自动更新日志级别
      */
-    void onConfigChange(const std::string& key, const std::string& value);
 
     // 禁用拷贝构造和赋值
     Logger(const Logger&) = delete;
