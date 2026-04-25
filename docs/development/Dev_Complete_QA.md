@@ -655,7 +655,20 @@ class SetCommand : public Command {
         // ...
     }
 };
+
+// 6. 使用nodiscard标记返回值不能忽略
+[[nodiscard]] bool save_data();  // 返回bool表示是否成功，忽略可能导致bug
+save_data();  // 编译器警告：返回值被忽略了
 ```
+
+**什么时候用 [[nodiscard]]：**
+- 函数返回 bool/false 表示失败，忽略会导致 bug
+- 内存分配函数
+- 任何"忽略返回值很危险"的情况
+
+**什么时候不用：**
+- 本来就没返回值（void）
+- 忽略返回值也没关系
 
 ### 7.6.2 配置建议
 
