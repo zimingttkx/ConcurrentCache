@@ -18,6 +18,11 @@ namespace cc_server {
      * - EventLoop 检测到事件后调用 handle_event() 分发
      */
     class Channel {
+    public:
+        using ReadCallback  = std::function<void()>;
+        using WriteCallback = std::function<void()>;
+        using ErrorCallback = std::function<void()>;
+
     private:
         EventLoop* loop_;
         int fd_;
@@ -28,9 +33,6 @@ namespace cc_server {
         ErrorCallback error_cb_;
 
     public:
-        using ReadCallback  = std::function<void()>;
-        using WriteCallback = std::function<void()>;
-        using ErrorCallback = std::function<void()>;
 
         Channel(EventLoop* loop, int fd);
         ~Channel() = default;
