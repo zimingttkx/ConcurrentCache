@@ -18,8 +18,11 @@ namespace cc_server {
      * - 通过 EventLoop 的 epoll 事件驱动
      * - 业务层从 input_buffer_ 读取请求，将响应写入 output_buffer_
      */
-    using CommandCallback = std::function<void(const RespValue& cmd, Connection* conn)>;
     class Connection {
+    public:
+        // 命令处理回调类型
+        using CommandCallback = std::function<void(const RespValue& cmd, Connection* conn)>;
+
     private:
         Socket client_socket_;
         EventLoop* loop_;
@@ -52,7 +55,7 @@ namespace cc_server {
         }
 
         // 获取 fd
-        int fd() const;
+        [[nodiscard]] int fd() const;
     };
 }
 

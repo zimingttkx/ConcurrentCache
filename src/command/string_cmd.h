@@ -38,7 +38,7 @@ namespace cc_server {
             return RespEncoder::encode_bulk_string(result.value());
         }
 
-        std::unique_ptr<Command> clone() const override {
+        [[nodiscard]] std::unique_ptr<Command> clone() const override {
             return std::make_unique<GetCommand>(*this);
         }
     };
@@ -69,7 +69,7 @@ namespace cc_server {
             return RespEncoder::encode_ok();
         }
 
-        std::unique_ptr<Command> clone() const override {
+        [[nodiscard]] std::unique_ptr<Command> clone() const override {
             return std::make_unique<SetCommand>(*this);
         }
     };
@@ -100,7 +100,7 @@ namespace cc_server {
             return RespEncoder::encode_integer(deleted ? 1 : 0);
         }
 
-        std::unique_ptr<Command> clone() const override {
+        [[nodiscard]] std::unique_ptr<Command> clone() const override {
             return std::make_unique<DelCommand>(*this);
         }
     };
@@ -131,7 +131,7 @@ namespace cc_server {
             return RespEncoder::encode_integer(exists ? 1 : 0);
         }
 
-        std::unique_ptr<Command> clone() const override {
+        [[nodiscard]] std::unique_ptr<Command> clone() const override {
             return std::make_unique<ExistsCommand>(*this);
         }
     };

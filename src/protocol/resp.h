@@ -92,7 +92,7 @@ struct RespValue {
     
     // 获取字符串值
     // 如果存储的不是字符串，返回空字符串
-    std::string as_string() const {
+    [[nodiscard]] std::string as_string() const {
         // std::holds_alternative<T>(variant) 检查 variant 存储的是不是 T 类型
         if (std::holds_alternative<std::string>(data)) {
             // std::get<T>(variant) 获取存储的 T 类型值
@@ -103,7 +103,7 @@ struct RespValue {
     
     // 获取整数值
     // 如果存储的不是整数，返回 0
-    int64_t as_integer() const {
+    [[nodiscard]] int64_t as_integer() const {
         if (std::holds_alternative<int64_t>(data)) {
             return std::get<int64_t>(data);
         }
@@ -113,7 +113,7 @@ struct RespValue {
     // 获取数组值
     // 如果存储的不是数组，返回空向量
     // 返回类型是 const 引用，避免复制开销
-    const std::vector<RespValue>& as_array() const {
+    [[nodiscard]] const std::vector<RespValue>& as_array() const {
         static std::vector<RespValue> empty;  // 静态空向量，函数结束时不消失
         if (std::holds_alternative<std::vector<RespValue>>(data)) {
             return std::get<std::vector<RespValue>>(data);
@@ -122,7 +122,7 @@ struct RespValue {
     }
     
     // 判断是否为 null
-    bool is_null() const {
+    [[nodiscard]] bool is_null() const {
         return std::holds_alternative<std::monostate>(data);
     }
 };
@@ -181,7 +181,7 @@ public:
     // 
     // 使用 const 引用返回，避免复制开销
     
-    const std::string& error() const { 
+    [[nodiscard]] const std::string& error() const {
         return error_msg_; 
     }
     

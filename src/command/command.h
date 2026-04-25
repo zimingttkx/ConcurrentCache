@@ -30,13 +30,13 @@ namespace cc_server {
          *
          * 示例：
          *   SetCommand cmd;
-         *   std::string resp = cmd.execute({"SET", "name", "zhangsan"});
+         *   std::string resp = cmd.execute({"SET", "name", "jack"});
          *   // resp = "+OK\r\n"
          */
         virtual std::string execute(const std::vector<std::string>& args) = 0;
 
         /** @brief 克隆命令对象，用于工厂模式创建实例 */
-        virtual std::unique_ptr<Command> clone() const = 0;
+        [[nodiscard]] virtual std::unique_ptr<Command> clone() const = 0;
     };
 }
 #endif
