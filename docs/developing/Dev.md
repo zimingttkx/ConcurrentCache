@@ -21,13 +21,16 @@
 │    - 单例模式 + 异步写入 + 文件轮转                          │
 │    - v2.0新增: Sink抽象 + 模块分类 + 配置热加载             │
 │                                                             │
-│ 🔄 Config        ████████░░░░░░░░░░░░░░░░░░░░  30%         │
-│    - 单例模式 + key=value解析                                │
-│    - v2.0进行中: 热加载 + 观察者模式                        │
+│ ✅ Config        ████████████████████████████ 100%         │
+│    - 单例模式 + key=value解析 + 观察者模式                  │
+│    - v2.0完成: 热加载触发机制（定时检查配置文件修改时间）    │
 │                                                             │
 │ ✅ Signal        ████████████████████████████ 100%         │
 │    - SIGINT/SIGTERM 优雅退出                                │
-│    - v2.0计划: SIGSEGV堆栈 + SIGPIPE忽略                   │
+│    - v2.0完成: SIGSEGV堆栈 + SIGPIPE忽略                   │
+│                                                             │
+│ ✅ Format        ████████████████████████████ 100%         │
+│    - 统一格式化工具                                        │
 └─────────────────────────────────────────────────────────────┘
 
 【网络通信层】
@@ -84,9 +87,11 @@
 | 日期 | 模块 | 状态 | 关键改动 |
 |------|------|------|---------|
 | 2026-04-24 之前 | 骨架版本所有模块 | ✅ | 完成基本服务器实现 |
-| 2026-04-24 | Logger | 🔄 | Sink抽象 + 模块支持 + 热加载 |
-| 2026-04-24 | Config | 🔄 | 添加观察者模式、热加载接口 |
+| 2026-04-24 | Logger | ✅ | Sink抽象 + 模块支持 + 热加载代码完成 |
+| 2026-04-24 | Config | ✅ | 观察者模式 + reload() 代码完成 |
 | 2026-04-24 | Format | ✅ 新增 | 统一格式化工具类 |
+| 2026-04-25 | Signal | ✅ | SIGSEGV堆栈捕获 + SIGPIPE忽略 完成 |
+| 2026-04-25 | Config | ✅ | 热加载触发机制集成（定时检查配置） |
 
 ---
 
@@ -216,7 +221,12 @@ class Format {
 
 ### ✅ Signal（信号处理）
 
-**开发时间**：骨架版本
+**开发时间**：骨架版本 + 2026-04-25（v2.0 增强完成）
+
+**v2.0 完成内容**：
+- SIGINT/SIGTERM 优雅退出
+- SIGSEGV 堆栈捕获（使用 backtrace + dladdr + abi::__cxa_demangle）
+- SIGPIPE 忽略（避免写已关闭连接崩溃）
 
 **为什么这样设计**：
 ```
@@ -227,7 +237,17 @@ class Format {
 2. 为什么只设置标志位？
    - 信号处理函数不能做复杂操作
    - 标志位让主循环检测并处理退出
+
+3. 为什么需要 SIGSEGV 捕获？
+   - 段错误发生时打印调用栈，便于定位问题
+   - 使用 backtrace() 获取地址，dladdr() + __cxa_demangle 还原函数名
+
+4. 为什么忽略 SIGPIPE？
+   - 对端关闭连接时写数据，操作系统发 SIGPIPE
+   - 忽略后 write() 返回 EPIPE，可以从容处理
 ```
+
+**文件**：`src/base/signal.h`, `src/base/signal.cpp`
 
 ---
 
@@ -286,21 +306,52 @@ class Format {
 
 ## 待开发模块
 
-### 📋 Config 热加载完善
+### ✅ Config（配置系统）
 
-**当前状态**：观察者接口已完成，但热加载触发机制还未集成到服务器主循环
+**开发时间**：2026-04-24（v2.0 增强）+ 2026-04-25（热加载集成完成）
 
-**需要做什么**：
-- 在服务器主循环添加文件监控
-- 或使用 inotify/SIGUSR1 触发 reload
+**v2.0 完成内容**：
+- 单例模式（线程安全）
+- key=value 配置文件解析
+- 观察者模式（ConfigObserver 接口）
+- 热加载触发机制（EventLoop 定时检查，每5秒检查一次）
+- 默认值设置（log_level, log_file 等）
+
+**核心代码**：
+```cpp
+// ConfigObserver 接口
+class ConfigObserver {
+    virtual void onConfigChange(const std::string& key, const std::string& value) = 0;
+};
+
+// 热加载触发机制（EventLoop 中）
+void EventLoop::check_config_reload() {
+    time_t now = time(nullptr);
+    if (difftime(now, last_config_check_time_) < config_check_interval_) {
+        return;  // 未到检查时间
+    }
+    last_config_check_time_ = now;
+    Config::instance().reload();  // 重新加载配置
+    LOG_INFO(event_loop, "配置热加载完成");
+}
+
+// 使用示例（main.cpp）
+Config::instance().addObserver("log_level", &Logger::instance());
+Config::instance().load("./conf/concurrentcache.conf");
+```
+
+**文件**：`src/base/config.h`, `src/base/config.cpp`
 
 ---
 
-### 📋 Signal 增强
+### ✅ Signal（信号处理）
 
-**需要做什么**：
-- SIGSEGV 处理：打印堆栈信息
-- SIGPIPE 忽略：避免崩溃
+**当前状态**：✅ 已完成（2026-04-25）
+
+**已完成内容**：
+- SIGINT/SIGTERM 优雅退出
+- SIGSEGV 堆栈捕获（使用 backtrace + dladdr + abi::__cxa_demangle）
+- SIGPIPE 忽略（避免写已关闭连接崩溃）
 
 ---
 
@@ -410,9 +461,9 @@ concurrentcache/
 ├── src/
 │   ├── base/
 │   │   ├── log.h/cpp          ✅ Sink抽象 + 模块 + 热加载
-│   │   ├── format.h/cpp       ✅ 新增：统一格式化
-│   │   ├── config.h/cpp       🔄 热加载进行中
-│   │   └── signal.h/cpp       ✅ 基础版
+│   │   ├── format.h/cpp       ✅ 统一格式化
+│   │   ├── config.h/cpp       ✅ 单例 + 观察者 + 热加载
+│   │   └── signal.h/cpp       ✅ SIGSEGV + SIGPIPE
 │   │
 │   ├── network/
 │   │   ├── socket.h
@@ -480,6 +531,8 @@ concurrentcache/
 | 日期 | 模块 | 状态 | 更新内容 |
 |------|------|------|---------|
 | 2026-04-24 之前 | 骨架版本所有模块 | ✅ | 完成基本服务器实现 |
-| 2026-04-24 | Logger | 🔄 | Sink抽象 + 模块支持 + 热加载代码完成 |
-| 2026-04-24 | Config | 🔄 | 观察者模式 + 热加载接口完成 |
+| 2026-04-24 | Logger | ✅ | Sink抽象 + 模块支持 + 热加载代码完成 |
+| 2026-04-24 | Config | ✅ | 观察者模式 + reload() 代码完成 |
 | 2026-04-24 | Format | ✅ 新增 | 统一格式化工具类 |
+| 2026-04-25 | Signal | ✅ | SIGSEGV堆栈捕获 + SIGPIPE忽略 功能完成 |
+| 2026-04-25 | Config | ✅ | 热加载触发机制集成（EventLoop定时检查） |
