@@ -142,7 +142,7 @@ bool RespParser::has_complete_command(const Buffer* buffer) {
             // 在 data + 1 位置开始搜索，跳过首字符
             // len - 1 是剩余字节数
             // find_crlf() 返回指向 \r\n 的指针
-            if (const char* crlf = find_crlf(data + 1, len - 1)) {
+            if ([[maybe_unused]]const char* crlf = find_crlf(data + 1, len - 1)) {
                 // 找到了 \r\n，说明有完整行
                 return true;
             }
@@ -262,7 +262,7 @@ bool RespParser::has_complete_command(const Buffer* buffer) {
                     // 嵌套数组: 简化处理
                     // 找到匹配的结束位置
                     int depth = 1;
-                    size_t start = pos;
+                    // size_t start = pos;
                     while (depth > 0 && pos < len) {
                         if (data[pos] == '*') depth++;
                         if (data[pos] == '\n' && pos > 0 && data[pos-1] == '\r') {

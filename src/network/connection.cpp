@@ -64,7 +64,7 @@ namespace cc_server {
         // - EPOLLIN = 可读事件，数据来了或者对方关闭连接
         channel_->enable_reading();
 
-        LOG_DEBUG("Connection created: fd=%d", client_socket_.fd());
+        LOG_DEBUG(connection, "Connection created: fd=%d", client_socket_.fd());
     }
 
     /**
@@ -93,7 +93,7 @@ namespace cc_server {
         delete channel_;
         channel_ = nullptr;
 
-        LOG_DEBUG("Connection destroyed: fd=%d", client_socket_.fd());
+        LOG_DEBUG(connection, "Connection destroyed: fd=%d", client_socket_.fd());
         // 注意：client_socket_ 在这里析构，会自动 close(fd)
     }
 
@@ -151,12 +151,12 @@ namespace cc_server {
                 }
             }
             if (!resp_parser_.error().empty()) {
-                LOG_ERROR("RESP parse error: %s", resp_parser_.error().c_str());
+                LOG_ERROR(connection, "RESP parse error: %s", resp_parser_.error().c_str());
                 send_response(RespEncoder::encode_error(resp_parser_.error()));
                 resp_parser_.reset();  // 重置解析器状态，准备下一次解析
             }
 
-            LOG_DEBUG("handle_read: read %zd bytes from fd=%d",
+            LOG_DEBUG(connection, "handle_read: read %zd bytes from fd=%d",
                       bytes_read, client_socket_.fd());
 
             // ============================================================
@@ -176,7 +176,7 @@ namespace cc_server {
         } else if (bytes_read == 0) {
             // ---- 对方关闭了连接 ----
             // 这是正常的关闭流程，对方发送了 FIN
-            LOG_INFO("Client closed connection: fd=%d", client_socket_.fd());
+            LOG_INFO(connection, "Client closed connection: fd=%d", client_socket_.fd());
             close();  // 清理自己的资源
 
         } else {
@@ -186,7 +186,7 @@ namespace cc_server {
                 return;  // 忽略，继续等下一次事件
             }
             // 其他错误：打印日志，关闭连接
-            LOG_ERROR("recv() failed: fd=%d, error=%s",
+            LOG_ERROR(connection, "recv() failed: fd=%d, error=%s",
                       client_socket_.fd(), strerror(errno));
             close();
         }
@@ -238,7 +238,7 @@ namespace cc_server {
             // 注意：不是删除数据，只是移动指针表示"这部分已发送"
             output_buffer_.retrieve(bytes_written);
 
-            LOG_DEBUG("handle_write: wrote %zd bytes to fd=%d",
+            LOG_DEBUG(connection, "handle_write: wrote %zd bytes to fd=%d",
                       bytes_written, client_socket_.fd());
 
             // ---- 发完了？----
@@ -256,7 +256,7 @@ namespace cc_server {
                 return;
             }
             // 其他错误
-            LOG_ERROR("send() failed: fd=%d, error=%s",
+            LOG_ERROR(connection, "send() failed: fd=%d, error=%s",
                       client_socket_.fd(), strerror(errno));
             close();
         }
@@ -306,7 +306,7 @@ namespace cc_server {
         // - 用 output_buffer_ + 写事件 更可靠
         channel_->enable_writing();
 
-        LOG_DEBUG("send_response: queued %zu bytes for fd=%d",
+        LOG_DEBUG(connection, "send_response: queued %zu bytes for fd=%d",
                   len, client_socket_.fd());
     }
 

@@ -3,6 +3,7 @@
 
 #include <sys/epoll.h> // linux系统调用文件
 #include <unistd.h> // 关闭文件描述符 创建管道用于跨线程通信
+#include <fcntl.h> // fcntl F_GETFL F_SETFL O_NONBLOCK
 #include <vector> // 动态分配避免频繁拷贝
 #include <unordered_map> // O(1)查找fd对应的Channel
 #include <cstring>

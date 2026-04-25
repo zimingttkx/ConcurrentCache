@@ -35,7 +35,7 @@ namespace cc_server {
     bool Socket::bind_and_listen(int port, bool reuse) {
         fd_ = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
         if (fd_ < 0) {
-            LOG_ERROR("Socket() create failed: %s", strerror(errno));
+            LOG_ERROR(socket, "Socket() create failed: %s", strerror(errno));
             return false;
         }
 
@@ -50,17 +50,17 @@ namespace cc_server {
         server_addr.sin_port = htons(port);
 
         if (bind(fd_, reinterpret_cast<sockaddr*>(&server_addr), sizeof(server_addr)) < 0) {
-            LOG_ERROR("Bind() port %d failed: %s", port, strerror(errno));
+            LOG_ERROR(socket, "Bind() port %d failed: %s", port, strerror(errno));
             close();
             return false;
         }
 
         if (listen(fd_, 1024) < 0) {
-            LOG_ERROR("Listen() port %d failed: %s", port, strerror(errno));
+            LOG_ERROR(socket, "Listen() port %d failed: %s", port, strerror(errno));
             close();
             return false;
         }
-        LOG_INFO("Server started on port %d", port);
+        LOG_INFO(socket, "Server started on port %d", port);
         return true;
     }
 
@@ -79,11 +79,11 @@ namespace cc_server {
         );
         if (client_fd < 0) {
             if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                LOG_ERROR("Accept() failed: %s", strerror(errno));
+                LOG_ERROR(socket, "Accept() failed: %s", strerror(errno));
             }
             return -1;
         }
-        LOG_INFO("Client connected: fd=%d, ip=%s", client_fd, inet_ntoa(client_addr.sin_addr));
+        LOG_INFO(socket, "Client connected: fd=%d, ip=%s", client_fd, inet_ntoa(client_addr.sin_addr));
         return client_fd;
     }
 

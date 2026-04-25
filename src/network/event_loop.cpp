@@ -14,10 +14,10 @@ namespace cc_server {
         // 返回值：成功 = epoll的文件描述符（>=0），失败 = -1
         epoll_fd_ = epoll_create1(0);
         if (epoll_fd_ < 0) {
-            LOG_ERROR("epoll_create1() failed: %s", strerror(errno));
+            LOG_ERROR(event_loop, "epoll_create1() failed: %s", strerror(errno));
             return;
         }
-        LOG_INFO("epoll created, fd=%d", epoll_fd_);
+        LOG_INFO(event_loop, "epoll created, fd=%d", epoll_fd_);
 
         // 2. 创建 wakeup pipe（后面会用到）
         // 如果创建失败，要关闭已经创建的 epoll，避免资源泄露
@@ -35,14 +35,14 @@ namespace cc_server {
         ev.data.fd = wakeup_fd_;             // 存 fd，后面区分是谁
 
         if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, wakeup_fd_, &ev) < 0) {
-            LOG_ERROR("epoll_ctl ADD wakeup_fd_ failed: %s", strerror(errno));
+            LOG_ERROR(event_loop, "epoll_ctl ADD wakeup_fd_ failed: %s", strerror(errno));
             return;
         }
 
         // 4. 预分配事件数组，避免每次 loop 都分配内存
         events_.resize(1024);
 
-        LOG_INFO("EventLoop created successfully");
+        LOG_INFO(event_loop, "EventLoop created successfully");
     }
 
     // 析构函数：程序退出时关闭所有资源
@@ -65,7 +65,7 @@ namespace cc_server {
         // pipe[0] = 读端（EventLoop 监听这个）
         // pipe[1] = 写端（其他线程写入来唤醒 EventLoop）
         if (::pipe(wakeup_pipe_) < 0) {
-            LOG_ERROR("pipe() failed: %s", strerror(errno));
+            LOG_ERROR(event_loop, "pipe() failed: %s", strerror(errno));
             return false;
         }
 
@@ -78,13 +78,13 @@ namespace cc_server {
 
         wakeup_fd_ = wakeup_pipe_[0];  // 读端交给 EventLoop 监听
 
-        LOG_DEBUG("wakeup pipe created: read=%d, write=%d", wakeup_pipe_[0], wakeup_pipe_[1]);
+        LOG_DEBUG(event_loop, "wakeup pipe created: read=%d, write=%d", wakeup_pipe_[0], wakeup_pipe_[1]);
         return true;
     }
 
     // 事件循环：启动之后一直跑，死循环等事件、分发事件
     void EventLoop::loop() {
-        LOG_INFO("EventLoop start looping...");
+        LOG_INFO(event_loop, "EventLoop start looping...");
 
         // 循环，直到有人说"别等了"（quit_ = true）
         while (!quit_) {
@@ -103,7 +103,7 @@ namespace cc_server {
                 if (errno == EINTR) {
                     continue;  // 被信号打断，继续等
                 }
-                LOG_ERROR("epoll_wait failed");
+                LOG_ERROR(event_loop, "epoll_wait failed");
                 break;  // 真的出错了，退出循环
             }
 
@@ -137,7 +137,7 @@ namespace cc_server {
             }
         }
 
-        LOG_INFO("EventLoop stopped");
+        LOG_INFO(event_loop, "EventLoop stopped");
     }
 
     // 退出：设置退出标志，唤醒 loop
@@ -189,7 +189,7 @@ namespace cc_server {
         // 向 pipe 写端写一个字节
         ssize_t n = ::write(wakeup_pipe_[1], &one_byte, sizeof(one_byte));
         if (n < 0) {
-            LOG_ERROR("wakeup write() failed");
+            LOG_ERROR(event_loop, "wakeup write() failed");
         }
     }
 
