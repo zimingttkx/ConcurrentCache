@@ -24,7 +24,9 @@ add_executable(concurrentcache-server ${SOURCES}
         src/command/command_factory.h
         src/command/command_factory.cpp
         src/base/format.h
-        src/base/format.cpp)
+        src/base/format.cpp
+        src/base/lock.h
+        src/base/lock.cpp)
 
 if(UNIX)
     target_link_libraries(concurrentcache-server pthread)

@@ -9,6 +9,7 @@
 1. [日志系统 (log.h / log.cpp)](#1-日志系统-logh-logcpp)
 2. [配置系统 (config.h / config.cpp)](#2-配置系统-configh-configcpp)
 3. [信号处理 (signal.h / signal.cpp)](#3-信号处理-signalh-signalcpp)
+4. [锁机制 (lock.h)](#4-锁机制-lockh)
 
 ---
 
@@ -373,7 +374,252 @@ SignalHandler::getInstance().handle(SIGTERM, []() {
 
 ---
 
-## 4. 常见问题解答
+## 4. 锁机制 (lock.h)
+
+### 4.1 为什么需要锁？
+
+在多线程程序中，多个线程可能同时访问共享资源。如果不加控制，会出现数据竞争：
+
+```cpp
+// 线程A和线程B同时执行：
+// 初始时 value = 0
+
+// 线程A读取 value (得到0)
+// 线程B读取 value (得到0)
+// 线程A计算 value + 1 (得到1)
+// 线程B计算 value + 1 (得到1)
+// 线程A写入 value = 1
+// 线程B写入 value = 1
+
+// 结果：value = 1（但我们期望是2！）
+```
+
+**解决方案：用锁把"读取-修改-写入"变成原子的。**
+
+### 4.2 原子操作
+
+原子操作在执行过程中不会被其他线程干扰，比锁更轻量：
+
+```cpp
+// 原子整数 - 比 mutex 更轻量
+AtomicInteger counter(0);
+counter++;                      // 线程安全地加1
+counter.fetch_add(10);         // 线程安全地加10
+int val = counter.load();      // 读取当前值
+```
+
+**为什么原子操作更快？**
+- 锁需要：加锁 → 操作 → 解锁，涉及内核态切换
+- 原子操作在硬件层面保证原子性，用户态即可完成
+
+### 4.3 各种锁的选择
+
+| 锁类型 | 适用场景 | 特点 |
+|--------|----------|------|
+| **Mutex** | 一般同步 | 支持超时获取 |
+| **SpinLock** | 临界区极短（<100条指令） | 自旋等待，不挂起线程 |
+| **RecursiveMutex** | 同一线程多次获取 | 递归调用时不会死锁 |
+| **RWLock** | 读多写少 | 读可并发，写必须独占 |
+| **RWLock2** | 写优先场景 | 避免写饥饿 |
+
+**SpinLock vs Mutex 怎么选？**
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  临界区执行时间    │           推荐                        │
+├─────────────────────────────────────────────────────────┤
+│  < 100 条指令     │  SpinLock（自旋，不挂起线程）         │
+│  > 1000 条指令    │  Mutex（挂起，不消耗CPU）            │
+└─────────────────────────────────────────────────────────┘
+```
+
+### 4.4 读写锁详解
+
+读写锁的核心思想：
+- **读操作不修改数据**：多个线程同时读是安全的
+- **写操作会修改数据**：必须独占
+
+```cpp
+RWLock rwlock;
+std::string cache;
+
+// 多个线程可以同时读取
+void read_data() {
+    ReadLockGuard<RWLock> guard(rwlock);  // 读锁
+    std::string data = cache;  // 安全读取
+}
+
+// 只有一个线程能写入
+void write_data(const std::string& new_data) {
+    WriteLockGuard<RWLock> guard(rwlock);  // 写锁
+    cache = new_data;  // 安全写入
+}
+```
+
+### 4.5 分片锁 - 减少锁竞争
+
+**问题**：全局只有一把锁，所有线程都要竞争。
+
+**解决**：把锁分散成多个分片，访问不同数据的线程用不同的锁。
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  全局锁（不好）                                          │
+│  线程A访问数据1，线程B访问数据2 → 也要竞争同一把锁      │
+└─────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────┐
+│  分片锁（好）                                           │
+│  线程A访问key1 → 分片0 → 锁0                           │
+│  线程B访问key2 → 分片1 → 锁1                           │
+│  两个线程完全并行，互不干扰！                           │
+└─────────────────────────────────────────────────────────┘
+```
+
+```cpp
+ShardedLock<SpinLock> locks(16);  // 16个分片
+
+void access(const std::string& key) {
+    auto& lock = locks.get_shard(key);  // 根据key选择分片
+    LockGuard<SpinLock> guard(lock);
+    // 访问该分片的数据
+}
+```
+
+### 4.6 RAII 锁守卫 - 防止死锁
+
+**问题**：忘记 `unlock()` 导致死锁。
+
+```cpp
+// 危险写法
+mutex.lock();
+if (something) {
+    return;  // 忘记 unlock！死锁！
+}
+mutex.unlock();
+```
+
+**解决：LockGuard 自动管理锁的获取和释放。**
+
+```cpp
+// 安全写法
+{
+    LockGuard<std::mutex> guard(mutex);  // 构造函数加锁
+    if (something) {
+        return;  // guard析构，自动解锁
+    }
+}  // guard析构，自动解锁
+```
+
+无论函数如何退出（正常 return、异常、goto），LockGuard 都会确保锁被释放。
+
+### 4.7 同步原语
+
+**Semaphore（信号量）**：控制同时访问的线程数量。
+
+```cpp
+Semaphore sem(3);  // 最多3个线程同时访问
+
+// 线程A
+sem.wait();   // 计数从3变成2
+// 访问共享资源
+sem.post();   // 计数从2变成3
+```
+
+**CountDownLatch（倒计时门栓）**：等待N个操作完成。
+
+```cpp
+CountDownLatch latch(3);  // 3个线程
+
+// 主线程等待
+latch.wait();  // 阻塞，直到计数变为0
+
+// 线程函数
+void worker() {
+    // 做工作...
+    latch.count_down();  // 计数-1
+}
+```
+
+**CyclicBarrier（循环屏障）**：N个线程互相等待。
+
+```cpp
+CyclicBarrier barrier(3);  // 3个线程
+
+void worker(int id) {
+    // 第一阶段：各自准备
+    prepare();
+    barrier.wait();  // 3个线程都在这里等待
+    // 所有线程都到达后，一起继续执行
+    execute();
+}
+```
+
+### 4.8 伪共享与缓存行对齐
+
+**问题**：多个线程访问同一个缓存行中的不同变量，导致缓存行频繁失效。
+
+```
+CPU缓存行（64字节）：
+[变量A: 8字节][变量B: 8字节][变量C: 8字节]...[填充]
+
+线程1修改变量A → 线程2修改变量B → 整个缓存行失效，需要重新加载
+```
+
+**解决：使用 `alignas(64)` 对齐到缓存行。**
+
+```cpp
+struct alignas(64) Counter {
+    std::atomic<uint64_t> counter{0};
+};
+```
+
+### 4.9 常见问题
+
+**Q: 什么是死锁？如何避免？**
+A：两个线程互相等待对方释放锁。避免方法：1) 用 RAII 锁守卫 2) 总是按相同顺序获取锁
+
+**Q: 什么是惊群效应？**
+A：锁释放时，所有等待线程都被唤醒，但只有一个能获取锁。解决：使用退避策略，让线程在不同时间醒来
+
+**Q: `= delete` 是什么意思？**
+A：禁用该函数。比如 `AtomicInteger(const AtomicInteger&) = delete` 禁用拷贝构造函数
+
+### 4.10 使用示例
+
+```cpp
+// 1. 基本互斥锁
+Mutex mutex;
+{
+    MutexGuard guard(mutex);  // 自动加锁
+    // 临界区
+}
+
+// 2. 读写锁
+RWLock rwlock;
+{
+    RWLockReadGuard guard(rwlock);   // 读锁
+    // 读取共享数据
+}
+{
+    RWLockWriteGuard guard(rwlock);  // 写锁
+    // 写入共享数据
+}
+
+// 3. 分片锁（高并发场景）
+ShardedLock<SpinLock> locks(16);
+auto& lock = locks.get_shard(key);
+SpinLockGuard guard(lock);
+
+// 4. 原子操作
+AtomicInteger counter(0);
+counter++;
+int val = counter.load();
+```
+
+---
+
+## 5. 常见问题解答
 
 ### Q: 为什么要用单例模式？
 
@@ -398,7 +644,7 @@ callback();  // 调用 lambda
 
 ---
 
-## 5. 代码逻辑流程图
+## 6. 代码逻辑流程图
 
 ### 日志写入流程
 
@@ -475,9 +721,11 @@ while (getline 逐行读取)
 
 ---
 
-## 6. 进一步学习建议
+## 7. 进一步学习建议
 
 1. **C++11 并发编程**：《C++ Concurrency in Action》 chapter 4（条件变量和互斥锁）
 2. **设计模式**：《设计模式》单例模式、RAII 惯用法
 3. **Linux 系统编程**：《Linux 高性能服务器编程》信号处理章节
 4. **工程实践**：阅读 Boost.Log、spdlog 等成熟日志库的源码
+5. **并发锁机制**：阅读 Linux 内核中的 futex 机制、CPU 缓存一致性协议（MESI）
+6. **性能优化**：了解伪共享、缓存行对齐、无锁数据结构（如原子操作）
