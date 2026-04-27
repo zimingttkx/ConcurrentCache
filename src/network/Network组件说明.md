@@ -11,8 +11,12 @@
 3. [Channel (channel.h / channel.cpp)](#3-channel-channelh-channelcpp)
 4. [EventLoop (event_loop.h / event_loop.cpp)](#4-eventloop-event_looph-event_loopcpp)
 5. [Connection (connection.h / connection.cpp)](#5-connection-connectionh-connectioncpp)
-6. [组件协作流程](#6-组件协作流程)
-7. [常见问题解答](#7-常见问题解答)
+6. [MainReactor (main_reactor.h / main_reactor.cpp)](#6-mainreactor-main_reactorh-main_reactorcpp)
+7. [SubReactor (sub_reactor.h / sub_reactor.cpp)](#7-subreactor-sub_reactorh-sub_reactorcpp)
+8. [SubReactorPool (sub_reactor_pool.h / sub_reactor_pool.cpp)](#8-subreactorpool-sub_reactor_poolh-sub_reactor_poolcpp)
+9. [MainSubReactor架构](#9-mainsubreactor架构)
+10. [组件协作流程](#10-组件协作流程)
+11. [常见问题解答](#11-常见问题解答)
 
 ---
 
@@ -610,185 +614,537 @@ Connection::~Connection() {
 
 ---
 
-## 6. 组件协作流程
+## 6. MainReactor (main_reactor.h / main_reactor.cpp)
 
-### 6.1 服务器启动流程
+### 6.1 什么是 MainReactor？
+
+MainReactor 是"连接接受器"，专门负责处理 listen socket 的 accept 事件。
+
+**核心职责**：
+- 创建和管理 listen socket
+- 监听 accept 事件（新连接到来）
+- accept 新连接并分配给 SubReactor
+
+**为什么需要单独一个 MainReactor？**
+- accept 是轻量级操作，不需要太多线程
+- 如果和 SubReactor 混在一起，单线程处理 accept 会成为瓶颈
+- 分开后，accept 和 I/O 可以真正并行
+
+### 6.2 工作流程
+
+```cpp
+MainReactor::init(port)
+     │
+     ├── 1. listen_socket_.bind_and_listen(port)  // 创建监听套接字
+     │
+     ├── 2. 设置非阻塞 O_NONBLOCK
+     │
+     ├── 3. 创建 Channel 监听 accept 事件
+     │
+     └── 4. 注册到 EventLoop
+
+MainReactor::handle_accept()
+     │
+     ├── 循环调用 accept() 直到 EAGAIN
+     │
+     └── add_new_connection(client_fd)
+              │
+              ├── 设置非阻塞
+              │
+              ├── SubReactorPool::get_next_reactor()  // 负载均衡
+              │
+              └── target_reactor->add_connection()
+```
+
+### 6.3 核心代码解析
+
+```cpp
+void MainReactor::handle_accept() {
+    // 循环 accept 直到没有更多连接
+    while (true) {
+        int client_fd = listen_socket_.accept();
+        if (client_fd < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                break;  // 没有更多连接了
+            }
+            break;  // 其他错误
+        }
+        add_new_connection(client_fd);  // 分配给 SubReactor
+    }
+}
+
+void MainReactor::add_new_connection(int client_fd) {
+    // 设置非阻塞
+    int flags = fcntl(client_fd, F_GETFL, 0);
+    fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
+
+    // 轮询获取一个 SubReactor
+    SubReactor* target = SubReactorPool::instance().get_next_reactor();
+
+    // 添加连接到这个 SubReactor
+    target->add_connection(client_fd);
+}
+```
+
+### 6.4 架构位置
 
 ```
-Server Main
+┌─────────────────────────────────────────────────────────────┐
+│                        MainReactor                          │
+│                    (独立线程，只做 accept)                    │
+│  ┌─────────────────────────────────────────────────────┐  │
+│  │  EventLoop (epoll instance)                         │  │
+│  │                                                     │  │
+│  │  ┌───────────────┐                                 │  │
+│  │  │ listen_channel │  监听 accept 事件                │  │
+│  │  └───────────────┘                                 │  │
+│  │                                                     │  │
+│  │  epoll_wait() ──▶ handle_accept() ──▶ accept()      │  │
+│  └─────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            │ accept 新连接
+                            ▼
+                    SubReactorPool
+```
+
+---
+
+## 7. SubReactor (sub_reactor.h / sub_reactor.cpp)
+
+### 7.1 什么是 SubReactor？
+
+SubReactor 是"连接处理器"，每个 SubReactor 运行在独立线程中，拥有自己的 EventLoop（独立 epoll 实例）。
+
+**核心职责**：
+- 管理多个客户端连接
+- 处理连接的读写事件
+- 业务逻辑处理
+
+### 7.2 与原单 Reactor 的区别
+
+```
+单 Reactor 模式（旧的）：
+┌────────────────────────────────────────┐
+│            EventLoop                   │
+│   epoll_wait ──▶ 处理所有连接的读写       │
+│                                          │
+│   所有连接都在一个线程中处理              │
+│   8 核 CPU 只有 1 核在工作               │
+└────────────────────────────────────────┘
+
+MainSubReactor 模式（新的）：
+┌────────────────────────────────────────┐
+│            MainReactor                  │
+│   专门处理 accept                       │
+└────────────────────────────────────────┘
+         │
+         │ 新连接分配
+         ▼
+┌────────────┐  ┌────────────┐  ┌────────────┐
+│ SubReactor │  │ SubReactor │  │ SubReactor │
+│   线程 0   │  │   线程 1   │  │   线程 2   │
+│ ┌────────┐ │  │ ┌────────┐ │  │ ┌────────┐ │
+│ │EventLoop│ │  │ │EventLoop│ │  │ │EventLoop│ │
+│ │ 处理连接│ │  │ │ 处理连接│ │  │ │ 处理连接│ │
+│ └────────┘ │  │ └────────┘ │  │ └────────┘ │
+└────────────┘  └────────────┘  └────────────┘
+      │              │              │
+      ▼              ▼              ▼
+   连接0-999     连接1000-1999   连接2000-2999
+
+   8 核 CPU 全部在工作！并行处理
+```
+
+### 7.3 核心数据结构
+
+```cpp
+class SubReactor {
+    // SubReactor 自有的 EventLoop（独立 epoll 实例）
+    std::unique_ptr<EventLoop> loop_;
+
+    // 独立线程，运行事件循环
+    std::thread* thread_;
+
+    // 这个 SubReactor 管理的所有连接
+    std::unordered_map<int, std::unique_ptr<Connection>> connections_;
+
+    // 保护 connections_ 的读写锁
+    mutable std::shared_mutex connections_mutex_;
+
+    // 连接计数（原子操作，用于负载均衡）
+    std::atomic<size_t> connection_count_;
+};
+```
+
+### 7.4 连接管理
+
+```cpp
+void SubReactor::add_connection(int client_fd) {
+    // 1. 创建 Connection
+    auto conn = std::make_unique<Connection>(client_fd, loop_.get());
+
+    // 2. 设置回调
+    conn->set_read_callback([conn_ptr = conn.get()]() {
+        handle_read(conn_ptr);  // 处理客户端数据
+    });
+
+    conn->set_write_callback([conn_ptr = conn.get()]() {
+        handle_write(conn_ptr);  // 发送响应
+    });
+
+    conn->set_close_callback([this, conn_ptr = conn.get()]() {
+        handle_close(conn_ptr);  // 关闭连接
+    });
+
+    // 3. 设置命令处理回调
+    conn->set_command_callback([](const RespValue& cmd, Connection* conn) {
+        auto command = CommandFactory::instance().create(name);
+        auto response = command->execute(args);
+        conn->send_response(response);
+    });
+
+    // 4. 注册到 EventLoop
+    conn->channel()->enable_reading();
+    loop_->update_channel(conn->channel());
+
+    // 5. 保存 Connection
+    {
+        std::unique_lock<std::shared_mutex> lock(connections_mutex_);
+        connections_[client_fd] = std::move(conn);
+    }
+
+    connection_count_.fetch_add(1, std::memory_order_relaxed);
+}
+```
+
+### 7.5 生命周期管理
+
+```cpp
+SubReactor::~SubReactor() {
+    stop();  // 停止线程，关闭所有连接
+}
+
+void SubReactor::stop() {
+    if (thread_ == nullptr) return;
+
+    loop_->quit();  // 退出事件循环
+    thread_->join();  // 等待线程结束
+
+    delete thread_;
+    thread_ = nullptr;
+}
+
+void SubReactor::remove_connection(Connection* conn) {
+    int fd = conn->fd();
+
+    // 从 EventLoop 移除
+    loop_->remove_channel(conn->channel());
+
+    // 从 connections_ 移除
+    {
+        std::unique_lock<std::shared_mutex> lock(connections_mutex_);
+        connections_.erase(fd);
+    }
+
+    connection_count_.fetch_sub(1, std::memory_order_relaxed);
+    // Connection 析构会关闭 fd
+}
+```
+
+---
+
+## 8. SubReactorPool (sub_reactor_pool.h / sub_reactor_pool.cpp)
+
+### 8.1 什么是 SubReactorPool？
+
+SubReactorPool 是 SubReactor 的管理器，负责创建、启动、停止 SubReactor，并提供负载均衡功能。
+
+**核心职责**：
+- 预创建多个 SubReactor
+- 启动/停止所有 SubReactor
+- 负载均衡：分配新连接给合适的 SubReactor
+
+### 8.2 单例模式
+
+```cpp
+class SubReactorPool {
+public:
+    static SubReactorPool& instance() {
+        static SubReactorPool instance;  // C++11 线程安全单例
+        return instance;
+    }
+};
+```
+
+### 8.3 初始化和启动
+
+```cpp
+void SubReactorPool::init(size_t reactor_count) {
+    reactors_.reserve(reactor_count);
+    for (size_t i = 0; i < reactor_count; ++i) {
+        reactors_.push_back(SubReactor::create());  // 预创建
+    }
+}
+
+void SubReactorPool::start() {
+    for (auto& reactor : reactors_) {
+        reactor->start();  // 每个 SubReactor 启动独立线程
+    }
+}
+```
+
+### 8.4 负载均衡策略：轮询
+
+```cpp
+SubReactor* SubReactorPool::get_next_reactor() {
+    // 原子递增获取索引
+    size_t index = next_index_.fetch_add(1, std::memory_order_relaxed);
+
+    // 轮询选择 SubReactor
+    return reactors_[index % reactors_.size()].get();
+}
+```
+
+**轮询策略的优点**：
+- 实现简单，无锁
+- 原子操作，性能高
+- 均匀分布连接
+
+### 8.5 优雅停止
+
+```cpp
+void SubReactorPool::stop() {
+    for (auto& reactor : reactors_) {
+        reactor->stop();  // 逐个停止
+    }
+}
+```
+
+---
+
+## 9. MainSubReactor 架构
+
+### 9.1 整体架构图
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                          MainReactor                                   │
+│                      (独立线程 0)                                        │
+│  ┌─────────────────────────────────────────────────────────────────┐  │
+│  │  EventLoop                                                       │  │
+│  │                                                                   │  │
+│  │    listen_channel ──▶ [epoll_wait] ──▶ handle_accept()          │  │
+│  │                                                                   │  │
+│  │    accept() ──▶ add_new_connection() ──▶ SubReactorPool         │  │
+│  └─────────────────────────────────────────────────────────────────┘  │
+└───────────────────────────────────────────────────────────────────────┬─┘
+                                                                          │
+                                          新连接分配 (Round Robin)         │
+                                                                          │
+        ┌────────────────────────────────────────────────────────────────┘
+        │
+        ▼
+┌───────────────────┬───────────────────┬───────────────────┐
+│   SubReactor 0   │   SubReactor 1   │   SubReactor 2   │  ...
+│   (独立线程)      │   (独立线程)      │   (独立线程)      │
+├───────────────────┼───────────────────┼───────────────────┤
+│  EventLoop 0     │  EventLoop 1     │  EventLoop 2     │
+│  ┌─────────────┐ │ ┌─────────────┐ │ ┌─────────────┐  │
+│  │ connections │ │ │ connections │ │ │ connections │  │
+│  │  0-999      │ │ │  1000-1999 │ │ │  2000-2999 │  │
+│  └─────────────┘ │ └─────────────┘ │ └─────────────┘  │
+└───────────────────┴─────────────────┴─────────────────┘
+```
+
+### 9.2 工作流程
+
+```
+服务器启动：
      │
      ▼
-┌─────────────┐
-│   Socket    │  bind_and_listen(6379)
-│ (监听套接字) │
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│  EventLoop  │  创建 epoll 实例
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│  Channel    │  监听 socket 的可读事件
-│ (accept 等待)│
-└─────────────┘
-       │
-       ▼
-EventLoop::loop() 开始循环
+SubReactorPool::init(n)    // 创建 n 个 SubReactor
+     │
+     ▼
+SubReactorPool::start()     // 启动所有 SubReactor 线程
+     │
+     ▼
+MainReactor::init(port)     // 初始化 MainReactor
+     │
+     ▼
+MainReactor::start()        // 启动 MainReactor（阻塞）
+
+客户端连接：
+     │
+     ▼
+客户端 connect()
+          │
+          ▼ TCP 三次握手
+     │
+     ▼
+MainReactor accept()        // MainReactor 线程
+          │
+          ▼
+SubReactorPool::get_next_reactor()  // 轮询选择
+          │
+          ▼
+target_reactor->add_connection()   // 添加到 SubReactor
+          │
+          ▼
+SubReactor EventLoop 监听读写事件
 ```
 
-### 6.2 客户端连接流程
+### 9.3 为什么 MainSubReactor 效率高？
+
+```
+单 Reactor 问题：
+┌─────────────────────────────┐
+│         线程 0              │
+│                             │
+│   accept + 处理所有连接      │
+│                             │
+│   ───────────────────────  │
+│   线程1-7 空闲！            │
+└─────────────────────────────┘
+   CPU 利用率：12.5% (1/8)
+
+MainSubReactor 解决方案：
+┌──────────┬──────────┬──────────┬──────────┐
+│ Main     │ Sub      │ Sub      │ Sub      │
+│ Reactor  │ Reactor  │ Reactor  │ Reactor  │
+│ 线程0    │ 线程1    │ 线程2    │ 线程3    │
+├──────────┼──────────┼──────────┼──────────┤
+│ accept   │ 处理    │ 处理    │ 处理    │
+│          │ 连接    │ 连接    │ 连接    │
+└──────────┴──────────┴──────────┴──────────┘
+   CPU 利用率：~100%
+```
+
+### 9.4 线程安全的保证
+
+```
+1. SubReactor 之间的隔离：
+   - 每个 SubReactor 有自己的 EventLoop
+   - 每个 SubReactor 有自己的 connections_ map
+   - 不同 SubReactor 之间无共享数据，不需要锁
+
+2. SubReactor 内部需要锁的情况：
+   - connections_ 的读写（因为可能跨线程访问）
+   - 使用 shared_mutex 保护（读多写少场景）
+
+3. SubReactorPool 的 get_next_reactor()：
+   - 使用 atomic 实现无锁轮询
+   - 不会造成数据竞争
+
+4. MainReactor 和 SubReactor 之间的通信：
+   - add_connection() 是直接调用
+   - 当前实现：在 MainReactor 线程中调用
+   - 更好的做法：用 pending queue + wakeup（未来优化）
+```
+
+---
+
+## 10. 组件协作流程
+
+### 10.1 服务器启动流程
+
+```
+main()
+     │
+     ├── Logger 初始化
+     │
+     ├── 信号处理注册 (SIGINT/SIGTERM)
+     │
+     ├── SubReactorPool::init(cpu_count)
+     │        │
+     │        └── 创建 n 个 SubReactor
+     │        │
+     │        └── 每个 SubReactor 创建独立的 EventLoop
+     │
+     ├── SubReactorPool::start()
+     │        │
+     │        └── 每个 SubReactor 启动独立线程
+     │        └── 每个线程运行 EventLoop::loop()
+     │
+     ├── MainReactor::init(port)
+     │        │
+     │        └── 创建 listen socket
+     │        └── 创建 listen_channel
+     │        └── 注册到 MainReactor 的 EventLoop
+     │
+     └── MainReactor::start()
+              │
+              └── EventLoop::loop() (阻塞)
+```
+
+### 10.2 客户端连接流程
 
 ```
 客户端 connect()
-        │
-        ▼ TCP 三次握手
-┌─────────────────────────────────────┐
-│        EventLoop::loop()            │
-│   epoll_wait 检测到 socket 可读      │
-│                                     │
-│   socket->accept()                  │
-│           │                         │
-│           ▼                         │
-│   ┌──────────────┐                  │
-│   │  Connection  │  新建连接对象    │
-│   │  (客户端)    │                  │
-│   └──────┬───────┘                  │
-│          │                          │
-│          ▼                          │
-│   ┌──────────────┐                  │
-│   │    Channel   │  监听客户端 fd   │
-│   │  (客户端)    │                  │
-│   └──────────────┘                  │
-└─────────────────────────────────────┘
+         │
+         ▼ TCP 三次握手
+         │
+         ▼
+MainReactor EventLoop
+epoll_wait 返回 listen_fd 可读
+         │
+         ▼
+handle_accept()
+         │
+         ├── accept() 获取 client_fd
+         │
+         ├── SubReactorPool::get_next_reactor()
+         │        │
+         │        └── 轮询返回 SubReactor*
+         │
+         └── target_reactor->add_connection(client_fd)
+                  │
+                  ├── 创建 Connection
+                  ├── 设置 read/write/close 回调
+                  ├── 注册到 SubReactor 的 EventLoop
+                  └── 保存到 connections_
 ```
 
-### 6.3 数据收发流程
+### 10.3 数据读写流程（已连接客户端）
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    接收数据流程                          │
-├─────────────────────────────────────────────────────────┤
-│                                                         │
-│  客户端发送数据                                          │
-│         │                                               │
-│         ▼ TCP 数据到达内核缓冲区                         │
-│  ┌─────────────┐                                       │
-│  │    socket   │  recv() 从内核复制到用户态              │
-│  │   (recv)    │                                       │
-│  └──────┬──────┘                                       │
-│         │                                               │
-│         ▼                                               │
-│  ┌─────────────┐                                       │
-│  │input_buffer │  缓存数据                             │
-│  │   append()  │                                       │
-│  └─────────────┘                                       │
-│         │                                               │
-│         ▼ 业务层处理                                    │
-│  ┌─────────────┐                                       │
-│  │   业务逻辑   │  从 input_buffer 读取并处理           │
-│  └─────────────┘                                       │
-│                                                         │
-└─────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────┐
-│                    发送数据流程                          │
-├─────────────────────────────────────────────────────────┤
-│                                                         │
-│  业务层处理完成                                          │
-│         │                                               │
-│         ▼                                               │
-│  ┌─────────────┐                                       │
-│  │output_buffer│  send_response() 数据放入发送缓冲区    │
-│  │   append()  │                                       │
-│  └──────┬──────┘                                       │
-│         │                                               │
-│         ▼                                               │
-│  ┌─────────────┐                                       │
-│  │   Channel   │  enable_writing() 启用写事件           │
-│  └──────┬──────┘                                       │
-│         │                                               │
-│         ▼ epoll 通知可写                                │
-│  ┌─────────────┐                                       │
-│  │handle_write │  从 output_buffer 取出数据             │
-│  └──────┬──────┘                                       │
-│         │                                               │
-│         ▼                                               │
-│  ┌─────────────┐                                       │
-│  │   socket    │  send() 复制到内核发送缓冲区           │
-│  │   (send)    │                                       │
-│  └──────┬──────┘                                       │
-│         │                                               │
-│         ▼ TCP 传输                                      │
-│  客户端收到数据                                          │
-│                                                         │
-└─────────────────────────────────────────────────────────┘
+客户端 send(data)
+         │
+         ▼ TCP 数据到达内核
+         │
+         ▼
+SubReactor EventLoop
+epoll_wait 返回 client_fd 可读
+         │
+         ▼
+Connection::handle_read()
+         │
+         ├── socket.recv() 读取数据
+         │
+         ├── input_buffer_.append() 放入缓冲区
+         │
+         ├── resp_parser_.parse() 解析 RESP 协议
+         │
+         └── command_callback_(cmd, conn) 处理命令
+                  │
+                  ├── CommandFactory 创建命令
+                  │
+                  ├── 命令执行
+                  │
+                  └── conn->send_response() 放入 output_buffer
+                           │
+                           └── channel_->enable_writing()
+                                    │
+                                    ▼
+                           epoll_wait 返回可写
+                                    │
+                                    ▼
+                           Connection::handle_write()
+                                    │
+                                    └── socket.send() 发送数据
 ```
 
-### 6.4 完整请求处理流程
-
-```
-redis-cli 发送: SET key value
-        │
-        ▼
-┌───────────────────┐
-│   Socket 监听     │  端口 6379
-└─────────┬─────────┘
-          │
-          ▼
-┌───────────────────┐
-│  EventLoop        │  epoll_wait 等待
-│  accept()         │
-└─────────┬─────────┘
-          │
-          ▼
-┌───────────────────┐
-│   Connection      │  新建客户端连接
-│  handle_read()    │
-└─────────┬─────────┘
-          │
-          ▼
-┌───────────────────┐
-│  input_buffer     │  缓存 "SET key value\r\n"
-└─────────┬─────────┘
-          │
-          ▼
-┌───────────────────┐
-│  RESP 协议解析    │  解析命令（后续章节）
-└─────────┬─────────┘
-          │
-          ▼
-┌───────────────────┐
-│  CommandFactory    │  创建 SET 命令
-└─────────┬─────────┘
-          │
-          ▼
-┌───────────────────┐
-│  GlobalStorage     │  执行存储
-└─────────┬─────────┘
-          │
-          ▼
-┌───────────────────┐
-│  output_buffer    │  放入 "+OK\r\n"
-└─────────┬─────────┘
-          │
-          ▼
-┌───────────────────┐
-│  Channel          │  enable_writing()
-│  handle_write()   │
-└─────────┬─────────┘
-          │
-          ▼
-┌───────────────────┐
-│   Socket          │  send() 发送
-└─────────┬─────────┘
-          │
-          ▼
-redis-cli 收到: +OK
-```
-
-### 6.5 组件依赖关系
+### 10.4 组件依赖关系
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -815,16 +1171,23 @@ redis-cli 收到: +OK
 │                        │  EventLoop  │                      │
 │                        └──────┬──────┘                      │
 │                               │                             │
-│                        ┌──────▼──────┐                      │
-│                        │ Connection │                      │
-│                        └─────────────┘                      │
-│                                                             │
+│   ┌──────────────────────────┼──────────────────────────┐  │
+│   │                          │                          │  │
+│   ▼                          ▼                          ▼  │
+│ ┌──────────────┐     ┌──────────────┐           ┌──────────────┐
+│ │ MainReactor  │     │   SubReactor │           │  Connection  │
+│ └──────────────┘     └──────┬───────┘           └──────────────┘
+│                             │                             ▲
+│                        ┌────▼───────┐                      │
+│                        │SubReactor  │                      │
+│                        │   Pool     │                      │
+│                        └────────────┘                      │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 7. 常见问题解答
+## 11. 常见问题解答
 
 ### Q: 为什么要用非阻塞 socket？
 
@@ -864,7 +1227,7 @@ A：
 void (*callback)() = &my_function;
 
 // std::function：可以存储任意可调用对象
-std::function<void()> callback = []() { LOG_INFO("hello"); };
+std::function<void()> callback = []() { LOG_INFO(NETWORK, "hello"); };
 callback = &my_function;        // 也可以是函数指针
 callback = std::bind(&MyClass::method, &obj);  // 也可以是成员函数
 ```
@@ -873,135 +1236,161 @@ callback = std::bind(&MyClass::method, &obj);  // 也可以是成员函数
 
 A：直接 send() 可能因为内核缓冲区满而阻塞或返回部分发送。放入 output_buffer_ 后，等 epoll 通知"可写"时再发，handle_write() 会自动续传，确保数据完整发送。
 
+### Q: MainReactor 和 SubReactor 的区别是什么？
+
+A：
+| 组件 | 职责 | 线程数 | 监听对象 |
+|------|------|--------|----------|
+| MainReactor | 只处理 accept | 1 | listen socket |
+| SubReactor | 处理已连接 socket 的 I/O | 多个 | client socket |
+
+### Q: SubReactorPool 如何实现负载均衡？
+
+A：使用轮询（Round Robin）策略，通过原子的 `fetch_add` 实现无锁轮询。简单高效，连接均匀分布。
+
+### Q: SubReactor 内部的 shared_mutex 是什么时候用的？
+
+A：当需要在 SubReactor 线程之外访问 connections_ 时需要锁。例如主线程可能需要查看连接数等统计信息。
+
 ### Q: 如何处理高并发连接？
 
-A：本项目是单 Reactor 模式，适合低并发场景（< 10000 连接）。高并发需要：
-1. 多 Reactor 模式（主从 EventLoop）
-2. 线程池处理业务逻辑
-3. 使用 `EPOLLET` 边缘触发模式
+A：MainSubReactor 模式天然支持高并发：
+1. MainReactor 专门处理 accept，单线程即可
+2. 多个 SubReactor 并行处理 I/O
+3. CPU 多核充分利用
+4. 建议 SubReactor 数量等于 CPU 核心数
 
 ---
 
-## 8. 代码逻辑流程图
+## 12. 代码逻辑流程图
 
-### EventLoop 事件循环
+### MainSubReactor 服务器启动流程
 
 ```
 开始
   │
   ▼
-epoll_create1() 创建 epoll 实例
+SubReactorPool::init(n)
   │
   ▼
-create_wakeup_pipe() 创建唤醒管道
+for i in [0, n):
+  │
+  ├── SubReactor::create()
+  │     │
+  │     └── 创建 EventLoop
+  │
+  └── reactors_.push_back()
   │
   ▼
-注册 wakeup_fd 到 epoll
+SubReactorPool::start()
   │
   ▼
-while (!quit_)
+for reactor in reactors_:
   │
-  ├──▶ epoll_wait() 阻塞等待 100ms
-  │        │
-  │        ▼
-  │   有事件就绪？
-  │    │
-  │    ├── 否（超时）──▶ 继续等待
-  │    │
-  │    └── 是
-  │        │
-  │        ▼
-  │   遍历所有就绪事件
-  │    │
-  │    ▼
-  │   判断事件类型
-  │    │
-  │    ├── wakeup_fd ──▶ handle_wakeup()
-  │    │
-  │    └── 普通 fd ──▶ 查找 Channel
-  │                      │
-  │                      ▼
-  │                   handle_event()
-  │                      │
-  │                      ▼
-  │                   触发对应回调
-  │
-  └── quit_ == true？──▶ 退出循环
+  └── thread_->start()
         │
-        ▼
-结束
+        └── EventLoop::loop() (每个 SubReactor 线程)
+  │
+  ▼
+MainReactor::init(port)
+  │
+  ├── listen_socket.bind_and_listen()
+  │
+  ├── 创建 listen_channel
+  │
+  └── loop_->update_channel()
+  │
+  ▼
+MainReactor::start()
+  │
+  └── loop_->loop() (MainReactor 线程，阻塞)
 ```
 
-### Connection 数据收发
+### 新连接处理流程
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    读数据流程                            │
-├─────────────────────────────────────────────────────────┤
-│                                                         │
-│  handle_read() 被调用                                    │
-│         │                                               │
-│         ▼                                               │
-│  socket.recv() 从内核读取数据                            │
-│         │                                               │
-│         ▼                                               │
-│  bytes_read > 0？                                        │
-│    │                                                    │
-│    ├── 是                                               │
-│    │    │                                               │
-│    │    ▼                                               │
-│    │   input_buffer_.append() 数据放入缓冲区            │
-│    │    │                                               │
-│    │    ▼                                               │
-│    │   业务层处理（后续）                               │
-│    │                                                    │
-│    └── 否（bytes_read == 0）                           │
-│         │                                               │
-│         ▼                                               │
-│        对方关闭 close()                                  │
-│                                                         │
-└─────────────────────────────────────────────────────────┘
+客户端 connect()
+         │
+         ▼
+MainReactor epoll_wait 返回
+         │
+         ▼
+handle_accept()
+         │
+         ▼
+循环 accept():
+         │
+         ├── client_fd = accept()
+         │
+         ├── client_fd >= 0 ?
+         │    │
+         │    ├── 是
+         │    │    │
+         │    │    ▼
+         │    │   add_new_connection()
+         │    │    │
+         │    │    ├── fcntl O_NONBLOCK
+         │    │    │
+         │    │    ├── SubReactorPool::get_next_reactor()
+         │    │    │
+         │    │    └── reactor->add_connection()
+         │    │         │
+         │    │         ▼
+         │    │    [SubReactor 线程]
+         │    │         │
+         │    │         ├── 创建 Connection
+         │    │         │
+         │    │         ├── 注册到 EventLoop
+         │    │         │
+         │    │         └── 保存到 connections_
+         │    │
+         │    └── 继续循环
+         │
+         └── 否 (EAGAIN) ──▶ 退出循环
+```
 
-┌─────────────────────────────────────────────────────────┐
-│                    写数据流程                            │
-├─────────────────────────────────────────────────────────┤
-│                                                         │
-│  send_response(data, len) 被调用                        │
-│         │                                               │
-│         ▼                                               │
-│  output_buffer_.append() 数据放入缓冲区                  │
-│         │                                               │
-│         ▼                                               │
-│  channel_->enable_writing() 启用写事件                   │
-│         │                                               │
-│         ▼                                               │
-│  epoll_wait 返回 socket 可写                             │
-│         │                                               │
-│         ▼                                               │
-│  handle_write() 被调用                                  │
-│         │                                               │
-│         ▼                                               │
-│  output_buffer_.readable_bytes() == 0？                 │
-│    │                                                    │
-│    ├── 是：禁用写事件，只保留读事件                       │
-│    │                                                    │
-│    └── 否                                               │
-│         │                                               │
-│         ▼                                               │
-│    socket.send() 发送数据                                │
-│         │                                               │
-│         ▼                                               │
-│    output_buffer_.retrieve() 移动读指针                  │
-│         │                                               │
-│         ▼                                               │
-│    还需要继续发送？──▶ 启用写事件，等待下次               │
-│                                                         │
-└─────────────────────────────────────────────────────────┘
+### SubReactor 连接关闭流程
+
+```
+客户端 close()
+         │
+         ▼ TCP 四次挥手
+         │
+         ▼
+SubReactor epoll_wait 返回
+         │
+         ▼
+Channel::handle_event()
+         │
+         ▼
+EPOLLHUP | EPOLLRDHUP 触发
+         │
+         ▼
+close_callback_()
+         │
+         ▼
+SubReactor::handle_close(conn)
+         │
+         ▼
+remove_connection(conn)
+         │
+         ├── loop_->remove_channel()
+         │
+         ├── connections_.erase(fd)
+         │
+         └── connection_count_--
+         │
+         ▼
+Connection::~Connection()
+         │
+         ├── delete channel_
+         │
+         └── Socket::~Socket() ──> close(fd)
 ```
 
 ---
 
-## 9. 进一步学习建议
+## 13. 进一步学习建议
 
 1. **Linux 网络编程**：
    - 《Linux 高性能服务器编程》游静等
@@ -1018,8 +1407,10 @@ while (!quit_)
 4. **Reactor 模式**：
    - 研究 libevent、libuv 的实现
    - 理解单 Reactor vs 多 Reactor 的权衡
+   - 理解 Main-SubReactor vs 半同步半异步模式
 
 5. **项目实践**：
-   - 尝试添加一个 DEL 命令
+   - 尝试添加连接超时关闭功能
+   - 研究 SubReactor 负载均衡优化
+   - 实现 pending queue 替代直接调用
    - 研究 Redis 6.0 的多线程 IO
-   - 实现简单的连接超时关闭

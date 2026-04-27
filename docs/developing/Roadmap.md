@@ -23,15 +23,15 @@
   ├── ✅ CommandFactory
   └── ✅ GlobalStorage + GET/SET/DEL/EXISTS
 
-2026-04-24 ─── V2 基础版本开始
-  ├── 🔄 Logger（Sink + 模块 + 热加载）
-  ├── 🔄 Config（观察者 + 热加载接口）
+2026-04-24 ~ 04-27 ─── V2 基础版本开发
+  ├── ✅ Logger（Sink + 模块 + 热加载）
+  ├── ✅ Config（观察者 + 热加载接口）
   ├── ✅ Format（统一格式化工具）
-  ├── 📋 Signal（SIGSEGV堆栈 + SIGPIPE）
-  ├── 📋 锁机制（Mutex/SpinLock/RWLock）
-  ├── 📋 内存池（三级分层）
+  ├── ✅ Signal（SIGSEGV堆栈 + SIGPIPE）
+  ├── ✅ 锁机制（Mutex/SpinLock/RWLock/RWLock2/Semaphore等）
+  ├── ✅ 内存池（三级分层：ThreadCache/CentralCache/PageCache）
+  ├── ✅ MainSubReactor（MainReactor + SubReactor + SubReactorPool）
   ├── 📋 线程池
-  ├── 📋 MainSubReactor
   ├── 📋 分段锁哈希表
   ├── 📋 过期字典 + LRU
   └── 📋 命令增强
@@ -109,125 +109,66 @@ C++ 标准库自带
 
 ## V2 基础版本开发记录
 
-**开发周期**：2026-04-24 开始（预计4-6周）
+**开发周期**：2026-04-24 开始
 
 **目标**：完善基础工具，添加内存池、线程池、缓存核心功能
 
 ### 当前进度
 
 ```
-Logger        ████████████████████░░░░  90%
-Config        ████████████░░░░░░░░░░░░  50%
-Format        ████████████████████████  100%
-Signal        ░░░░░░░░░░░░░░░░░░░░░░  0%
-锁机制        ░░░░░░░░░░░░░░░░░░░░░░  0%
-内存池        ░░░░░░░░░░░░░░░░░░░░░░  0%
-线程池        ░░░░░░░░░░░░░░░░░░░░░░  0%
-MainSubReactor ░░░░░░░░░░░░░░░░░░░░░░  0%
-分段锁哈希表  ░░░░░░░░░░░░░░░░░░░░░░  0%
-过期字典+LRU  ░░░░░░░░░░░░░░░░░░░░░░  0%
-命令增强      ░░░░░░░░░░░░░░░░░░░░░░  0%
+Logger        ████████████████████████████  100%
+Config        ████████████████████████████  100%
+Format        ████████████████████████████  100%
+Signal        ████████████████████████████  100%
+锁机制        ████████████████████████████  100%  ✅
+内存池        ████████████████████████████  100%  ✅
+MainSubReactor ████████████████████████████  100%  ✅
+线程池        ░░░░░░░░░░░░░░░░░░░░░░░  0%
+分段锁哈希表  ░░░░░░░░░░░░░░░░░░░░░░░░  0%
+过期字典+LRU  ░░░░░░░░░░░░░░░░░░░░░░░░  0%
+命令增强      ░░░░░░░░░░░░░░░░░░░░░░░░  0%
 ```
 
 ### 已完成模块详解
 
-#### ✅ Format（2026-04-24）
+#### ✅ 锁机制（2026-04-26）
 
 **为什么做**：
 ```
-- 统一格式化逻辑，避免散落各处
-- 时间戳、线程ID 可复用
-- Logger 只管队列，Format 管格式化
+- 多线程访问共享资源需要同步
+- 标准库 mutex 功能有限
+- 需要多种锁类型应对不同场景
 ```
 
 **核心功能**：
 ```cpp
-class Format {
-    static std::string format(const char* fmt, ...);  // 可变参数格式化
-    static std::string timestamp();                    // 毫秒精度时间戳
-    static std::string threadId();                    // 线程ID
-};
+// 原子操作
+AtomicInteger counter(0);
+counter.fetch_add(1);
+
+// 互斥锁（支持超时）
+Mutex mutex;
+mutex.try_lock_for(std::chrono::milliseconds(100));
+
+// 自旋锁（适合极短临界区）
+SpinLock spinlock;
+SpinLockGuard guard(spinlock);
+
+// 读写锁（读多写少场景）
+RWLock rwlock;
+RWLockReadGuard reader(rwlock);   // 多个读可以并发
+RWLockWriteGuard writer(rwlock);  // 写必须独占
+
+// 分片锁（减少锁竞争）
+ShardedLock<SpinLock> sharded_locks(16);
+
+// 信号量（控制并发数量）
+Semaphore sem(3);  // 最多3个线程同时访问
 ```
 
-#### 🔄 Logger（2026-04-24，代码完成待测试）
+**文件**：`src/base/lock.h`, `src/base/lock.cpp`
 
-**为什么重构**：
-```
-V1问题：
-- 只有控制台输出，重启后日志消失
-- 无法按模块过滤（日志混在一起）
-- 日志级别写死，无法动态调整
-
-V2解决方案：
-- Sink 抽象：可自由组合输出（控制台+文件+...）
-- 模块支持：[NETWORK] [CACHE] [STORAGE] 分类
-- 热加载：配置文件改了就自动更新级别
-```
-
-**架构设计**：
-```
-Logger（单例）
-    │
-    ├── 队列（线程安全）
-    │
-    └── 后台线程（批量消费）
-            │
-            ├── ConsoleSink（控制台）
-            ├── FileSink（文件，支持轮转）
-            └── 未来可以加：网络发送、syslog...
-```
-
-**输出格式**：
-```
-[LEVEL] timestamp [MODULE] [THREAD_ID] message
-[INFO] 2026-04-24 15:30:00.123 [NETWORK] [12345] connection accepted fd=5
-```
-
-#### 🔄 Config（2026-04-24，代码完成待测试）
-
-**为什么增强**：
-```
-V1问题：
-- 配置加载后无法动态修改
-- 没有观察者模式，Config变化时无法通知相关模块
-
-V2解决方案：
-- ConfigObserver 接口：观察者模式
-- reload() 方法：热加载
-- 所有操作加锁：线程安全
-```
-
-**核心设计**：
-```cpp
-class ConfigObserver {
-    virtual void onConfigChange(key, value) = 0;
-};
-
-// 使用
-Config::instance().addObserver("log_level", &Logger::instance());
-
-// 配置变化时自动通知
-void Config::reload() {
-    // 重新读取文件
-    // 通知所有观察者
-}
-```
-
-### 待开发模块
-
-#### 📋 Signal（V2 计划）
-
-**要做的事**：
-```
-1. SIGSEGV 处理：崩溃时打印堆栈信息
-   - 使用 libunwind 或 glibc 的 backtrace
-   - 输出函数调用栈，帮助定位问题
-
-2. SIGPIPE 忽略：避免向关闭连接写入崩溃
-   - signal(SIGPIPE, SIG_IGN)
-```
-
-#### 📋 内存池（三级分层）
+#### ✅ 内存池（2026-04-27）
 
 **为什么做**：
 ```
@@ -244,19 +185,88 @@ malloc/free 的问题：
 
 **架构设计**：
 ```
-ThreadCache（每线程独立）
-    │
-    │ 批量获取/归还
-    ▼
-CentralCache（全局共享）
-    │
-    │ 按页申请/释放
-    ▼
-PageCache（向系统申请）
-    │
-    ▼
-系统内存（mmap/brk）
+┌─────────────────────────────────────────────────────────────┐
+│                    ThreadCache（第一层）                      │
+│  线程本地缓存，无锁分配，极快                                 │
+│  每个线程独立，分配时不需要任何锁                              │
+└───────────────────────────────┬─────────────────────────────┘
+                                │ 缓存不够时，批量获取
+                                ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    CentralCache（第二层）                    │
+│  中心缓存，细粒度锁                                          │
+│  所有线程共享，每个SizeClass独立锁                             │
+└───────────────────────────────┬─────────────────────────────┘
+                                │ Span不够时
+                                ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    PageCache（第三层）                       │
+│  页缓存，直接和系统交互                                       │
+│  管理4KB页，Span合并减少碎片                                  │
+└───────────────────────────────┬─────────────────────────────┘
+                                │
+                                ▼
+                         系统（mmap/munmap）
 ```
+
+**文件**：
+- `src/memorypool/size_class.h/cpp` - 大小分类
+- `src/memorypool/free_list.h/cpp` - 空闲链表
+- `src/memorypool/span.h/cpp` - Span和SpanList
+- `src/memorypool/page_cache.h/cpp` - PageCache
+- `src/memorypool/central_cache.h/cpp` - CentralCache
+- `src/memorypool/thread_cache.h/cpp` - ThreadCache
+
+#### ✅ MainSubReactor（2026-04-27）
+
+**为什么做**：
+```
+单Reactor问题：
+- 只能用到一个CPU核心
+- 8核CPU服务器，只有1核在工作
+
+MainSubReactor解决方案：
+- MainReactor：只处理accept（单线程）
+- SubReactor池：处理I/O（多线程）
+- 连接均匀分发到各个SubReactor
+```
+
+**架构设计**：
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                          MainReactor                                   │
+│                      (独立线程 0)                                        │
+│  ┌─────────────────────────────────────────────────────────────────┐  │
+│  │  EventLoop                                                       │  │
+│  │    listen_channel ──▶ [epoll_wait] ──▶ handle_accept()          │  │
+│  │    accept() ──▶ add_new_connection() ──▶ SubReactorPool         │  │
+│  └─────────────────────────────────────────────────────────────────┘  │
+└───────────────────────────────────────────────────────────────────────┬─┘
+                                                                          │
+                                          新连接分配 (Round Robin)         │
+                                                                          │
+        ┌────────────────────────────────────────────────────────────────┘
+        │
+        ▼
+┌───────────────────┬───────────────────┬───────────────────┐
+│   SubReactor 0   │   SubReactor 1   │   SubReactor 2   │  ...
+│   (独立线程)      │   (独立线程)      │   (独立线程)      │
+├───────────────────┼───────────────────┼───────────────────┤
+│  EventLoop 0     │  EventLoop 1     │  EventLoop 2     │
+│  ┌─────────────┐ │ ┌─────────────┐ │ ┌─────────────┐  │
+│  │ connections │ │ │ connections │ │ │ connections │  │
+│  └─────────────┘ │ └─────────────┘ │ └─────────────┘  │
+└───────────────────┴─────────────────┴─────────────────┘
+```
+
+**文件**：
+- `src/network/main_reactor.h/cpp` - MainReactor
+- `src/network/sub_reactor.h/cpp` - SubReactor
+- `src/network/sub_reactor_pool.h/cpp` - SubReactorPool
+
+---
+
+### 待开发模块
 
 #### 📋 线程池
 
@@ -281,34 +291,6 @@ PageCache（向系统申请）
   │                             │              工作线程2
   │◄─── 返回 future ──────────┘              工作线程3
   │                                         工作线程4
-```
-
-#### 📋 MainSubReactor
-
-**为什么做**：
-```
-单Reactor问题：
-- 只能用到一个CPU核心
-- 8核CPU服务器，只有1核在工作
-
-MainSubReactor解决方案：
-- MainReactor：只处理accept（单线程）
-- SubReactor池：处理I/O（多线程）
-- 连接均匀分发到各个SubReactor
-```
-
-**架构设计**：
-```
-MainReactor（主线程）
-    │
-    │ accept()
-    ▼
-轮询分发到 SubReactor 池
-    │
-    ├── SubReactor 1 ──► 处理 0-499 连接
-    ├── SubReactor 2 ──► 处理 500-999 连接
-    ├── SubReactor 3 ──► 处理 1000-1499 连接
-    └── SubReactor 4 ──► 处理 1500-1999 连接
 ```
 
 #### 📋 分段锁哈希表
@@ -432,7 +414,7 @@ Logger        ██████████████████████
 ```markdown
 | 日期 | 模块 | 状态 | 做了什么 |
 |------|------|------|---------|
-| 2026-04-25 | xxx | ✅ | 完成xxx功能 |
+| 2026-04-27 | xxx | ✅ | 完成xxx功能 |
 ```
 
 ### 3. 补充模块详解
@@ -460,4 +442,8 @@ Logger        ██████████████████████
 | 日期 | 版本 | 更新内容 |
 |------|------|---------|
 | 2026-04-24 之前 | V1 | 完成骨架版本所有模块 |
-| 2026-04-24 | V2 | Format + Logger重构 + Config增强（代码完成） |
+| 2026-04-24 | V2 | Format + Logger重构 + Config增强 |
+| 2026-04-25 | V2 | Signal增强（SIGSEGV堆栈 + SIGPIPE忽略）|
+| 2026-04-26 | V2 | 锁机制完成（Mutex/SpinLock/RWLock等）|
+| 2026-04-27 | V2 | 内存池三级架构完成 |
+| 2026-04-27 | V2 | MainSubReactor多线程网络模型完成 |
