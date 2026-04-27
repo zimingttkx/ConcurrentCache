@@ -28,6 +28,12 @@ add_executable(concurrentcache-server ${SOURCES}
         src/base/lock.h
         src/base/lock.cpp
         src/memorypool/memory_pool.h
+        src/network/sub_reactor.h
+        src/network/sub_reactor.cpp
+        src/network/sub_reactor_pool.h
+        src/network/sub_reactor_pool.cpp
+        src/network/main_reactor.h
+        src/network/main_reactor.cpp
 )
 
 if(UNIX)
