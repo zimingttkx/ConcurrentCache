@@ -25,6 +25,11 @@ namespace cc_server {
         error_cb_ = std::move(cb);
     }
 
+    // 设置关闭事件回调
+    void Channel::set_close_callback(CloseCallback cb) {
+        close_callback_ = std::move(cb);
+    }
+
     // 启用读事件：位或 EPOLLIN 到 events_，调用 update() 注册到 epoll
     void Channel::enable_reading() {
         events_ |= EPOLLIN;
@@ -57,9 +62,15 @@ namespace cc_server {
             }
         }
 
-        if (triggered_events_ & (EPOLLERR | EPOLLHUP)) {
+        if (triggered_events_ & EPOLLERR) {
             if (error_cb_) {
                 error_cb_();
+            }
+        }
+
+        if (triggered_events_ & (EPOLLHUP | EPOLLRDHUP)) {
+            if (close_callback_) {
+                close_callback_();
             }
         }
     }

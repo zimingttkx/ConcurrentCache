@@ -31,6 +31,7 @@ namespace cc_server {
         Buffer output_buffer_;
         RespParser resp_parser_; // RESP 协议解析器
         CommandCallback command_callback_; // 命令处理回调函数
+        std::function<void()> close_callback_; // 连接关闭回调函数
 
     public:
         Connection(int client_fd, EventLoop* loop);
@@ -54,8 +55,23 @@ namespace cc_server {
             command_callback_ = std::move(cb);
         }
 
+        [[nodiscard]]Channel* channel() const {
+            return channel_;
+        }
+
         // 获取 fd
         [[nodiscard]] int fd() const;
+
+        void set_read_callback(std::function<void()> cb) {
+            channel_->set_read_callback(std::move(cb));
+        }
+
+        void set_write_callback(std::function<void()> cb) {
+            channel_->set_write_callback(std::move(cb));
+        }
+        void set_close_callback(std::function<void()> cb) {
+            close_callback_ = std::move(cb);
+        }
     };
 }
 

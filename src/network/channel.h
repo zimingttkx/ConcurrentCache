@@ -22,6 +22,7 @@ namespace cc_server {
         using ReadCallback  = std::function<void()>;
         using WriteCallback = std::function<void()>;
         using ErrorCallback = std::function<void()>;
+        using CloseCallback = std::function<void()>;
 
     private:
         EventLoop* loop_;
@@ -31,6 +32,7 @@ namespace cc_server {
         ReadCallback  read_cb_;
         WriteCallback write_cb_;
         ErrorCallback error_cb_;
+        CloseCallback close_callback_;
 
     public:
 
@@ -44,6 +46,7 @@ namespace cc_server {
         void set_read_callback(ReadCallback cb);
         void set_write_callback(WriteCallback cb);
         void set_error_callback(ErrorCallback cb);
+        void set_close_callback(CloseCallback cb);
 
         // 设置监听事件
         void enable_reading();
