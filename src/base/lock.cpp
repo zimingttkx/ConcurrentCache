@@ -649,4 +649,7 @@ std::vector<RWLock>& ShardedRWLock::shards() {
     return shards_;
 }
 
+// 显式实例化 LockGuard
+template class LockGuard<Mutex>;
+
 }  // namespace cc_server

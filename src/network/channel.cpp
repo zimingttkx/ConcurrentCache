@@ -86,4 +86,8 @@ namespace cc_server {
     void Channel::set_triggered_events(uint32_t events) {
         triggered_events_ = events;
     }
+
+    void Channel::update() {
+        loop_->update_channel(this);
+    }
 }
