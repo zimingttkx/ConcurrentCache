@@ -21,11 +21,12 @@
 #include <vector>
 #include "span.h"
 #include "size_class.h"
-#include "lock.h"
+#include "base/lock.h"
 
 namespace cc_server {
+    class Mutex;
 
-class CentralCache {
+    class CentralCache {
 public:
     // 获取单例实例
     static CentralCache& get_instance();
@@ -45,11 +46,7 @@ public:
     void deallocate(void* obj, size_t class_index);
 
 private:
-    CentralCache() {
-        // 初始化SpanLists和locks
-        span_lists_.resize(SizeClass::kNumClasses);
-        locks_.resize(SizeClass::kNumClasses);
-    }
+    CentralCache() = default;
 
     // 禁用拷贝
     CentralCache(const CentralCache&) = delete;
@@ -63,10 +60,10 @@ private:
     Span* fetch_from_page_cache(size_t class_index);
 
     // 每个SizeClass有独立的SpanList
-    std::vector<SpanList> span_lists_;
+    std::vector<SpanList> span_lists_{SizeClass::kNumClasses};
 
     // 每个SizeClass有独立的锁（细粒度锁）
-    std::vector<Mutex> locks_;
+    std::vector<Mutex> locks_{SizeClass::kNumClasses};
 };
 
 } // namespace cc_server

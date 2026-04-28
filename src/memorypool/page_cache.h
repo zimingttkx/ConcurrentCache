@@ -17,7 +17,7 @@
 #include <cstddef>
 #include <map>
 #include "span.h"
-#include "lock.h"
+#include "base/lock.h"
 
 namespace cc_server {
 

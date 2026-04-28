@@ -4,8 +4,8 @@
 //
 
 #include "page_cache.h"
-#include <sys/mman.h>  // mmap, munmap
-#include <unistd.h>     // getpagesize
+#include <sys/mman.h>
+#include <unistd.h>
 
 namespace cc_server {
 
@@ -34,17 +34,17 @@ Span* PageCache::allocate_span(size_t num_pages) {
 
     // 步骤2：尝试分裂更大的Span
     // 遍历所有更大的Span列表
-    for (auto it = free_span_lists_.lower_bound(num_pages + 1);
-         it != free_span_lists_.end();
-         ++it) {
+    for (auto it2 = free_span_lists_.lower_bound(num_pages + 1);
+         it2 != free_span_lists_.end();
+         ++it2) {
 
-        if (it->second.empty()) {
+        if (it2->second.empty()) {
             continue;  // 这个大小的链表是空的，继续找下一个
         }
 
         // 找到一个更大的Span
-        Span* big_span = it->second.front();
-        it->second.remove(big_span);
+        Span* big_span = it2->second.front();
+        it2->second.remove(big_span);
 
         // 计算分裂后剩余的页数
         size_t remaining_pages = big_span->num_pages_ - num_pages;
