@@ -88,7 +88,7 @@ void CentralCache::deallocate(void* obj, size_t class_index) {
 
     if (span->free_count_ == span_total_objects) {
         // 全部空闲，从SpanList移除
-        span_list(class_index).remove(span);
+        span_lists_[class_index].remove(span);
 
         // 归还给PageCache
         span->free_list_ = nullptr;
