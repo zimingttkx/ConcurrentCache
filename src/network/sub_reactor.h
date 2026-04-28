@@ -20,7 +20,7 @@ public:
     SubReactor(const SubReactor&) = delete;
     SubReactor& operator=(const SubReactor&) = delete;
 
-    // ========== 核心功能 ==========
+    // 核心功能
 
     // 启动SubReactor的事件循环（在独立线程中运行）
     void start();

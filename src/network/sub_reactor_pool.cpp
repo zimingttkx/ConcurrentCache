@@ -31,7 +31,7 @@ namespace cc_server {
     }
 
     SubReactor* SubReactorPool::get_next_reactor() {
-        // ========== 轮询策略 ==========
+        // 轮询策略
         // atomically fetch and add
         size_t index = next_index_.fetch_add(1, std::memory_order_relaxed);
         return reactors_[index % reactors_.size()].get();

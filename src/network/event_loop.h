@@ -84,7 +84,7 @@ namespace cc_server {
         EventLoop(const EventLoop&) = delete;
         EventLoop& operator = (const EventLoop&) = delete;
 
-        // ==================== 核心功能：事件循环 ====================
+        // 核心功能：事件循环
         /**
          * @brief 启动事件循环（主循环）
          *
@@ -118,7 +118,7 @@ namespace cc_server {
 
         void quit();
 
-        // ==================== Channel管理 ====================
+        // Channel管理
         /**
          * @brief 添加新Channel或更新已有Channel到epoll
          *
@@ -154,7 +154,7 @@ namespace cc_server {
          */
        void remove_channel(Channel* channel);
 
-       // ==================== 跨线程唤醒 ====================
+       // 跨线程唤醒
        /**
         * @brief 唤醒EventLoop（用于其他线程通知主线程）
         *

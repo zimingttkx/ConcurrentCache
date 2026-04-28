@@ -34,6 +34,8 @@ add_executable(concurrentcache-server ${SOURCES}
         src/network/sub_reactor_pool.cpp
         src/network/main_reactor.h
         src/network/main_reactor.cpp
+        src/base/thread_pool.h
+        src/base/thread_pool.cpp
 )
 
 if(UNIX)

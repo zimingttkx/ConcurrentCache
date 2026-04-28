@@ -17,7 +17,7 @@ PageCache& PageCache::get_instance() {
 Span* PageCache::allocate_span(size_t num_pages) {
     MutexGuard lock(mutex_);
 
-    // ========== 步骤1：在空闲链表中查找 ==========
+    // 步骤1：在空闲链表中查找
     auto it = free_span_lists_.find(num_pages);
     if (it != free_span_lists_.end() && !it->second.empty()) {
         // 找到了！从链表中取出第一个Span
@@ -32,7 +32,7 @@ Span* PageCache::allocate_span(size_t num_pages) {
         return span;
     }
 
-    // ========== 步骤2：尝试分裂更大的Span ==========
+    // 步骤2：尝试分裂更大的Span
     // 遍历所有更大的Span列表
     for (auto it = free_span_lists_.lower_bound(num_pages + 1);
          it != free_span_lists_.end();
@@ -76,7 +76,7 @@ Span* PageCache::allocate_span(size_t num_pages) {
         return big_span;
     }
 
-    // ========== 步骤3：真的没有，向系统申请 ==========
+    // 步骤3：真的没有，向系统申请
     size_t page_size = getpagesize();  // 通常是4096字节（4KB）
     size_t bytes = num_pages * page_size;
 
@@ -116,7 +116,7 @@ void PageCache::free_span(Span* span) {
 }
 
 Span* PageCache::coalesce_span(Span* span) {
-    // ========== 尝试向前合并 ==========
+    // 尝试向前合并
     // 检查前面的页是否有Span
     while (true) {
         // 计算前一个页的页号
@@ -153,7 +153,7 @@ Span* PageCache::coalesce_span(Span* span) {
         delete prev_span;
     }
 
-    // ========== 尝试向后合并 ==========
+    // 尝试向后合并
     // 检查后面的页是否有Span
     while (true) {
         // 计算后一个页的页号

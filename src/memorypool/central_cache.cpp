@@ -20,7 +20,7 @@ void* CentralCache::allocate(size_t class_index) {
 
     SpanList& span_list = span_lists_[class_index];
 
-    // ========== 步骤1：从SpanList获取对象 ==========
+    // 步骤1：从SpanList获取对象
     if (!span_list.empty()) {
         Span* span = span_list.front();
 
@@ -37,7 +37,7 @@ void* CentralCache::allocate(size_t class_index) {
         span_list.remove(span);
     }
 
-    // ========== 步骤2：从PageCache获取新Span ==========
+    // 步骤2：从PageCache获取新Span
     Span* span = fetch_from_page_cache(class_index);
     if (span == nullptr) {
         return nullptr;  // 获取失败

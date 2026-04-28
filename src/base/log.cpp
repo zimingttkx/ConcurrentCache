@@ -7,7 +7,7 @@
 
 namespace cc_server {
 
-// ==================== ConsoleSink 实现 ====================
+// ConsoleSink 实现
 
 /**
  * @brief 控制台写入
@@ -34,7 +34,7 @@ void ConsoleSink::flush() {
     std::cout.flush();
 }
 
-// ==================== FileSink 实现 ====================
+// FileSink 实现
 
 /**
  * @brief 构造函数 - 打开文件
@@ -49,7 +49,7 @@ FileSink::FileSink(const std::string& filepath, size_t maxSize, int maxFiles)
     , maxSize_(maxSize)
     , maxFiles_(maxFiles)
 {
-    // ==================== 确保目录存在 ====================
+    // 确保目录存在
     // 为什么要检查目录？
     // - 如果路径是 ./logs/app.log，./logs 目录可能不存在
     // - 直接 open 会失败
@@ -69,7 +69,7 @@ FileSink::FileSink(const std::string& filepath, size_t maxSize, int maxFiles)
         system(cmd.c_str());
     }
 
-    // ==================== 打开文件 ====================
+    // 打开文件
     // ios::app = 追加模式，新内容写到文件末尾
     // ios::out = 写模式
     // 两者组合：追加写入，不会覆盖之前的内容
@@ -214,7 +214,7 @@ void FileSink::cleanup() {
     }
 }
 
-// ==================== Logger 实现 ====================
+// Logger 实现
 
 /**
  * @brief 构造函数 - 初始化 Logger
@@ -425,7 +425,7 @@ void Logger::log(const char* module, LogLevel level, const char* fmt, ...) {
     // 如果 level < level_，说明级别太低，忽略
     if (level < level_) return;
 
-    // ========== 格式化 ==========
+    // 格式化
 
     char buffer[4096];
     va_list args;
@@ -433,11 +433,11 @@ void Logger::log(const char* module, LogLevel level, const char* fmt, ...) {
     vsnprintf(buffer, sizeof(buffer), fmt, args);
     va_end(args);
 
-    // ========== 完整格式化 ==========
+    // 完整格式化
 
     std::string message = formatMessage(module, level, buffer);
 
-    // ========== 入队 ==========
+    // 入队
 
     {
         // 加锁保护队列
@@ -476,7 +476,7 @@ void Logger::writerThread() {
     batch.reserve(100);
 
     while (true) {
-        // ========== 第一阶段：从队列取数据 ==========
+        // 第一阶段：从队列取数据
 
         {
             // unique_lock 用于 condition variable
@@ -503,7 +503,7 @@ void Logger::writerThread() {
             }
         } // 锁在这里释放
 
-        // ========== 第二阶段：写出日志 ==========
+        // 第二阶段：写出日志
 
         // 如果队列是空的
         if (batch.empty()) {

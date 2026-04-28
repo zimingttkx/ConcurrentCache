@@ -11,7 +11,7 @@
 
 namespace cc_server {
 
-// ==================== ConfigObserver 接口 ====================
+// ConfigObserver 接口
 
 /**
  * @brief 配置观察者接口
@@ -38,7 +38,7 @@ public:
     virtual void onConfigChange(const std::string& key, const std::string& value) = 0;
 };
 
-// ==================== Config 类 ====================
+// Config 类
 
 /**
  * @brief Config类：配置文件解析器

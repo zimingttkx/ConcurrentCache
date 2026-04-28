@@ -2,9 +2,7 @@
 
 namespace cc_server {
 
-// ============================================================
 // AtomicInteger 实现
-// ============================================================
 AtomicInteger::AtomicInteger(int initial_value) noexcept : value_(initial_value) {}
 
 int AtomicInteger::load() const noexcept {
@@ -81,9 +79,7 @@ AtomicInteger::operator int() const noexcept {
     return load();
 }
 
-// ============================================================
 // AtomicPointer 实现
-// ============================================================
 template<typename T>
 AtomicPointer<T>::AtomicPointer(T* ptr) noexcept : ptr_(ptr) {}
 
@@ -124,9 +120,7 @@ T* AtomicPointer<T>::operator->() const noexcept {
 template class AtomicPointer<void>;
 template class AtomicPointer<char>;
 
-// ============================================================
 // Mutex 实现
-// ============================================================
 Mutex::Mutex() = default;
 
 void Mutex::lock() {
@@ -172,9 +166,7 @@ void Mutex::unlock() {
     cv_.notify_one();
 }
 
-// ============================================================
 // SpinLock 实现
-// ============================================================
 SpinLock::SpinLock() = default;
 
 void SpinLock::lock() {
@@ -211,9 +203,7 @@ void SpinLock::unlock() {
     flag_.clear(std::memory_order_release);
 }
 
-// ============================================================
 // RecursiveMutex 实现
-// ============================================================
 RecursiveMutex::RecursiveMutex() = default;
 
 void RecursiveMutex::lock() {
@@ -257,9 +247,7 @@ void RecursiveMutex::unlock() {
     }
 }
 
-// ============================================================
 // RWLock 实现
-// ============================================================
 RWLock::RWLock() = default;
 
 void RWLock::read_lock() {
@@ -310,9 +298,7 @@ bool RWLock::try_write_lock_for(const std::chrono::duration<Rep, Period>& durati
     return false;
 }
 
-// ============================================================
 // RWLock2 实现
-// ============================================================
 RWLock2::RWLock2() : readers_(0), writers_waiting_(0), writer_active_(false) {}
 
 void RWLock2::read_lock() {
@@ -379,9 +365,7 @@ int RWLock2::num_writers_waiting() const {
     return writers_waiting_;
 }
 
-// ============================================================
 // LockGuard 实现
-// ============================================================
 template<typename Lockable>
 LockGuard<Lockable>::LockGuard(Lockable& lock) : lock_(lock), owned_(true) {
     lock_.lock();
@@ -410,9 +394,7 @@ LockGuard<Lockable>::operator bool() const {
     return owned_;
 }
 
-// ============================================================
 // TryLockGuard 实现
-// ============================================================
 template<typename Lockable>
 TryLockGuard<Lockable>::TryLockGuard(Lockable& lock) : lock_(lock), owned_(lock.try_lock()) {}
 
@@ -441,9 +423,7 @@ void TryLockGuard<Lockable>::unlock() {
     }
 }
 
-// ============================================================
 // ReadLockGuard 实现
-// ============================================================
 template<typename Lockable>
 ReadLockGuard<Lockable>::ReadLockGuard(Lockable& lock) : lock_(lock), owned_(true) {
     lock_.read_lock();
@@ -472,9 +452,7 @@ ReadLockGuard<Lockable>::operator bool() const {
     return owned_;
 }
 
-// ============================================================
 // WriteLockGuard 实现
-// ============================================================
 template<typename Lockable>
 WriteLockGuard<Lockable>::WriteLockGuard(Lockable& lock) : lock_(lock), owned_(true) {
     lock_.write_lock();
@@ -503,9 +481,7 @@ WriteLockGuard<Lockable>::operator bool() const {
     return owned_;
 }
 
-// ============================================================
 // Semaphore 实现
-// ============================================================
 Semaphore::Semaphore(int initial_count)
     : count_(initial_count), max_count_(initial_count) {}
 
@@ -557,9 +533,7 @@ int Semaphore::count() const {
     return count_;
 }
 
-// ============================================================
 // CountDownLatch 实现
-// ============================================================
 CountDownLatch::CountDownLatch(int count) : count_(count) {}
 
 void CountDownLatch::wait() {
@@ -590,9 +564,7 @@ int CountDownLatch::count() const {
     return count_;
 }
 
-// ============================================================
 // CyclicBarrier 实现
-// ============================================================
 CyclicBarrier::CyclicBarrier(int parties)
     : parties_(parties), count_(parties), generation_(0) {}
 
@@ -626,9 +598,7 @@ int CyclicBarrier::waiting() const {
     return parties_ - count_;
 }
 
-// ============================================================
 // ShardedLock 实现
-// ============================================================
 template<typename LockType>
 ShardedLock<LockType>::ShardedLock(size_t num_shards)
     : shards_(num_shards), num_shards_(num_shards) {}
@@ -658,9 +628,7 @@ std::vector<LockType>& ShardedLock<LockType>::shards() {
 template class ShardedLock<SpinLock>;
 template class ShardedLock<Mutex>;
 
-// ============================================================
 // ShardedRWLock 实现
-// ============================================================
 ShardedRWLock::ShardedRWLock(size_t num_shards)
     : shards_(num_shards), num_shards_(num_shards) {}
 

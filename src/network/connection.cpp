@@ -32,12 +32,10 @@ namespace cc_server {
           output_buffer_(),             // 构造空输出缓冲区
           resp_parser_()             // 构造 RESP 解析器
     {
-        // ========== 步骤 1：创建 Channel ==========
         // Channel 负责监听这个客户端连接的 IO 事件
         // 当 epoll 检测到 client_fd 可读/可写时，通知 Connection 处理
         channel_ = new Channel(loop_, client_socket_.fd());
 
-        // ========== 步骤 2：设置回调函数 ==========
         // Channel 本身不处理业务，只是把事件分发给我们
         // 所以要告诉 Channel："事件来了调我这些函数"
 
@@ -56,7 +54,6 @@ namespace cc_server {
             this->close();
         });
 
-        // ========== 步骤 3：注册到 epoll ==========
         // 启用读事件监听
         // 为什么要监听读？
         // - 服务器是被动的，客户端主动发数据过来
@@ -83,13 +80,11 @@ namespace cc_server {
      *   - 这个 fd 可能被其他文件复用，导致 epoll 通知错误的事件
      */
     Connection::~Connection() {
-        // ========== 步骤 1：从 epoll 移除 ==========
         // 告诉 EventLoop："这个 Channel 我不要了，别再通知我了"
         if (channel_ != nullptr) {
             loop_->remove_channel(channel_);
         }
 
-        // ========== 步骤 2：删除 Channel ==========
         delete channel_;
         channel_ = nullptr;
 
@@ -122,7 +117,6 @@ namespace cc_server {
      *   - -1: 出错了（EAGAIN 除外，那是正常的）
      */
     void Connection::handle_read() {
-        // ========== 第一步：从 socket 读取数据到 input_buffer_ ==========
 
         // 准备一个临时缓冲区
         // 为什么用临时缓冲区而不是直接往 input_buffer_ 写？
@@ -135,7 +129,6 @@ namespace cc_server {
             sizeof(temp_buffer) - 1          // 留一个位置给 '\0'（方便调试）
         );
 
-        // ========== 处理返回值 ==========
         if (bytes_read > 0) {
             // ---- 成功读到数据 ----
 
@@ -159,9 +152,7 @@ namespace cc_server {
             LOG_DEBUG(connection, "handle_read: read %zd bytes from fd=%d",
                       bytes_read, client_socket_.fd());
 
-            // ============================================================
             // 业务处理（这里是示例，实际业务逻辑在别的地方）
-            // ============================================================
             // 为什么这里不做业务处理？
             // - Connection 是网络层，不知道业务是什么
             // - 业务层应该注册一个"消息回调"来处理
@@ -212,7 +203,6 @@ namespace cc_server {
      *   2. 发完后禁用写事件（避免 busy loop）
      */
     void Connection::handle_write() {
-        // ========== 检查有没有数据要发 ==========
         if (output_buffer_.readable_bytes() == 0) {
             // 没有数据要发，禁用写事件
             // 为什么要禁用？
@@ -224,7 +214,6 @@ namespace cc_server {
             return;
         }
 
-        // ========== 发送数据 ==========
         // 从 output_buffer_ 读数据，通过 socket 发送
         const char* data = output_buffer_.peek();        // 查看数据起始位置（不移动指针）
         size_t len = output_buffer_.readable_bytes();   // 获取可读字节数
@@ -292,10 +281,8 @@ namespace cc_server {
             return;  // 连接已关闭
         }
 
-        // ========== 第一步：把数据放入 output_buffer_ ==========
         output_buffer_.append(data, len);
 
-        // ========== 第二步：启用写事件 ==========
         // 告诉 epoll："我想知道什么时候可以写"
         // 这样 handle_write() 会被调用，发完这些数据
         //
@@ -341,20 +328,17 @@ namespace cc_server {
      *   - 当前简化版本直接 close，后续可以改进
      */
     void Connection::close() {
-        // ========== 第一步：从 epoll 移除 ==========
         // 避免 epoll 还监听已关闭的 fd
         if (channel_ != nullptr) {
             loop_->remove_channel(channel_);
         }
 
-        // ========== 第二步：关闭 socket ==========
         // client_socket_.close() 会：
         // - 关闭 fd
         // - 发送 FIN 给对方（如果是对方先关的，这步已经完成）
         // - 清理 socket 相关资源
         client_socket_.close();
 
-        // ========== 后续考虑 ==========
         // 注意：这里没有 delete channel_ 和 this
         // 因为可能还在 Channel 的回调中
         //

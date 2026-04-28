@@ -18,7 +18,7 @@ MainReactor::~MainReactor() {
 }
 
 bool MainReactor::init(int port) {
-    // ========== 步骤1：创建并初始化listen socket ==========
+    // 步骤1：创建并初始化listen socket
     if (!listen_socket_.bind_and_listen(port)) {
         LOG_ERROR(NETWORK, "MainReactor failed to create listen socket on port %d", port);
         return false;
@@ -28,7 +28,7 @@ bool MainReactor::init(int port) {
     int flags = fcntl(listen_socket_.fd(), F_GETFL, 0);
     fcntl(listen_socket_.fd(), F_SETFL, flags | O_NONBLOCK);
 
-    // ========== 步骤2：创建Channel监听accept事件 ==========
+    // 步骤2：创建Channel监听accept事件
     listen_channel_ = std::make_unique<Channel>(loop_.get(), listen_socket_.fd());
 
     // 设置回调：当listen socket可读时（=有新连接），调用handle_accept
@@ -39,7 +39,7 @@ bool MainReactor::init(int port) {
     // 监听读事件（accept就是读事件）
     listen_channel_->enable_reading();
 
-    // ========== 步骤3：注册到EventLoop ==========
+    // 步骤3：注册到EventLoop
     loop_->update_channel(listen_channel_.get());
 
     initialized_ = true;
@@ -70,7 +70,7 @@ void MainReactor::stop() {
 }
 
 void MainReactor::handle_accept() {
-    // ========== 循环accept所有新连接 ==========
+    // 循环accept所有新连接
     // 为什么用循环？
     // - epoll触发一次可能意味有多个连接等待
     // - 循环accept直到EAGAIN（没有更多连接）
@@ -92,14 +92,14 @@ void MainReactor::handle_accept() {
 }
 
 void MainReactor::add_new_connection(int client_fd) {
-    // ========== 步骤1：设置非阻塞 ==========
+    // 步骤1：设置非阻塞
     int flags = fcntl(client_fd, F_GETFL, 0);
     fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
 
-    // ========== 步骤2：获取下一个SubReactor（负载均衡） ==========
+    // 步骤2：获取下一个SubReactor（负载均衡）
     SubReactor* target_reactor = SubReactorPool::instance().get_next_reactor();
 
-    // ========== 步骤3：在SubReactor线程中添加连接 ==========
+    // 步骤3：在SubReactor线程中添加连接
     // 这里需要思考：SubReactor的EventLoop在独立线程中
     // 我们如何安全地添加连接？
     //

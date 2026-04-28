@@ -27,12 +27,12 @@ void* ThreadCache::allocate(const size_t size) {
 
     FreeList& free_list = free_lists_[class_index];
 
-    // ========== 步骤1：从FreeList获取 ==========
+    // 步骤1：从FreeList获取
     if (!free_list.empty()) {
         return free_list.pop();
     }
 
-    // ========== 步骤2：FreeList为空，从CentralCache获取 ==========
+    // 步骤2：FreeList为空，从CentralCache获取
     fetch_from_central(class_index);
 
     // 获取后再次尝试

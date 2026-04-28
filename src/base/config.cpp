@@ -4,13 +4,13 @@
 
 namespace cc_server {
 
-// ==================== 构造函数 ====================
+// 构造函数
 
 Config::Config() : config_file_("./conf/concurrentcache.conf") {
     // 默认不加载，让调用者决定何时 load
 }
 
-// ==================== 单例 ====================
+// 单例
 
 Config& Config::instance() {
     // C++11 static 局部变量初始化线程安全
@@ -18,7 +18,7 @@ Config& Config::instance() {
     return instance;
 }
 
-// ==================== 配置加载 ====================
+// 配置加载
 
 void Config::loadInternal() {
     std::ifstream file(config_file_);
@@ -56,7 +56,7 @@ bool Config::load(const std::string& filename) {
 
     loadInternal();
 
-    // ========== 设置日志默认值 ==========
+    // 设置日志默认值
     // 如果配置文件中没有指定，使用这些默认值
     if (config_data_.find("log_level") == config_data_.end()) {
         config_data_["log_level"] = "info";
@@ -93,7 +93,7 @@ void Config::reload() {
     }
 }
 
-// ==================== 配置获取 ====================
+// 配置获取
 
 std::string Config::getString(const std::string& key, const std::string& default_value) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -126,7 +126,7 @@ bool Config::getBool(const std::string& key, bool default_value) {
     return default_value;
 }
 
-// ==================== 观察者模式 ====================
+// 观察者模式
 
 void Config::addObserver(const std::string& key, ConfigObserver* observer) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -158,7 +158,7 @@ void Config::notifyObservers(const std::string& key) {
     }
 }
 
-// ==================== 工具函数 ====================
+// 工具函数
 
 void Config::trim(std::string& s) {
     if (s.empty()) return;

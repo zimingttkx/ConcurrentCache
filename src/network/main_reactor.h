@@ -31,7 +31,7 @@ namespace cc_server {
         MainReactor(const MainReactor&) = delete;
         MainReactor& operator=(const MainReactor&) = delete;
 
-        // ========== 核心功能 ==========
+        // 核心功能
 
         // 初始化listen socket
         // @param port 监听端口
