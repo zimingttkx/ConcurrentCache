@@ -103,15 +103,19 @@ Span* PageCache::allocate_span(size_t num_pages) {
 void PageCache::free_span(Span* span) {
     MutexGuard lock(mutex_);
 
-    // 尝试合并相邻的Span
-    Span* merged = coalesce_span(span);
+    // 注意：暂时不做合并，因为合并可能导致悬空指针问题
+    // 当被合并的 span 与 CentralCache 持有的 span 相邻时，
+    // 删除被合并的 span 可能导致 CentralCache 的指针变成悬空指针
+    //
+    // 合并可以在将来分配时进行（通过分裂更大的 span）
+    // 这样设计更安全，避免了所有权转移的复杂性
 
-    // 把合并后的Span加入空闲链表
-    free_span_lists_[merged->num_pages_].push_front(merged);
+    // 把span加入空闲链表
+    free_span_lists_[span->num_pages_].push_front(span);
 
     // 更新页号映射
-    for (size_t i = 0; i < merged->num_pages_; ++i) {
-        page_span_map_[merged->page_id_ + i] = merged;
+    for (size_t i = 0; i < span->num_pages_; ++i) {
+        page_span_map_[span->page_id_ + i] = span;
     }
 }
 
