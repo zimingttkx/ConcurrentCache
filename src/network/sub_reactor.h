@@ -28,6 +28,12 @@ public:
     // 停止SubReactor
     void stop();
 
+    // 停止SubReactor（只设置退出标志，不join）
+    void stop_without_join();
+
+    // 等待线程结束
+    void join_thread();
+
     // 处理新连接（由MainReactor调用）
     // @param client_fd 已连接的客户端fd
     void add_connection(int client_fd);

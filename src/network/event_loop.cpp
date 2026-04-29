@@ -8,7 +8,6 @@ namespace cc_server {
     EventLoop::EventLoop()
         : epoll_fd_(-1),          // 一开始没有epoll，标记为-1表示无效
           wakeup_fd_(-1),         // 一开始没有pipe，初始化-1
-          quit_(false),
           last_config_check_time_(time(nullptr)){          // 默认不退出
 
         // 1. 创建 epoll 实例
@@ -59,6 +58,11 @@ namespace cc_server {
             close(wakeup_fd_);
             wakeup_fd_ = -1;
         }
+        // 关闭 pipe 写端
+        if (wakeup_pipe_[1] >= 0) {
+            close(wakeup_pipe_[1]);
+            wakeup_pipe_[1] = -1;
+        }
     }
 
     // 创建 pipe（内部电话）
@@ -89,7 +93,12 @@ namespace cc_server {
         LOG_INFO(event_loop, "EventLoop start looping...");
 
         // 循环，直到有人说"别等了"（quit_ = true）
-        while (!quit_) {
+        while (true) {
+            // 先检查 quit 标志
+            if (quit_.load(std::memory_order_acquire)) {
+                std::cout << "[EventLoop] quit_=1，退出循环" << std::endl;
+                break;
+            }
 
             // epoll_wait = "前台坐着等，有人来就返回"
             // 等 100ms，看看有没有人来
@@ -99,6 +108,12 @@ namespace cc_server {
                 static_cast<int>(events_.size()),   // 最多存多少
                 100                                  // 等100ms就超时
             );
+
+            // epoll_wait 返回后立即检查 quit_
+            if (quit_.load(std::memory_order_acquire)) {
+                std::cout << "[EventLoop] epoll_wait 后检测到 quit_=1，退出" << std::endl;
+                break;
+            }
 
             check_config_reload();
 
@@ -125,13 +140,23 @@ namespace cc_server {
                     continue;
                 }
 
-                // 找对应的 Channel
-                auto it = channels_.find(fd);
-                if (it != channels_.end()) {
+                // 找对应的 Channel（需要加锁保护）
+                Channel* channel = nullptr;
+                {
+                    std::lock_guard<std::mutex> lock(channels_mutex_);
+                    auto it = channels_.find(fd);
+                    if (it != channels_.end()) {
+                        channel = it->second;
+                    }
+                }
+                if (channel) {
+                    LOG_DEBUG(event_loop, "Event loop processing: fd=%d, events=%u", fd, events_[i].events);
                     // 告诉 Channel 发生了什么事件
-                    it->second->set_triggered_events(events_[i].events);
+                    channel->set_triggered_events(events_[i].events);
                     // 调用 Channel 的回调函数处理
-                    it->second->handle_event();
+                    channel->handle_event();
+                } else {
+                    LOG_WARN(event_loop, "Event for unknown fd=%d", fd);
                 }
             }
 
@@ -146,7 +171,7 @@ namespace cc_server {
 
     // 退出：设置退出标志，唤醒 loop
     void EventLoop::quit() {
-        quit_ = true;   // 设置退出标志
+        quit_.store(true, std::memory_order_release);   // 设置退出标志
         wakeup();        // 主动唤醒 epoll_wait，让它及时退出
     }
 
@@ -160,15 +185,25 @@ namespace cc_server {
         ev.events = channel->events();  // 要监听的事件（读/写）
         ev.data.fd = fd;               // 存 fd
 
+        std::lock_guard<std::mutex> lock(channels_mutex_);
+
         // 判断是新增还是修改
         auto it = channels_.find(fd);
         if (it == channels_.end()) {
             // 找不到 = 新客户端，ADD（添加）
-            epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev);
+            int ret = epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev);
+            if (ret < 0) {
+                LOG_ERROR(event_loop, "epoll_ctl ADD failed: fd=%d, error=%s", fd, strerror(errno));
+            }
             channels_[fd] = channel;
+            LOG_DEBUG(event_loop, "Channel added to epoll: fd=%d, events=%u", fd, channel->events());
         } else {
             // 找到了 = 已存在，MOD（修改）
-            epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, fd, &ev);
+            int ret = epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, fd, &ev);
+            if (ret < 0) {
+                LOG_ERROR(event_loop, "epoll_ctl MOD failed: fd=%d, error=%s", fd, strerror(errno));
+            }
+            LOG_DEBUG(event_loop, "Channel modified in epoll: fd=%d, events=%u", fd, channel->events());
         }
     }
 
@@ -177,6 +212,8 @@ namespace cc_server {
         if (!channel) return;
 
         int fd = channel->fd();
+
+        std::lock_guard<std::mutex> lock(channels_mutex_);
 
         auto it = channels_.find(fd);
         if (it != channels_.end()) {
@@ -225,7 +262,7 @@ namespace cc_server {
         last_config_check_time_ = now;
         Config::instance().reload();
 
-        LOG_INFO(event_loop, "config check interval changed");
+        LOG_DEBUG(event_loop, "config file reloaded");
     }
 
 }

@@ -16,6 +16,9 @@ namespace cc_server {
 
         void stop();
 
+        // 等待所有SubReactor线程结束
+        void join_all();
+
         SubReactor* get_next_reactor();
 
         [[nodiscard]]size_t size() const{return reactors_.size();}
@@ -31,6 +34,8 @@ namespace cc_server {
         std::vector<std::unique_ptr<SubReactor>> reactors_;
 
         std::atomic<size_t> next_index_{0};
+
+        std::atomic<bool> stopped_{false};
     };
 }
 #endif //CONCURRENTCACHE_SUB_REACTOR_POOL_H

@@ -24,11 +24,16 @@ namespace cc_server {
     }
 
     void SubReactorPool::stop() {
-        // 停止所有SubReactor
-        for (auto& reactor : reactors_) {
-            reactor->stop();
-        }
+    // 防止重复停止
+    if (stopped_.exchange(true)) {
+        return;
     }
+
+    // 唤醒所有SubReactor，让它们退出
+    for (auto& reactor : reactors_) {
+        reactor->stop();
+    }
+}
 
     SubReactor* SubReactorPool::get_next_reactor() {
         // 轮询策略

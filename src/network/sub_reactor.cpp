@@ -5,6 +5,9 @@
 
 #include "sub_reactor.h"
 #include "command/command_factory.h"
+#include "protocol/resp.h"
+#include <algorithm>
+#include <cctype>
 
 namespace cc_server {
 
@@ -34,20 +37,44 @@ void SubReactor::start() {
 }
 
 void SubReactor::stop() {
-    if (thread_ == nullptr) {
-        return;
-    }
-
     // 退出事件循环
-    loop_->quit();
+    if (loop_) {
+        loop_->quit();
+    }
 
     // 等待线程结束
-    if (thread_->joinable()) {
-        thread_->join();
+    if (thread_ != nullptr) {
+        if (thread_->joinable()) {
+            thread_->join();
+        }
+        delete thread_;
+        thread_ = nullptr;
     }
+}
 
-    delete thread_;
-    thread_ = nullptr;
+void SubReactor::stop_without_join() {
+    // 只 quit 事件循环，不 join
+    if (loop_) {
+        loop_->quit();
+    }
+}
+
+void SubReactor::join_thread() {
+    std::cout << "[SubReactor] join_thread() 被调用" << std::endl;
+    if (thread_ != nullptr) {
+        std::cout << "[SubReactor] thread_ 不为 nullptr，检查 joinable" << std::endl;
+        if (thread_->joinable()) {
+            std::cout << "[SubReactor] 线程可 join，开始等待..." << std::endl;
+            thread_->join();
+            std::cout << "[SubReactor] 线程已 join 完成" << std::endl;
+        } else {
+            std::cout << "[SubReactor] 线程不可 join" << std::endl;
+        }
+        delete thread_;
+        thread_ = nullptr;
+    } else {
+        std::cout << "[SubReactor] thread_ 是 nullptr" << std::endl;
+    }
 }
 
     void SubReactor::add_connection(int client_fd) {
@@ -70,16 +97,24 @@ void SubReactor::stop() {
         const auto& arr = cmd.as_array();
         if (arr.empty()) return;
 
-        std::string name = arr[0].as_string();
+        // 构建完整的参数列表（包含命令名）
         std::vector<std::string> args;
-        for (size_t i = 1; i < arr.size(); ++i) {
+        for (size_t i = 0; i < arr.size(); ++i) {
             args.push_back(arr[i].as_string());
         }
 
-        auto command = CommandFactory::instance().create(name);
+        // 将命令名转换为小写（Redis 命令不区分大小写）
+        std::string cmd_name = args[0];
+        std::transform(cmd_name.begin(), cmd_name.end(), cmd_name.begin(),
+                       [](unsigned char c){ return std::tolower(c); });
+
+        auto command = CommandFactory::instance().create(cmd_name);
         if (command) {
             auto response = command->execute(args);
             conn->send_response(response);
+        } else {
+            // 命令不存在，返回错误响应
+            conn->send_response(RespEncoder::encode_error("unknown command '" + args[0] + "'"));
         }
     });
 

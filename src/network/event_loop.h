@@ -8,6 +8,8 @@
 #include <unordered_map> // O(1)查找fd对应的Channel
 #include <cstring>
 #include <cerrno>
+#include <mutex>
+#include <atomic>
 #include "channel.h"
 #include "base/log.h"
 
@@ -50,7 +52,7 @@ namespace cc_server {
         int epoll_fd_; // 创建后默认初始化为-1表示无效状态 创建成功后赋值为有效的fd
         int wakeup_fd_;
         int wakeup_pipe_[2]; // 用于跨线程唤醒的管道，wakeup_pipe_[0]读端，wakeup_pipe_[1]写端
-        bool quit_; // 退出标志 控制事件循环是否继续运行
+        std::atomic<bool> quit_; // 退出标志 控制事件循环是否继续运行
         /**
            * @brief 就绪事件数组（epoll_wait的输出参数）
            *
@@ -70,6 +72,7 @@ namespace cc_server {
            * 哈希表值：Channel*（指向该fd对应的Channel对象）
            */
           std::unordered_map<int, Channel*> channels_;
+          std::mutex channels_mutex_;  // 保护 channels_ map 的线程安全
 
           time_t last_config_check_time_; // 上次检查配置文件的时间戳（秒级） 用于定时检查配置文件是否修改
           const int config_check_interval_ = 10; // 默认10秒检测一次
@@ -168,6 +171,9 @@ namespace cc_server {
         * - handle_wakeup()消费这些数据
         */
         void wakeup();
+
+        // 公开的wakeup方法，用于从信号处理中唤醒EventLoop
+        void wakeup_for_shutdown() { wakeup(); }
 
     private:
         /**
