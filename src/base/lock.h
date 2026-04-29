@@ -87,6 +87,7 @@
 #include <condition_variable> // std::condition_variable：条件变量
 #include <vector>             // std::vector：动态数组
 #include <string>             // std::string：字符串
+#include <limits>             // std::numeric_limits：数值极限
 
 namespace cc_server {
 

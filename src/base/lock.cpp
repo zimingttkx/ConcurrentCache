@@ -119,6 +119,7 @@ T* AtomicPointer<T>::operator->() const noexcept {
 // 显式实例化常用类型
 template class AtomicPointer<void>;
 template class AtomicPointer<char>;
+template class AtomicPointer<int>;
 
 // Mutex 实现
 Mutex::Mutex() = default;
@@ -483,7 +484,7 @@ WriteLockGuard<Lockable>::operator bool() const {
 
 // Semaphore 实现
 Semaphore::Semaphore(int initial_count)
-    : count_(initial_count), max_count_(initial_count) {}
+    : count_(initial_count), max_count_(std::numeric_limits<int>::max()) {}
 
 void Semaphore::wait() {
     std::unique_lock<std::mutex> lock(mutex_);
@@ -651,5 +652,35 @@ std::vector<RWLock>& ShardedRWLock::shards() {
 
 // 显式实例化 LockGuard
 template class LockGuard<Mutex>;
+template class LockGuard<SpinLock>;
+template class LockGuard<RecursiveMutex>;
+
+// 显式实例化 TryLockGuard
+template class TryLockGuard<Mutex>;
+template class TryLockGuard<SpinLock>;
+template class TryLockGuard<RecursiveMutex>;
+
+// 显式实例化 ReadLockGuard
+template class ReadLockGuard<RWLock>;
+template class ReadLockGuard<RWLock2>;
+
+// 显式实例化 WriteLockGuard
+template class WriteLockGuard<RWLock>;
+template class WriteLockGuard<RWLock2>;
+
+// 显式实例化 Mutex 的 try_lock_for 和 try_lock_until
+template bool Mutex::try_lock_for<long, std::ratio<1l, 1000l>>(const std::chrono::duration<long, std::ratio<1l, 1000l>>&);
+template bool Mutex::try_lock_until<std::chrono::_V2::steady_clock, std::chrono::duration<long, std::ratio<1l, 1000000000l>>>(
+    const std::chrono::time_point<std::chrono::_V2::steady_clock, std::chrono::duration<long, std::ratio<1l, 1000000000l>>>&);
+
+// 显式实例化 RWLock 的 try_read_lock_for 和 try_write_lock_for
+template bool RWLock::try_read_lock_for<long, std::ratio<1l, 1000l>>(const std::chrono::duration<long, std::ratio<1l, 1000l>>&);
+template bool RWLock::try_write_lock_for<long, std::ratio<1l, 1000l>>(const std::chrono::duration<long, std::ratio<1l, 1000l>>&);
+
+// 显式实例化 Semaphore 的 wait_for
+template bool Semaphore::wait_for<long, std::ratio<1l, 1000l>>(const std::chrono::duration<long, std::ratio<1l, 1000l>>&);
+
+// 显式实例化 CountDownLatch 的 wait_for
+template bool CountDownLatch::wait_for<long, std::ratio<1l, 1000l>>(const std::chrono::duration<long, std::ratio<1l, 1000l>>&);
 
 }  // namespace cc_server
