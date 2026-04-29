@@ -35,57 +35,6 @@ ThreadPool::~ThreadPool() {
     stop();
 }
 
-template<typename F, typename... Args>
-auto ThreadPool::submit(F&& f, Args&&... args) -> std::future<std::invoke_result_t<F, Args...>> {
-    using ReturnType = std::invoke_result_t<F, Args...>;
-
-    // 构建闭包（安全捕获参数）
-    // 使用 make_tuple 存储参数的副本，而不是捕获引用
-    auto task_func = std::make_shared<std::function<ReturnType()>>(
-        [f=std::forward<F>(f),
-         args=std::make_tuple(std::forward<Args>(args)...)]()
-         mutable -> ReturnType {
-            if constexpr (std::is_void_v<ReturnType>) {
-                std::apply([&f](auto&&... unpacked_args) {
-                    std::invoke(f, std::forward<decltype(unpacked_args)>(unpacked_args)...);
-                }, std::move(args));
-            } else {
-                return std::apply([&f](auto&&... unpacked_args) -> ReturnType {
-                    return std::invoke(f, std::forward<decltype(unpacked_args)>(unpacked_args)...);
-                }, std::move(args));
-            }
-        }
-    );
-
-    // 创建 Task 和 Promise
-    auto task_impl = std::make_unique<TaskImpl<ReturnType>>(
-        [task_func]() -> ReturnType {
-            return (*task_func)();
-        }
-    );
-    std::promise<ReturnType> promise = std::move(task_impl->promise);
-    std::future<ReturnType> future = promise.get_future();
-
-    // 加入任务队列
-    {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-
-        if (stop_.load(std::memory_order_acquire)) {
-            throw std::runtime_error("cannot submit task to stopped ThreadPool");
-        }
-
-        tasks_.push(std::move(task_impl));
-        submitted_tasks_.fetch_add(1, std::memory_order_relaxed);
-    }
-
-    // 通知一个工作线程
-    cv_.notify_one();
-
-    LOG_DEBUG(THREAD_POOL, "Task submitted, queue size: %zu", tasks_.size());
-
-    return future;
-}
-
 void ThreadPool::stop() {
     LOG_INFO(THREAD_POOL, "ThreadPool stopping...");
 
@@ -139,9 +88,11 @@ void ThreadPool::worker_loop(size_t thread_id) {
 std::unique_ptr<ThreadPool::Task> ThreadPool::take_task() {
     std::unique_lock<std::mutex> lock(queue_mutex_);
 
-    // 等待条件：队列非空 且 未停止
+    // 等待条件：队列非空 或 已停止
+    // - 队列非空：可以取任务
+    // - 已停止且队列为空：应该退出
     cv_.wait(lock, [this]() {
-        return !stop_.load(std::memory_order_acquire) || tasks_.empty();
+        return !tasks_.empty() || stop_.load(std::memory_order_acquire);
     });
 
     // 已停止且队列为空，直接返回

@@ -113,7 +113,53 @@ public:
      * - 添加成功后通知一个等待中的线程
      */
     template<typename F, typename... Args>
-    auto submit(F&& f, Args&&... args) -> std::future<std::invoke_result_t<F, Args...>>;
+    auto submit(F&& f, Args&&... args) -> std::future<std::invoke_result_t<F, Args...>> {
+        using ReturnType = std::invoke_result_t<F, Args...>;
+
+        // 构建闭包（安全捕获参数）
+        auto task_func = std::make_shared<std::function<ReturnType()>>(
+            [f=std::forward<F>(f),
+             args=std::make_tuple(std::forward<Args>(args)...)]()
+             mutable -> ReturnType {
+                if constexpr (std::is_void_v<ReturnType>) {
+                    std::apply([&f](auto&&... unpacked_args) {
+                        std::invoke(f, std::forward<decltype(unpacked_args)>(unpacked_args)...);
+                    }, std::move(args));
+                } else {
+                    return std::apply([&f](auto&&... unpacked_args) -> ReturnType {
+                        return std::invoke(f, std::forward<decltype(unpacked_args)>(unpacked_args)...);
+                    }, std::move(args));
+                }
+            }
+        );
+
+                // 创建 Task 和 Promise
+        // 注意：必须先获取 future，再将 task_impl 推入队列
+        // 因为 future 必须在 task_impl 存活期间保持有效
+        auto task_impl = std::make_unique<TaskImpl<ReturnType>>(
+            [task_func]() -> ReturnType {
+                return (*task_func)();
+            }
+        );
+        std::future<ReturnType> future = task_impl->promise.get_future();
+
+        // 加入任务队列
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+
+            if (stop_.load(std::memory_order_acquire)) {
+                throw std::runtime_error("cannot submit task to stopped ThreadPool");
+            }
+
+            tasks_.push(std::move(task_impl));
+            submitted_tasks_.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        // 通知一个工作线程
+        cv_.notify_one();
+
+        return future;
+    }
 
     // 控制接口
     /**
