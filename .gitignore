@@ -19,3 +19,13 @@ xml/
 .idea/
 .claude-code-gui/
 *.o
+
+# CMake build directories
+cmake-build-*/
+cmake-build-*
+
+# Logs
+logs/
+
+# Run tests executable
+run_tests

@@ -47,3 +47,6 @@ if(MSVC)
 else()
     target_compile_options(concurrentcache-server PRIVATE -Wall -Wextra -Werror)
 endif()
+
+# 添加测试子目录
+add_subdirectory(test)
