@@ -591,7 +591,7 @@ bool RespParser::parse_bulk_string(Buffer* buffer, std::string& out) {
 
     
     // 第3步：检查内容是否完整
-    
+
     // 完整长度 = 头部长度 + 内容长度 + \r\n (2字节)
 
     size_t total_len = header_len + bulk_len + 2;
