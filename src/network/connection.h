@@ -32,6 +32,7 @@ namespace cc_server {
         RespParser resp_parser_; // RESP 协议解析器
         CommandCallback command_callback_; // 命令处理回调函数
         std::function<void()> close_callback_; // 连接关闭回调函数
+        bool closed_ = false; // 连接是否已关闭
 
     public:
         Connection(int client_fd, EventLoop* loop);

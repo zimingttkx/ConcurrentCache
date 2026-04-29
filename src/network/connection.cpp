@@ -51,7 +51,11 @@ namespace cc_server {
 
         // 设置错误回调：当 epoll 检测到错误（连接断开等）
         channel_->set_error_callback([this]() {
-            this->close();
+            // 不要直接调用 close()，而是通知 SubReactor 来处理
+            // 这样可以确保 Connection 正确地从 connections_ 中移除并销毁
+            if (close_callback_) {
+                close_callback_();
+            }
         });
 
         // 启用读事件监听
@@ -117,6 +121,11 @@ namespace cc_server {
      *   - -1: 出错了（EAGAIN 除外，那是正常的）
      */
     void Connection::handle_read() {
+        // 如果连接已关闭，直接返回
+        // 防止 use-after-free：当 close_callback_ 被触发后，Connection 会被销毁
+        if (closed_) {
+            return;
+        }
 
         // 准备一个临时缓冲区
         // 为什么用临时缓冲区而不是直接往 input_buffer_ 写？
@@ -203,6 +212,12 @@ namespace cc_server {
      *   2. 发完后禁用写事件（避免 busy loop）
      */
     void Connection::handle_write() {
+        // 如果连接已关闭，直接返回
+        // 防止 use-after-free：当 close_callback_ 被触发后，Connection 会被销毁
+        if (closed_) {
+            return;
+        }
+
         if (output_buffer_.readable_bytes() == 0) {
             // 没有数据要发，禁用写事件
             // 为什么要禁用？
@@ -311,23 +326,23 @@ namespace cc_server {
      * close()：关闭连接（核心函数）
      * =========================================================================
      *
-     * 什么时候被调用？
-     *   - 客户端主动断开连接（handle_read 读到 0）
-     *   - 发生错误（socket 出错）
-     *   - 业务层主动关闭
+     * close() 做了以下事情：
+     *   1. 设置 closed_ 标志，防止重复关闭
+     *   2. 从 epoll 移除 Channel
+     *   3. 关闭 socket
+     *   4. 触发 close_callback_ 通知 SubReactor 销毁 Connection
      *
-     * close() 做了什么？
-     *   1. 从 epoll 移除 Channel
-     *   2. 关闭 socket（client_socket_ 析构会调用 close）
-     *   3. 后续 handle_read/write 再调用会发现 fd 无效，忽略
-     *
-     * 为什么需要这个函数而不是直接 delete this？
-     *   - 可能在 Channel 的回调中被调用
-     *   - delete this 会立即销毁对象，但 epoll 可能还在用这个 fd
-     *   - 更好的做法：标记为"待关闭"，在 EventLoop 层面处理
-     *   - 当前简化版本直接 close，后续可以改进
+     * 为什么需要 closed_ 标志？
+     *   - 防止在回调执行期间或之前重复调用 close()
+     *   - handle_read/handle_write 检查此标志后可以提前返回
      */
     void Connection::close() {
+        // 防止重复关闭
+        if (closed_) {
+            return;
+        }
+        closed_ = true;
+
         // 避免 epoll 还监听已关闭的 fd
         if (channel_ != nullptr) {
             loop_->remove_channel(channel_);
@@ -339,18 +354,11 @@ namespace cc_server {
         // - 清理 socket 相关资源
         client_socket_.close();
 
-        // 注意：这里没有 delete channel_ 和 this
-        // 因为可能还在 Channel 的回调中
-        //
-        // 更好的做法：
-        // - 设置一个 closed_ 标志
-        // - 在 EventLoop 或 main loop 中检测并清理
-        // - 或者使用 shared_ptr/weak_ptr 管理生命周期
-        //
-        // 当前简化版本可能导致 use-after-free：
-        // - 如果 close() 在 handle_read() 中被调用
-        // - handle_read() 返回后，EventLoop 还可能调用 handle_write()
-        // - 这时 Connection 可能已经被删除了
+        // 触发 close_callback_ 通知 SubReactor 来销毁 Connection
+        // 注意：这会导致 Connection 被销毁，所以之后不应该再访问 this
+        if (close_callback_) {
+            close_callback_();
+        }
     }
 
     /**
