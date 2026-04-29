@@ -64,9 +64,10 @@ namespace cc_server {
     
     // size - 获取存储的键值对数量
     // @return 当前存储的元素数量
-    // @note 非线程安全，调用方需保证无并发修改
-    
+    // @note 线程安全：使用共享锁，允许多读并发
+
     size_t GlobalStorage::size() const {
+        std::shared_lock<std::shared_mutex> lock(mutex_);  // 共享锁：多个读可并发
         return store_.size();
     }
 
