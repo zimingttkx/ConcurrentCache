@@ -135,6 +135,28 @@ namespace cc_server {
             return std::make_unique<ExistsCommand>(*this);
         }
     };
+
+    /**
+     * @brief PingCommand - PING 命令实现
+     *
+     * PING 命令：测试服务器是否存活
+     * 语法：PING
+     * 返回：PONG
+     *
+     * RESP 格式：
+     *   PING → +PONG\r\n
+     */
+    class PingCommand : public Command {
+    public:
+        std::string execute(const std::vector<std::string> &args) override {
+            (void)args;  // PING 命令不需要参数
+            return RespEncoder::encode_simple_string("PONG");
+        }
+
+        [[nodiscard]] std::unique_ptr<Command> clone() const override {
+            return std::make_unique<PingCommand>(*this);
+        }
+    };
 }
 
 #endif
