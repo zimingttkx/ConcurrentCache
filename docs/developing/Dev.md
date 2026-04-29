@@ -66,19 +66,25 @@
 │    - ThreadCache（线程本地，无锁）                          │
 │    - CentralCache（细粒度锁）                              │
 │    - PageCache（全局锁，Span合并）                         │
-│                                                             │
-│ 📋 线程池     ░░░░░░░░░░░░░░░░░░░░░░░░  0%              │
+└─────────────────────────────────────────────────────────────┘
+
+【线程池】
+┌─────────────────────────────────────────────────────────────┐
+│ ✅ 线程池     ████████████████████████████ 100%             │
+│    - 固定数量工作线程                                       │
+│    - 阻塞队列 + 条件变量                                   │
+│    - future 返回值                                         │
+│    - 优雅退出                                             │
 └─────────────────────────────────────────────────────────────┘
 
 【缓存核心】
 ┌─────────────────────────────────────────────────────────────┐
 │ ✅ GlobalStorage ████████████████████████████ 100%         │
 │    - unordered_map + shared_mutex                          │
-│    - v2.0计划: 分段锁哈希表 + 过期 + LRU                  │
 │                                                             │
-│ 📋 分段锁哈希表 ░░░░░░░░░░░░░░░░░░░░░░░░  0%             │
-│ 📋 过期字典     ░░░░░░░░░░░░░░░░░░░░░░░░  0%            │
-│ 📋 LRU淘汰      ░░░░░░░░░░░░░░░░░░░░░░░░  0%            │
+│ 📋 分段锁哈希表 ░░░░░░░░░░░░░░░░░░░░░░░  0%             │
+│ 📋 过期字典     ░░░░░░░░░░░░░░░░░░░░░░░  0%            │
+│ 📋 LRU淘汰      ░░░░░░░░░░░░░░░░░░░░░░░  0%            │
 └─────────────────────────────────────────────────────────────┘
 
 【协议与命令】
@@ -86,13 +92,31 @@
 │ ✅ RESP协议   ████████████████████████████ 100%           │
 │ ✅ CommandFactory ████████████████████████████ 100%       │
 │ ✅ 字符串命令 ████████████████████████████ 100%           │
-│    - GET/SET/DEL/EXISTS                                   │
+│    - GET/SET/DEL/EXISTS/PING                             │
 │                                                             │
-│ 📋 命令增强   ░░░░░░░░░░░░░░░░░░░░░░░░░  0%              │
+│ 📋 命令增强   ░░░░░░░░░░░░░░░░░░░░░░░░  0%              │
 │    - INCR/DECR/SETNX/SETEX/APPEND/STRLEN                 │
 └─────────────────────────────────────────────────────────────┘
 
-图例: ✅ 已完成  🔄 进行中  📋 计划中  百分比 = 估计完成度
+【测试】
+┌─────────────────────────────────────────────────────────────┐
+│ ✅ 测试框架   ████████████████████████████ 100%           │
+│    - GTest风格断言                                         │
+│    - TraceLogger/TraceAnalyzer                            │
+│                                                             │
+│ ✅ 锁测试     ████████████████████████████ 100%           │
+│    - 正确性测试                                            │
+│    - 死锁检测测试                                          │
+│    - 数据竞争测试                                          │
+│    - 压力测试                                             │
+│    - 边界测试                                             │
+│                                                             │
+│ ✅ 原子操作测试 ████████████████████████████ 100%         │
+│                                                             │
+│ ✅ 同步原语测试 ████████████████████████████ 100%         │
+└─────────────────────────────────────────────────────────────┘
+
+图例: ✅ 已完成  🔄 进行中  📋 计划中
 ```
 
 ---
@@ -110,6 +134,9 @@
 | 2026-04-26 | 锁机制 | ✅ 新增 | Mutex/SpinLock/RWLock等完整实现 |
 | 2026-04-27 | 内存池 | ✅ 新增 | ThreadCache/CentralCache/PageCache三级架构 |
 | 2026-04-27 | MainSubReactor | ✅ 新增 | MainReactor + SubReactor + SubReactorPool |
+| 2026-04-28 | 线程池 | ✅ 新增 | ThreadPool 完整实现 |
+| 2026-04-29 | 优雅退出 | ✅ 修复 | 修复信号处理导致的死锁问题 |
+| 2026-04-29 | 测试套件 | ✅ 新增 | 锁测试、原子测试、同步原语测试 |
 
 ---
 
@@ -438,15 +465,25 @@ MainSubReactor解决方案：
 - `src/network/main_reactor.h/cpp` - MainReactor
 - `src/network/sub_reactor.h/cpp` - SubReactor
 - `src/network/sub_reactor_pool.h/cpp` - SubReactorPool
-- `src/network/Network组件说明.md` - 详细架构文档
 
 ---
 
-## 待开发模块
+### ✅ 线程池
 
-### 📋 线程池
+**开发时间**：2026-04-28（v2.0 新增）
 
-**问题**：每任务一线程开销大
+**为什么做**：
+```
+每任务一线程的问题：
+- 1000个并发请求 = 1000个线程
+- 每个线程占用1MB+栈内存
+- 线程创建/销毁开销大
+
+线程池解决方案：
+- 固定数量工作线程（如4个）
+- 所有任务放入阻塞队列
+- 工作线程从队列取任务执行
+```
 
 **架构设计**：
 ```
@@ -457,7 +494,86 @@ MainSubReactor解决方案：
   │◄─── 返回 future ────────────┘
 ```
 
+**核心代码**：
+```cpp
+// 提交任务
+auto future = thread_pool.submit([]() {
+    return 1 + 2;
+});
+int result = future.get();
+
+// 停止线程池
+thread_pool.stop();
+```
+
+**文件**：`src/base/thread_pool.h`, `src/base/thread_pool.cpp`
+
 ---
+
+### ✅ 优雅退出
+
+**开发时间**：2026-04-29（v2.0 修复）
+
+**问题**：信号处理函数中调用 join() 导致主线程阻塞，形成死锁
+
+**解决方案**：
+```
+1. signal_handler 只调用 quit()，不执行阻塞操作
+2. quit() 设置 quit_=true 并调用 wakeup() 唤醒 epoll_wait
+3. EventLoop 在 epoll_wait 返回后检测 quit_ 并退出循环
+4. main() 在 main_reactor.start() 返回后继续执行清理流程
+```
+
+**退出流程**：
+```
+1. 收到 SIGINT/SIGTERM
+2. signal_handler() 调用 g_main_reactor->event_loop()->quit()
+3. quit() 设置 quit_=true 并调用 wakeup()
+4. MainReactor 的 EventLoop 检测到 quit_，退出 epoll_wait
+5. main() 继续执行，依次调用：
+   - SubReactorPool::stop() - 停止所有 SubReactor
+   - MainReactor::stop()   - 停止 MainReactor
+   - ThreadPool::stop()    - 停止线程池
+6. 进程安全退出
+```
+
+---
+
+### ✅ 测试套件
+
+**开发时间**：2026-04-29（v2.0 新增）
+
+**为什么做**：
+```
+- 验证并发工具的正确性
+- 检测死锁和数据竞争
+- 压力测试验证稳定性
+- 边界条件测试
+```
+
+**测试分类**：
+
+| 测试 | 功能 |
+|------|------|
+| test_lock_correctness | Mutex/SpinLock/RWLock 等基本功能测试 |
+| test_lock_deadlock | ABBA 死锁检测、多锁循环测试 |
+| test_lock_race | 数据竞争检测、无保护并发访问测试 |
+| test_lock_stress | 高并发压力测试、读写混合测试 |
+| test_lock_boundary | 超时边界、零值、最大并发测试 |
+| test_atomic_correctness | 原子操作正确性测试 |
+| test_sync_primitives | Semaphore/CountDownLatch/CyclicBarrier 测试 |
+
+**文件**：
+- `test/trace/test_assertions.h` - GTest 风格断言
+- `test/trace/trace_logger.h` - 锁跟踪
+- `test/trace/trace_analyzer.h` - 死锁/竞争检测
+- `test/lock_test/*.cpp` - 锁测试
+- `test/atomic_test/*.cpp` - 原子测试
+- `test/sync_primitives_test/*.cpp` - 同步原语测试
+
+---
+
+## 待开发模块
 
 ### 📋 分段锁哈希表
 
@@ -518,7 +634,8 @@ concurrentcache/
 │   │   ├── format.h/cpp       ✅ 统一格式化
 │   │   ├── config.h/cpp      ✅ 单例 + 观察者 + 热加载
 │   │   ├── signal.h/cpp       ✅ SIGSEGV + SIGPIPE
-│   │   └── lock.h/cpp         ✅ 完整锁机制
+│   │   ├── lock.h/cpp         ✅ 完整锁机制
+│   │   └── thread_pool.h/cpp  ✅ 通用线程池
 │   │
 │   ├── network/
 │   │   ├── socket.h
@@ -550,6 +667,12 @@ concurrentcache/
 │   └── cache/
 │       └── storage.h/cpp
 │
+├── test/
+│   ├── trace/                      ✅ 测试框架
+│   ├── lock_test/                  ✅ 锁测试
+│   ├── atomic_test/                ✅ 原子测试
+│   └── sync_primitives_test/       ✅ 同步原语测试
+│
 ├── docs/
 │   └── developing/
 │       ├── Dev.md              ← 本文档
@@ -575,3 +698,6 @@ concurrentcache/
 | 2026-04-26 | 锁机制 | ✅ 新增 | Mutex/SpinLock/RWLock等完整实现 |
 | 2026-04-27 | 内存池 | ✅ 新增 | ThreadCache/CentralCache/PageCache三级架构 |
 | 2026-04-27 | MainSubReactor | ✅ 新增 | MainReactor + SubReactor + SubReactorPool |
+| 2026-04-28 | 线程池 | ✅ 新增 | ThreadPool 完整实现 |
+| 2026-04-29 | 优雅退出 | ✅ 修复 | 修复信号处理导致的死锁问题 |
+| 2026-04-29 | 测试套件 | ✅ 新增 | 锁测试、原子测试、同步原语测试 |
