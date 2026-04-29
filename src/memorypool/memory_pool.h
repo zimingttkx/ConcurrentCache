@@ -16,15 +16,10 @@
 #ifndef CONCURRENTCACHE_MEMORY_POOL_H
 #define CONCURRENTCACHE_MEMORY_POOL_H
 
-#include <cstddef>
-
 // 包含所有组件的头文件
 #include "size_class.h"
-#include "free_list.h"
-#include "span.h"
-#include "page_cache.h"
-#include "central_cache.h"
 #include "thread_cache.h"
+#include <cstddef>
 
 namespace cc_server {
 
