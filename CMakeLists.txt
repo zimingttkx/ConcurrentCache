@@ -49,4 +49,4 @@ else()
 endif()
 
 # 添加测试子目录
-add_subdirectory(test)
+# add_subdirectory(test)

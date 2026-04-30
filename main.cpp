@@ -52,10 +52,16 @@ int main() {
     Logger::instance().setLevel(static_cast<LogLevel>(log_level));
     std::cout << "[主线程] 日志系统初始化完成 (级别: " << log_level << ")" << std::endl;
 
-    // 4. 获取配置参数
+    // 4. 获取配置参数（默认使用 CPU 核心数）
     int port = Config::instance().getInt("port", 6379);
-    int reactor_count = Config::instance().getInt("reactor_count", 4);
-    int thread_pool_size = Config::instance().getInt("thread_pool_size", 4);
+    int reactor_count = Config::instance().getInt("reactor_count",
+        static_cast<int>(std::thread::hardware_concurrency()));
+    int thread_pool_size = Config::instance().getInt("thread_pool_size",
+        static_cast<int>(std::thread::hardware_concurrency()));
+
+    // 确保至少有一个线程
+    if (reactor_count <= 0) reactor_count = 1;
+    if (thread_pool_size <= 0) thread_pool_size = 1;
 
     std::cout << "[主线程] 监听端口: " << port << std::endl;
     std::cout << "[主线程] SubReactor 数量: " << reactor_count << std::endl;
