@@ -9,6 +9,7 @@
 #include "src/base/thread_pool.h"
 #include "src/network/main_reactor.h"
 #include "src/network/sub_reactor_pool.h"
+#include "src/cache/expiration_checker.h"
 
 using namespace cc_server;
 
@@ -95,6 +96,11 @@ int main() {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
+    // 10. 启动过期键检查器（后台线程定期清理过期键）
+    ExpirationChecker expiration_checker(GlobalStorage::instance().expire_dict(), GlobalStorage::instance());
+    expiration_checker.start();
+    std::cout << "[主线程] 过期键检查器已启动" << std::endl;
+
     // 只有 MainReactor 初始化成功时才显示服务器启动信息
     if (g_running) {
         std::cout << "========================================" << std::endl;
@@ -130,6 +136,10 @@ int main() {
     // 停止线程池
     thread_pool.stop();
     std::cout << "[主线程] 线程池已停止" << std::endl;
+
+    // 停止过期键检查器
+    expiration_checker.stop();
+    std::cout << "[主线程] 过期键检查器已停止" << std::endl;
 
     std::cout << "\n========================================" << std::endl;
     std::cout << "   服务器已安全退出，感谢使用！         " << std::endl;

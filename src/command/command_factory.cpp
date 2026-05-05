@@ -1,5 +1,6 @@
 #include "command_factory.h"
 #include "string_cmd.h"
+#include "expire_cmd.h"
 
 namespace cc_server {
 
@@ -23,6 +24,10 @@ namespace cc_server {
         register_command("del", std::make_unique<DelCommand>());
         register_command("exists", std::make_unique<ExistsCommand>());
         register_command("ping", std::make_unique<PingCommand>());
+        register_command("expire", std::make_unique<ExpireCommand>());
+        register_command("ttl", std::make_unique<TtlCommand>());
+        register_command("persist", std::make_unique<PersistCommand>());
+        register_command("setex", std::make_unique<SetexCommand>());
     }
 
     
