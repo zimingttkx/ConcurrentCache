@@ -6,6 +6,8 @@
 #include <unordered_map>
 #include <shared_mutex>
 #include <vector>
+#include "expire_dict.h"
+
 
 namespace cc_server {
 
@@ -44,6 +46,14 @@ namespace cc_server {
         GlobalStorage(const GlobalStorage&) = delete;
         GlobalStorage& operator=(const GlobalStorage&) = delete;
 
+        ExpireDict& expire_dict() {
+            return expire_dict_;
+        }
+
+        bool is_expired(const std::string& key) const {
+            return expire_dict_.is_expired(key);
+        }
+
     private:
         GlobalStorage();
 
@@ -64,6 +74,8 @@ namespace cc_server {
 
         // 分片锁数组 每个分片对应一把shared_mutex
         mutable std::vector<std::shared_mutex> mutexes_;
+
+        ExpireDict expire_dict_;
     };
 }
 
