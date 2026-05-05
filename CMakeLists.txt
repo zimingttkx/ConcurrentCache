@@ -36,6 +36,11 @@ add_executable(concurrentcache-server ${SOURCES}
         src/network/main_reactor.cpp
         src/base/thread_pool.h
         src/base/thread_pool.cpp
+        src/cache/expire_dict.h
+        src/cache/expire_dict.cpp
+        src/cache/expiration_checker.h
+        src/cache/expiration_checker.cpp
+        src/command/expire_cmd.h
 )
 
 if(UNIX)
