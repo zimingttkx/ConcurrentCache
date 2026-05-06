@@ -37,7 +37,7 @@ namespace cc_server {
         }
         int64_t remaining = it->second - current_time_ms();
         if (remaining <= 0) {
-            return -2;
+            return -2; // 已过期
         }
         return remaining;
     }

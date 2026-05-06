@@ -26,6 +26,7 @@ namespace cc_server {
         register_command("ping", std::make_unique<PingCommand>());
         register_command("expire", std::make_unique<ExpireCommand>());
         register_command("ttl", std::make_unique<TtlCommand>());
+        register_command("pttl", std::make_unique<PTtlCommand>());
         register_command("persist", std::make_unique<PersistCommand>());
         register_command("setex", std::make_unique<SetexCommand>());
     }

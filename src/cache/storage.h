@@ -7,8 +7,6 @@
 #include <shared_mutex>
 #include <vector>
 #include "expire_dict.h"
-#include <random>
-#include <algorithm>
 
 namespace cc_server {
     // 缓存条目结构体
@@ -22,7 +20,6 @@ namespace cc_server {
     // 淘汰策略配置
     struct EvictionConfig {
         static constexpr size_t kMaxEntries = 100000; // 最大键数量
-        static constexpr size_t kEvictBatch = 5; // 每次淘汰采样数量
         static constexpr double kEvictThreshold = 0.9; // 淘汰触发阈值（占用率）
     };
 
@@ -91,12 +88,6 @@ namespace cc_server {
         int64_t current_time_ms() const {
             return std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
-        }
-
-        // 获取随机数引擎
-        std::mt19937& get_random_engine() {
-            static std::mt19937 rng(std::random_device{}());
-            return rng;
         }
 
         GlobalStorage();

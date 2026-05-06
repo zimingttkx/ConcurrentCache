@@ -38,14 +38,16 @@ public:
     /**
      * @brief 获取键的剩余生存时间
      * @param key 键
-     * @return 剩余时间(ms)，-1=永不过期，-2=键不存在
+     * @return 剩余时间(ms) 或 负数表示特殊状态
+     *         正数：剩余生存时间（毫秒）
+     *         -2：键不存在 或 已过期（两者都返回 -2）
      */
     int64_t get_ttl(const std::string& key) const;
 
     /**
      * @brief 获取键的过期时间戳
      * @param key 键
-     * @return 过期时间戳(ms)，-1=永不过期
+     * @return 过期时间戳(ms) 或 -1 表示键不存在（无过期设置）
      */
     int64_t get_expire_time(const std::string& key) const;
 

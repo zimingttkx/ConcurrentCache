@@ -126,6 +126,70 @@ public:
 };
 
 /**
+ * @brief PTtlCommand - PTTL 命令
+ *
+ * 语法：PTTL key
+ * 返回：剩余生存时间（毫秒），-2=不存在，-1=永不过期
+ *
+ * RESP 格式：
+ *   PTTL key → :60000\r\n 或 :-2\r\n 或 :-1\r\n
+ */
+class PTtlCommand : public Command {
+public:
+    std::string execute(const std::vector<std::string>& args) override {
+        // 参数验证：PTTL key
+        if (args.size() != 2) {
+            LOG_WARN(EXPIRE, "PTTL - wrong argument count: %zu, expected 2", args.size());
+            return RespEncoder::encode_error("ERR wrong number of arguments for 'pttl' command");
+        }
+
+        const std::string& key = args[1];
+        assert(!key.empty() && "PTTL command - key is empty");
+
+        auto& storage = GlobalStorage::instance();
+
+        // 检查键是否存在
+        if (!storage.exist(key)) {
+            // 如果存储中不存在，检查过期字典
+            if (storage.expire_dict().contains(key)) {
+                // 存在于过期字典但已过期（理论上不应该发生）
+                LOG_WARN(EXPIRE, "PTTL - inconsistency: key in expire_dict but not in storage: %s", key.c_str());
+                return RespEncoder::encode_integer(-2);
+            }
+            LOG_DEBUG(EXPIRE, "PTTL - key not found: %s", key.c_str());
+            return RespEncoder::encode_integer(-2);
+        }
+
+        // 键存在于存储，检查是否有过期设置
+        if (!storage.expire_dict().contains(key)) {
+            // 存在于存储但无过期时间（永不过期）
+            LOG_DEBUG(EXPIRE, "PTTL - key has no expiration (never expire): %s", key.c_str());
+            return RespEncoder::encode_integer(-1);
+        }
+
+        // 获取剩余 TTL（毫秒）
+        int64_t ttl_ms = storage.expire_dict().get_ttl(key);
+        if (ttl_ms == -2) {
+            // 键不存在（理论上不应该发生，因为前面已检查过 storage.exist()）
+            LOG_WARN(EXPIRE, "PTTL - inconsistency: key exists in storage but get_ttl returned -2: %s", key.c_str());
+            return RespEncoder::encode_integer(-2);
+        }
+        if (ttl_ms <= 0) {
+            // 键已过期（理论上不应该发生，因为存储中该键应该被惰性删除了）
+            LOG_WARN(EXPIRE, "PTTL - key expired but still in storage: %s", key.c_str());
+            return RespEncoder::encode_integer(-2);
+        }
+
+        LOG_DEBUG(EXPIRE, "PTTL - key=%s, ttl_ms=%ld", key.c_str(), ttl_ms);
+        return RespEncoder::encode_integer(ttl_ms);
+    }
+
+    [[nodiscard]] std::unique_ptr<Command> clone() const override {
+        return std::make_unique<PTtlCommand>(*this);
+    }
+};
+
+/**
  * @brief PersistCommand - PERSIST 命令
  *
  * 语法：PERSIST key
