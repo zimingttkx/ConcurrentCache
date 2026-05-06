@@ -1,5 +1,5 @@
 #include "storage.h"
-#include "src/base/log.h"
+#include "base/log.h"
 #include <mutex>
 #include <cassert>
 
@@ -60,8 +60,11 @@ namespace cc_server {
             return std::nullopt;
         }
 
+        // 更新访问时间
+        it->second.last_access_time_ms = current_time_ms();
+
         LOG_TRACE(STORAGE, "Get key=%s - found, shard=%zu", key.c_str(), shard_idx);
-        return it->second;
+        return it->second.value;
     }
 
     // set - 设置键值对
@@ -74,6 +77,9 @@ namespace cc_server {
         // 参数校验
         assert(!key.empty() && "GlobalStorage::set - key is empty");
 
+        // 检查是否需要淘汰（在获取锁之前检查，避免长时间持锁）
+        evict_if_needed(key);
+
         // 1. 计算应该去哪个分片
         const size_t shard_idx  = get_shard_index(key);
         // 2. 在对应的分片加独占锁
@@ -83,8 +89,11 @@ namespace cc_server {
         bool had_expiration = expire_dict_.contains(key);
         expire_dict_.remove(key);
 
+        // 获取当前时间
+        int64_t now = current_time_ms();
+
         // 在对应分片的unordered_map里面插入或者更新
-        stores_[shard_idx].emplace(key, value);
+        stores_[shard_idx].insert_or_assign(key, CacheEntry(value, now));
 
         if (had_expiration) {
             LOG_DEBUG(STORAGE, "Set key=%s - value updated, cleared expiration, shard=%zu",
@@ -173,4 +182,90 @@ namespace cc_server {
         LOG_INFO(STORAGE, "Clear all - cleared %zu keys", total_cleared);
     }
 
+    /*
+     *
+     * ARU 淘汰方法
+     *
+     */
+    std::string GlobalStorage::evict_one() {
+        const int64_t now = current_time_ms();
+        std::string oldest_key;
+        int64_t oldest_time = now;
+        size_t oldest_shard = 0;
+        bool found = false;
+
+        // 第一遍：找到最老的键
+        for (size_t i = 0; i < num_shards_; i++) {
+            std::shared_lock<std::shared_mutex> lock(mutexes_[i]);
+            for (const auto& [key, entry] : stores_[i]) {
+                if (!found || entry.last_access_time_ms < oldest_time) {
+                    oldest_time = entry.last_access_time_ms;
+                    oldest_key = key;
+                    oldest_shard = i;
+                    found = true;
+                }
+            }
+        }
+
+        // 没有键可以淘汰
+        if (!found || oldest_key.empty()) {
+            LOG_WARN(CACHE, "Evict_one - no key found to evict, found=%d, key_empty=%d",
+                    found, oldest_key.empty());
+            return "";
+        }
+
+        // 防御性检查：确保找到的键有效
+        assert(oldest_shard < num_shards_ && "GlobalStorage::evict_one - shard index out of bounds");
+        assert(!oldest_key.empty() && "GlobalStorage::evict_one - oldest_key is empty");
+
+        // 第二遍：从最老的分片删除该键
+        {
+            std::unique_lock<std::shared_mutex> lock(mutexes_[oldest_shard]);
+            stores_[oldest_shard].erase(oldest_key);
+        }
+
+        // 同时删除过期记录
+        expire_dict_.remove(oldest_key);
+
+        LOG_INFO(CACHE, "Evicted key=%s, shard=%zu, last_access=%ldms ago",
+                oldest_key.c_str(), oldest_shard, now - oldest_time);
+
+        return oldest_key;
+    }
+
+    void GlobalStorage::evict_if_needed(const std::string& hint_key) {
+        // 防御性检查：阈值必须有效
+        size_t threshold = static_cast<size_t>(max_entries_ * EvictionConfig::kEvictThreshold);
+        assert(threshold <= max_entries_ && "GlobalStorage::evict_if_needed - threshold exceeds max");
+
+        size_t current_size = size();
+
+        // 未超过阈值，不需要淘汰
+        if (current_size < threshold) {
+            return;
+        }
+
+        LOG_WARN(CACHE, "Cache full (size=%zu, max=%zu, threshold=%zu), starting eviction",
+                current_size, max_entries_, threshold);
+
+        // 淘汰到安全线（留出 20% 空间）
+        size_t target_size = static_cast<size_t>(max_entries_ * 0.6);
+
+        // 防御性检查：目标大小必须有效
+        assert(target_size < max_entries_ && "GlobalStorage::evict_if_needed - target_size invalid");
+
+        size_t evicted_count = 0;
+        while (size() > target_size) {
+            std::string evicted = evict_one();
+            if (evicted.empty()) {
+                LOG_WARN(CACHE, "Eviction stopped - no more keys to evict, evicted=%zu", evicted_count);
+                break;
+            }
+            ++evicted_count;
+            LOG_DEBUG(CACHE, "Evicted key during auto-eviction: %s", evicted.c_str());
+        }
+
+        LOG_INFO(CACHE, "Eviction complete - evicted %zu keys, current_size=%zu, target_size=%zu",
+                evicted_count, size(), target_size);
+    }
 }
