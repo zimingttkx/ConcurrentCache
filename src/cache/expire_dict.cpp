@@ -17,6 +17,7 @@ namespace cc_server {
     void ExpireDict::set(const std::string &key, int64_t expire_ms) {
         // 参数校验：过期时间必须大于0
         assert(expire_ms > 0 && "ExpireDict::set - expire_ms must be positive");
+        assert(!key.empty() && "ExpireDict::set - key is empty");
 
         std::unique_lock<std::shared_mutex> lock(mutex_);
         const int64_t expire_time = current_time_ms() + expire_ms;
@@ -27,6 +28,8 @@ namespace cc_server {
     }
 
     int64_t ExpireDict::get_ttl(const std::string &key) const {
+        assert(!key.empty() && "ExpireDict::get_ttl - key is empty");
+
         std::shared_lock<std::shared_mutex> lock(mutex_);
         auto it = expire_map_.find(key);
         if (it == expire_map_.end()) {
@@ -40,6 +43,8 @@ namespace cc_server {
     }
 
     int64_t ExpireDict::get_expire_time(const std::string &key) const {
+        assert(!key.empty() && "ExpireDict::get_expire_time - key is empty");
+
         std::shared_lock<std::shared_mutex> lock(mutex_);
         auto it = expire_map_.find(key);
         if (it == expire_map_.end()) {
@@ -49,18 +54,24 @@ namespace cc_server {
     }
 
     bool ExpireDict::persist(const std::string &key) {
+        assert(!key.empty() && "ExpireDict::persist - key is empty");
+
         std::unique_lock<std::shared_mutex> lock(mutex_);
         auto it = expire_map_.find(key);
         if (it == expire_map_.end()) {
             LOG_DEBUG(EXPIRE, "Persist failed - key not found: %s", key.c_str());
             return false; // 键不存在
         }
-        expire_map_.erase(it); // 移除过期记录
-        LOG_DEBUG(EXPIRE, "Persist success - key now permanent: %s", key.c_str());
+        int64_t expire_time = it->second;
+        expire_map_.erase(it);
+        LOG_INFO(EXPIRE, "Persist success - key now permanent: %s (was expire_at=%ld)",
+                key.c_str(), expire_time);
         return true;
     }
 
     void ExpireDict::remove(const std::string &key) {
+        assert(!key.empty() && "ExpireDict::remove - key is empty");
+
         std::unique_lock<std::shared_mutex> lock(mutex_);
         size_t erased = expire_map_.erase(key);
         if (erased > 0) {
@@ -69,20 +80,25 @@ namespace cc_server {
     }
 
     bool ExpireDict::is_expired(const std::string &key) const {
+        assert(!key.empty() && "ExpireDict::is_expired - key is empty");
+
         std::shared_lock<std::shared_mutex> lock(mutex_);
         auto it = expire_map_.find(key);
         if (it == expire_map_.end()) {
             return false; // 不存在 视为永不过期
         }
-        bool expired = current_time_ms() >= it->second;
+        int64_t now = current_time_ms();
+        bool expired = now >= it->second;
         if (expired) {
-            LOG_DEBUG(EXPIRE, "Key expired: %s, expire_at=%ld",
-                     key.c_str(), it->second);
+            LOG_DEBUG(EXPIRE, "Key expired: %s, expire_at=%ld, now=%ld",
+                     key.c_str(), it->second, now);
         }
         return expired;
     }
 
     bool ExpireDict::contains(const std::string &key) const {
+        assert(!key.empty() && "ExpireDict::contains - key is empty");
+
         std::shared_lock<std::shared_mutex> lock(mutex_);
         return expire_map_.contains(key);
     }
@@ -100,6 +116,12 @@ namespace cc_server {
             all_keys.push_back(key);
         }
 
+        // 边界检查：没有键可返回
+        if (all_keys.empty()) {
+            LOG_TRACE(EXPIRE, "Got 0 candidates (requested %d), no keys in expire_dict", n);
+            return {};
+        }
+
         // 随机打乱
         std::shuffle(all_keys.begin(), all_keys.end(),
                      std::mt19937{std::random_device{}()});
@@ -107,7 +129,8 @@ namespace cc_server {
         // 取前 n 个作为候选
         std::vector<std::string> candidates;
         candidates.reserve(n);
-        for (int i = 0; i < n && i < static_cast<int>(all_keys.size()); ++i) {
+        int max_count = std::min(n, static_cast<int>(all_keys.size()));
+        for (int i = 0; i < max_count; ++i) {
             candidates.push_back(all_keys[i]);
         }
 
@@ -120,11 +143,14 @@ namespace cc_server {
     size_t ExpireDict::delete_expired() {
         std::unique_lock<std::shared_mutex> lock(mutex_);
 
+        const size_t before_count = expire_map_.size();
+        const int64_t now = current_time_ms();
         size_t deleted_count = 0;
-        int64_t now = current_time_ms();
 
         for (auto it = expire_map_.begin(); it != expire_map_.end();) {
             if (now >= it->second) { // 已过期
+                LOG_DEBUG(EXPIRE, "Deleting expired key=%s, expired_at=%ld",
+                         it->first.c_str(), it->second);
                 it = expire_map_.erase(it);
                 ++deleted_count;
             } else {
@@ -135,6 +161,8 @@ namespace cc_server {
         if (deleted_count > 0) {
             LOG_INFO(EXPIRE, "Deleted %zu expired keys, remaining=%zu",
                     deleted_count, expire_map_.size());
+        } else if (before_count > 0) {
+            LOG_TRACE(EXPIRE, "No keys expired, checked %zu keys", before_count);
         }
 
         return deleted_count;

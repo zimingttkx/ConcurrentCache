@@ -23,7 +23,7 @@ public:
     std::string execute(const std::vector<std::string>& args) override {
         // 参数验证：EXPIRE key seconds
         if (args.size() != 3) {
-            LOG_WARN(EXPIRE, "EXPIRE - wrong argument count: %zu", args.size());
+            LOG_WARN(EXPIRE, "EXPIRE - wrong argument count: %zu, expected 3", args.size());
             return RespEncoder::encode_error("ERR wrong number of arguments for 'expire' command");
         }
 
@@ -37,7 +37,7 @@ public:
         try {
             int64_t seconds = std::stoll(seconds_str);
             if (seconds <= 0) {
-                LOG_WARN(EXPIRE, "EXPIRE - invalid seconds <= 0: %ld", seconds);
+                LOG_WARN(EXPIRE, "EXPIRE - invalid seconds <= 0: %ld for key=%s", seconds, key.c_str());
                 return RespEncoder::encode_integer(0);
             }
 
@@ -50,7 +50,8 @@ public:
 
             // 设置过期时间（转换为毫秒）
             storage.expire_dict().set(key, seconds * 1000);
-            LOG_INFO(EXPIRE, "EXPIRE - key=%s, seconds=%ld", key.c_str(), seconds);
+            LOG_INFO(EXPIRE, "EXPIRE - key=%s, seconds=%ld, ttl_ms=%ld",
+                    key.c_str(), seconds, seconds * 1000);
             return RespEncoder::encode_integer(1);
 
         } catch (const std::exception& e) {
@@ -78,7 +79,7 @@ public:
     std::string execute(const std::vector<std::string>& args) override {
         // 参数验证：TTL key
         if (args.size() != 2) {
-            LOG_WARN(EXPIRE, "TTL - wrong argument count: %zu", args.size());
+            LOG_WARN(EXPIRE, "TTL - wrong argument count: %zu, expected 2", args.size());
             return RespEncoder::encode_error("ERR wrong number of arguments for 'ttl' command");
         }
 
@@ -99,15 +100,23 @@ public:
             return RespEncoder::encode_integer(-2);
         }
 
-        // 键存在，获取剩余 TTL（毫秒转秒）
+        // 键存在于存储，检查是否有过期设置
+        if (!storage.expire_dict().contains(key)) {
+            // 存在于存储但无过期时间（永不过期）
+            LOG_DEBUG(EXPIRE, "TTL - key has no expiration (never expire): %s", key.c_str());
+            return RespEncoder::encode_integer(-1);
+        }
+
+        // 键存在且有过期设置，获取剩余 TTL
         int64_t ttl_ms = storage.expire_dict().get_ttl(key);
-        if (ttl_ms == -1) {
-            LOG_DEBUG(EXPIRE, "TTL - key has no expiration: %s", key.c_str());
-            return RespEncoder::encode_integer(-1);  // 永不过期
+        if (ttl_ms <= 0) {
+            // 已过期（理论上不应该发生，因为存储中该键应该被惰性删除了）
+            LOG_WARN(EXPIRE, "TTL - key expired but still in storage: %s", key.c_str());
+            return RespEncoder::encode_integer(-2);
         }
 
         int64_t ttl_sec = ttl_ms / 1000;
-        LOG_DEBUG(EXPIRE, "TTL - key=%s, ttl_sec=%ld", key.c_str(), ttl_sec);
+        LOG_DEBUG(EXPIRE, "TTL - key=%s, ttl_sec=%ld, ttl_ms=%ld", key.c_str(), ttl_sec, ttl_ms);
         return RespEncoder::encode_integer(ttl_sec);
     }
 
@@ -130,7 +139,7 @@ public:
     std::string execute(const std::vector<std::string>& args) override {
         // 参数验证：PERSIST key
         if (args.size() != 2) {
-            LOG_WARN(EXPIRE, "PERSIST - wrong argument count: %zu", args.size());
+            LOG_WARN(EXPIRE, "PERSIST - wrong argument count: %zu, expected 2", args.size());
             return RespEncoder::encode_error("ERR wrong number of arguments for 'persist' command");
         }
 
@@ -169,7 +178,7 @@ public:
     std::string execute(const std::vector<std::string>& args) override {
         // 参数验证：SETEX key seconds value
         if (args.size() != 4) {
-            LOG_WARN(EXPIRE, "SETEX - wrong argument count: %zu", args.size());
+            LOG_WARN(EXPIRE, "SETEX - wrong argument count: %zu, expected 4", args.size());
             return RespEncoder::encode_error("ERR wrong number of arguments for 'setex' command");
         }
 
@@ -179,12 +188,13 @@ public:
 
         // 参数防御性检查
         assert(!key.empty() && "SETEX command - key is empty");
+        assert(!seconds_str.empty() && "SETEX command - seconds is empty");
 
         // 解析过期秒数
         try {
             int64_t seconds = std::stoll(seconds_str);
             if (seconds <= 0) {
-                LOG_WARN(EXPIRE, "SETEX - invalid seconds <= 0: %ld", seconds);
+                LOG_WARN(EXPIRE, "SETEX - invalid seconds <= 0: %ld for key=%s", seconds, key.c_str());
                 return RespEncoder::encode_error("ERR invalid expire time");
             }
 
@@ -196,8 +206,8 @@ public:
             // 再设置过期时间
             storage.expire_dict().set(key, seconds * 1000);
 
-            LOG_INFO(EXPIRE, "SETEX - key=%s, seconds=%ld, value_len=%zu",
-                    key.c_str(), seconds, value.size());
+            LOG_INFO(EXPIRE, "SETEX - key=%s, seconds=%ld, value_len=%zu, ttl_ms=%ld",
+                    key.c_str(), seconds, value.size(), seconds * 1000);
             return RespEncoder::encode_ok();
 
         } catch (const std::exception& e) {
