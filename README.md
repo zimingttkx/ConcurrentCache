@@ -17,6 +17,9 @@
 - 完整锁机制
 - 线程池
 - 优雅退出
+- 分段锁哈希表（64分片）
+- 过期字典 + ARU淘汰算法
+- TTL命令（EXPIRE/TTL/PTTL/PERSIST/SETEX）
 
 ## 技术栈
 
@@ -61,6 +64,11 @@
 | DEL | 删除键 |
 | EXISTS | 检查键是否存在 |
 | PING | 心跳检测 |
+| EXPIRE | 设置键的过期时间（秒） |
+| TTL | 获取键的剩余生存时间（秒） |
+| PTTL | 获取键的剩余生存时间（毫秒） |
+| PERSIST | 移除键的过期时间 |
+| SETEX | 设置键值并指定过期时间 |
 
 ### 基础组件
 
@@ -93,6 +101,14 @@
 | ThreadCache | 线程本地缓存，无锁分配 |
 | CentralCache | 中心缓存，细粒度锁 |
 | PageCache | 页缓存，直接和系统交互 |
+
+### 缓存核心
+
+| 模块 | 功能 |
+|------|------|
+| GlobalStorage | 分段锁哈希表（64分片），线程安全 |
+| ExpireDict | 过期字典，TTL管理 |
+| ARU淘汰 | 近似LRU淘汰算法 |
 
 ## 架构概览
 
@@ -169,6 +185,20 @@ OK
 (integer) 1
 127.0.0.1:6379> DEL name
 (integer) 1
+
+# 测试过期命令
+127.0.0.1:6379> SETEX mykey 10 "hello"
+OK
+127.0.0.1:6379> TTL mykey
+(integer) 10
+127.0.0.1:6379> EXPIRE mykey 60
+(integer) 1
+127.0.0.1:6379> TTL mykey
+(integer) 60
+127.0.0.1:6379> PERSIST mykey
+(integer) 1
+127.0.0.1:6379> TTL mykey
+(integer) -1
 ```
 
 ### 优雅退出
@@ -216,9 +246,12 @@ src/
 ├── command/        # 命令层
 │   ├── command.h  # 命令基类
 │   ├── command_factory.cpp/h # 命令工厂
-│   └── string_cmd.h # 字符串命令实现
+│   ├── string_cmd.h # 字符串命令实现
+│   └── expire_cmd.h # TTL命令实现
 └── cache/          # 缓存层
-    └── storage.cpp/h # 全局存储
+    ├── storage.cpp/h # 全局存储
+    ├── expire_dict.cpp/h # 过期字典
+    └── expiration_checker.cpp/h # 定期删除器
 
 test/               # 测试套件
 ├── trace/         # 测试框架
@@ -241,10 +274,9 @@ docs/
 | 版本 | 目标 |
 |------|------|
 | V1.0 | 基础框架，单 Reactor，GET/SET/DEL/EXISTS |
-| V2.0 | 线程池，MainSubReactor，内存池，锁机制，优雅退出 |
-| V3.0 | 主从 Reactor 模型，分段锁哈希表，LRU 淘汰策略 |
-| V4.0 | 多种数据类型，RDB/AOF 持久化 |
-| V5.0 | 集群模式，哈希槽分片，主从复制 |
+| V2.0 | 线程池，MainSubReactor，内存池，锁机制，优雅退出，分段锁哈希表，ExpireDict，ARU淘汰，TTL命令 |
+| V3.0 | 多种数据类型（Hash/List/Set/ZSet），RDB/AOF 持久化 |
+| V4.0 | 集群模式，哈希槽分片，主从复制 |
 
 ## 测试
 
