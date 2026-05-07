@@ -35,11 +35,18 @@
   ├── ✅ 优雅退出（修复信号处理死锁问题）
   └── ✅ 测试套件（锁测试 + 原子测试 + 同步原语测试）
 
+2026-05-07 ─── V3 多数据类型扩展 ✅ 已完成
+  ├── ✅ CacheObject 统一对象封装
+  ├── ✅ LIST 数据结构（LPUSH/RPUSH/LPOP/RPOP/LLEN/LRANGE）
+  ├── ✅ HASH 数据结构（HSET/HGET/HDEL/HLEN/HGETALL）
+  ├── ✅ SET 数据结构（SADD/SPOP/SCARD/SISMEMBER/SMEMBERS）
+  └── ✅ ZSET 数据结构（ZADD/ZSCORE/ZCARD/ZRANGE）
+
 【计划中】
 ═══════════════════════════════════════════════════════════════════════════════
 
-V3 增强版本 ─── 多数据类型 + 持久化
-  └── 📋 Hash/List/Set/ZSet + RDB/AOF
+V3 增强 ─── 持久化
+  └── 📋 RDB/AOF 持久化
 
 V4 分布式版本 ─── 集群支持
   └── 📋 哈希槽 + Gossip + 主从复制
@@ -326,18 +333,122 @@ MainSubReactor解决方案：
 
 ---
 
-## V3 增强版本（计划中）
+## V3 多数据类型扩展（✅ 已完成）
 
-**目标**：支持更多数据类型，完善持久化
+**开发周期**：2026-05-07
 
-### 规划内容
+**目标**：支持更多数据类型（LIST/HASH/SET/ZSET）
 
-| 模块 | 功能 | 说明 |
-|------|------|------|
-| 多数据类型 | Hash/List/Set/ZSet | Redis风格的数据结构 |
-| RDB持久化 | 定时快照 | fork子进程，不阻塞主进程 |
-| AOF持久化 | 追加日志 | 每次写操作追加，重启重放 |
-| 淘汰算法 | LFU/FIFO/Random | 多种策略可选 |
+### 已完成模块详解
+
+#### ✅ CacheObject 统一对象封装（2026-05-07）
+
+**为什么做**：
+```
+V2 版本的 GlobalStorage 只能存储字符串
+V3 需要支持多种数据类型：
+- STRING（原有）
+- LIST（列表）
+- HASH（哈希表）
+- SET（集合）
+- ZSET（有序集合）
+
+需要一个统一的类型来封装这些不同的数据结构
+```
+
+**核心设计**：
+```cpp
+enum class ObjectType : uint8_t {
+    STRING = 0,
+    LIST = 1,
+    HASH = 2,
+    SET = 3,
+    ZSET = 4
+};
+
+class CacheObject {
+    ObjectType type_;
+    std::string string_val_;
+    std::vector<std::string> list_val_;
+    std::unordered_map<std::string, std::string> hash_val_;
+    std::unordered_set<std::string> set_val_;
+    std::set<ZSetMember> zset_val_;  // 有序集合
+};
+```
+
+**文件**：`src/datatype/object.h`, `src/datatype/object.cpp`
+
+#### ✅ LIST 数据结构（2026-05-07）
+
+**底层实现**：`std::vector<std::string>`
+
+**支持命令**：
+| 命令 | 功能 | 返回值 |
+|------|------|--------|
+| LPUSH | 从左侧推入 | 列表长度 |
+| RPUSH | 从右侧推入 | 列表长度 |
+| LPOP | 从左侧弹出 | 元素或 nil |
+| RPOP | 从右侧弹出 | 元素或 nil |
+| LLEN | 获取长度 | 长度 |
+| LRANGE | 范围查询 | 元素列表 |
+
+**特点**：
+- 支持负索引（-1 表示最后一个元素）
+- 范围边界自动调整
+
+#### ✅ HASH 数据结构（2026-05-07）
+
+**底层实现**：`std::unordered_map<std::string, std::string>`
+
+**支持命令**：
+| 命令 | 功能 | 返回值 |
+|------|------|--------|
+| HSET | 设置字段 | 1新增/0更新 |
+| HGET | 获取字段值 | 值或 nil |
+| HDEL | 删除字段 | 删除数量 |
+| HLEN | 获取字段数 | 数量 |
+| HGETALL | 获取所有键值对 | 键值对列表 |
+
+#### ✅ SET 数据结构（2026-05-07）
+
+**底层实现**：`std::unordered_set<std::string>`
+
+**支持命令**：
+| 命令 | 功能 | 返回值 |
+|------|------|--------|
+| SADD | 添加成员 | 新增数量 |
+| SPOP | 随机弹出 | 成员或 nil |
+| SCARD | 成员数量 | 数量 |
+| SISMEMBER | 成员是否存在 | 1是/0否 |
+| SMEMBERS | 获取所有成员 | 成员列表 |
+
+**特点**：
+- 使用 `std::mt19937` + `std::uniform_int_distribution` 高质量随机数
+
+#### ✅ ZSET 数据结构（2026-05-07）
+
+**底层实现**：`std::set<ZSetMember>`（按分数排序）
+
+**成员结构**：
+```cpp
+struct ZSetMember {
+    std::string member;
+    double score;
+    bool operator<(const ZSetMember& other) const {
+        if (score < other.score) return true;
+        if (score > other.score) return false;
+        return member < other.member;  // 分数相同时按字典序
+    }
+};
+```
+
+**支持命令**：
+| 命令 | 功能 | 返回值 |
+|------|------|--------|
+| ZADD | 添加成员 | 新增/更新 |
+| ZSCORE | 获取分数 | 分数或 nil |
+| ZCARD | 成员数量 | 数量 |
+| ZRANGE | 按分数范围查询 | 成员列表（可选 WITHSCORES） |
 
 ---
 
@@ -403,3 +514,4 @@ Logger        ██████████████████████
 | 2026-04-28 | V2 | 线程池完成 |
 | 2026-05-05 | V2 | 分段锁哈希表完成（64分片） |
 | 2026-05-05 | V2 | 过期字典 + ARU淘汰 + TTL命令完成 |
+| 2026-05-07 | V3 | 多数据类型扩展完成（LIST/HASH/SET/ZSET）|

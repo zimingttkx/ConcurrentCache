@@ -91,11 +91,27 @@
 ┌─────────────────────────────────────────────────────────────┐
 │ ✅ RESP协议   ████████████████████████████ 100%           │
 │ ✅ CommandFactory ████████████████████████████ 100%       │
-│ ✅ 字符串命令 ████████████████████████████ 100%           │
+│                                                             │
+│ ✅ STRING命令 ████████████████████████████ 100%           │
 │    - GET/SET/DEL/EXISTS/PING                             │
 │                                                             │
-│ ✅ TTL命令    ████████████████████████████ 100%              │
-│        - EXPIRE/TTL/PTTL/PERSIST/SETEX                 │
+│ ✅ TTL命令    ████████████████████████████ 100%            │
+│    - EXPIRE/TTL/PTTL/PERSIST/SETEX                        │
+│                                                             │
+│ ✅ LIST命令   ████████████████████████████ 100%            │
+│    - LPUSH/RPUSH/LPOP/RPOP/LLEN/LRANGE                    │
+│    - 支持负索引                                            │
+│                                                             │
+│ ✅ HASH命令   ████████████████████████████ 100%            │
+│    - HSET/HGET/HDEL/HLEN/HGETALL                          │
+│                                                             │
+│ ✅ SET命令    ████████████████████████████ 100%            │
+│    - SADD/SPOP/SCARD/SISMEMBER/SMEMBERS                   │
+│    - 高质量随机数（mt19937）                               │
+│                                                             │
+│ ✅ ZSET命令   ████████████████████████████ 100%            │
+│    - ZADD/ZSCORE/ZCARD/ZRANGE                             │
+│    - std::set 有序存储，支持 WITHSCORES                   │
 └─────────────────────────────────────────────────────────────┘
 
 【测试】
@@ -137,6 +153,8 @@
 | 2026-04-28 | 线程池 | ✅ 新增 | ThreadPool 完整实现 |
 | 2026-04-29 | 优雅退出 | ✅ 修复 | 修复信号处理导致的死锁问题 |
 | 2026-04-29 | 测试套件 | ✅ 新增 | 锁测试、原子测试、同步原语测试 |
+| 2026-05-05 | 缓存核心 | ✅ | 分段锁哈希表 + 过期字典 + ARU淘汰 + TTL命令 |
+| 2026-05-07 | V3数据类型 | ✅ 新增 | CacheObject + LIST/HASH/SET/ZSET 命令实现 |
 
 ---
 
@@ -612,14 +630,38 @@ LRU链表：访问时移动到头部，淘汰时从尾部删
 
 ---
 
-### 📋 命令增强
+### ✅ 多数据类型扩展（V3已完成）
+
+**实现内容**：
+- CacheObject 统一对象封装（STRING/LIST/HASH/SET/ZSET）
+- LIST: LPUSH/RPUSH/LPOP/RPOP/LLEN/LRANGE（支持负索引）
+- HASH: HSET/HGET/HDEL/HLEN/HGETALL
+- SET: SADD/SPOP/SCARD/SISMEMBER/SMEMBERS（mt19937随机）
+- ZSET: ZADD/ZSCORE/ZCARD/ZRANGE（std::set有序）
+
+**文件**：
+- `src/datatype/object.h/cpp` - CacheObject 定义与实现
+
+---
+
+### 📋 持久化增强（V3下一阶段）
+
+**待实现**：
+```
+RDB持久化：定时快照，fork子进程不阻塞主进程
+AOF持久化：追加日志，重启重放
+```
+
+---
+
+### 📋 进阶命令
 
 **待实现命令**：
 ```
-原子计数：INCR key / DECR key
-条件设置：SETNX key value（键不存在才设置）
-过期设置：SETEX key seconds value
-字符串操作：APPEND key value / STRLEN key
+LIST: LSET/LINDEX/LINSERT/LREM
+HASH: HVALS/HKEYS
+SET: SREM
+ZSET: ZREM/ZINCRBY/ZRANK/ZREVRANGE
 ```
 
 ---
@@ -660,12 +702,17 @@ concurrentcache/
 │   ├── protocol/
 │   │   └── resp.h/cpp
 │   │
+│   ├── datatype/
+│   │   ├── object.h           ✅ V3 统一对象封装
+│   │   └── object.cpp         ✅ CacheObject 实现
+│   │
 │   ├── command/
 │   │   ├── command.h
-│   │   └── string_cmd.h/cpp
+│   │   ├── string_cmd.h        ✅ GET/SET/DEL/EXISTS/PING + TTL + LIST/HASH/SET/ZSET
+│   │   └── command_factory.h/cpp
 │   │
 │   └── cache/
-│       └── storage.h/cpp
+│       └── storage.h/cpp        ✅ 全局存储（V3适配 CacheObject）
 │
 ├── test/
 │   ├── trace/                      ✅ 测试框架
@@ -701,3 +748,5 @@ concurrentcache/
 | 2026-04-28 | 线程池 | ✅ 新增 | ThreadPool 完整实现 |
 | 2026-04-29 | 优雅退出 | ✅ 修复 | 修复信号处理导致的死锁问题 |
 | 2026-04-29 | 测试套件 | ✅ 新增 | 锁测试、原子测试、同步原语测试 |
+| 2026-05-05 | 缓存核心 | ✅ | 分段锁哈希表 + 过期字典 + ARU淘汰 + TTL命令 |
+| 2026-05-07 | V3数据类型 | ✅ 新增 | CacheObject + LIST/HASH/SET/ZSET 命令实现 |
