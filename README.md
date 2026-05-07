@@ -21,6 +21,13 @@
 - 过期字典 + ARU淘汰算法
 - TTL命令（EXPIRE/TTL/PTTL/PERSIST/SETEX）
 
+**V3.0** - 多数据类型扩展（开发中）
+- ✅ LIST 数据结构（LPUSH/RPUSH/LPOP/RPOP/LLEN/LRANGE）
+- ✅ HASH 数据结构（HSET/HGET/HDEL/HLEN/HGETALL）
+- ✅ SET 数据结构（SADD/SPOP/SCARD/SISMEMBER/SMEMBERS）
+- ✅ ZSET 数据结构（ZADD/ZSCORE/ZCARD/ZRANGE）
+- 📋 RDB/AOF 持久化（计划中）
+
 ## 技术栈
 
 - **编程语言**：C++20
@@ -69,6 +76,30 @@
 | PTTL | 获取键的剩余生存时间（毫秒） |
 | PERSIST | 移除键的过期时间 |
 | SETEX | 设置键值并指定过期时间 |
+| **LIST 命令** | |
+| LPUSH | 从列表左侧推入元素 |
+| RPUSH | 从列表右侧推入元素 |
+| LPOP | 从列表左侧弹出元素 |
+| RPOP | 从列表右侧弹出元素 |
+| LLEN | 获取列表长度 |
+| LRANGE | 获取列表范围内的元素（支持负索引） |
+| **HASH 命令** | |
+| HSET | 设置哈希字段 |
+| HGET | 获取哈希字段值 |
+| HDEL | 删除哈希字段 |
+| HLEN | 获取哈希字段数量 |
+| HGETALL | 获取所有哈希字段和值 |
+| **SET 命令** | |
+| SADD | 添加集合成员 |
+| SPOP | 随机弹出集合成员 |
+| SCARD | 获取集合成员数量 |
+| SISMEMBER | 检查成员是否在集合中 |
+| SMEMBERS | 获取所有集合成员 |
+| **ZSET 命令** | |
+| ZADD | 添加有序集合成员 |
+| ZSCORE | 获取成员的分数 |
+| ZCARD | 获取有序集合成员数量 |
+| ZRANGE | 按分数范围获取成员（支持 WITHSCORES） |
 
 ### 基础组件
 
@@ -170,11 +201,15 @@ make -j$(nproc)
 
 ### 测试
 
-```bash
-# 使用 redis-cli 连接
-redis-cli -p 6379
+使用 redis-cli 连接服务器进行测试：
 
-# 测试命令
+```bash
+redis-cli -p 6379
+```
+
+#### 基础命令测试
+
+```bash
 127.0.0.1:6379> PING
 PONG
 127.0.0.1:6379> SET name test
@@ -185,8 +220,11 @@ OK
 (integer) 1
 127.0.0.1:6379> DEL name
 (integer) 1
+```
 
-# 测试过期命令
+#### 过期命令测试
+
+```bash
 127.0.0.1:6379> SETEX mykey 10 "hello"
 OK
 127.0.0.1:6379> TTL mykey
@@ -199,6 +237,86 @@ OK
 (integer) 1
 127.0.0.1:6379> TTL mykey
 (integer) -1
+```
+
+#### LIST 命令测试
+
+```bash
+127.0.0.1:6379> LPUSH mylist a b c
+(integer) 3
+127.0.0.1:6379> RPUSH mylist d e
+(integer) 5
+127.0.0.1:6379> LRANGE mylist 0 -1
+1) "c"
+2) "b"
+3) "a"
+4) "d"
+5) "e"
+127.0.0.1:6379> LPOP mylist
+"c"
+127.0.0.1:6379> LLEN mylist
+(integer) 4
+```
+
+#### HASH 命令测试
+
+```bash
+127.0.0.1:6379> HSET user:1 name "Alice" age "25"
+(integer) 2
+127.0.0.1:6379> HSET user:1 city "Beijing"
+(integer) 1
+127.0.0.1:6379> HGET user:1 name
+"Alice"
+127.0.0.1:6379> HLEN user:1
+(integer) 3
+127.0.0.1:6379> HGETALL user:1
+1) "name"
+2) "Alice"
+3) "age"
+4) "25"
+5) "city"
+6) "Beijing"
+```
+
+#### SET 命令测试
+
+```bash
+127.0.0.1:6379> SADD tags "redis" "cache" "cpp"
+(integer) 3
+127.0.0.1:6379> SADD tags "redis" "cache"
+(integer) 0
+127.0.0.1:6379> SCARD tags
+(integer) 3
+127.0.0.1:6379> SISMEMBER tags "cpp"
+(integer) 1
+127.0.0.1:6379> SMEMBERS tags
+1) "redis"
+2) "cache"
+3) "cpp"
+127.0.0.1:6379> SPOP tags
+"cache"
+```
+
+#### ZSET 命令测试
+
+```bash
+127.0.0.1:6379> ZADD leaderboard 100 "Alice"
+(integer) 1
+127.0.0.1:6379> ZADD leaderboard 200 "Bob"
+(integer) 1
+127.0.0.1:6379> ZADD leaderboard 150 "Charlie"
+(integer) 1
+127.0.0.1:6379> ZRANGE leaderboard 0 -1 WITHSCORES
+1) "Alice"
+2) "100"
+3) "Charlie"
+4) "150"
+5) "Bob"
+6) "200"
+127.0.0.1:6379> ZSCORE leaderboard "Bob"
+"200"
+127.0.0.1:6379> ZCARD leaderboard
+(integer) 3
 ```
 
 ### 优雅退出
@@ -243,11 +361,13 @@ src/
 │   └── memory_pool.h
 ├── protocol/       # 协议层
 │   └── resp.cpp/h # RESP 协议解析
+├── datatype/       # 数据类型（V3 新增）
+│   ├── object.h    # CacheObject 统一对象封装
+│   └── object.cpp  # CacheObject 实现
 ├── command/        # 命令层
 │   ├── command.h  # 命令基类
 │   ├── command_factory.cpp/h # 命令工厂
-│   ├── string_cmd.h # 字符串命令实现
-│   └── expire_cmd.h # TTL命令实现
+│   └── string_cmd.h # 全部命令实现
 └── cache/          # 缓存层
     ├── storage.cpp/h # 全局存储
     ├── expire_dict.cpp/h # 过期字典
@@ -271,12 +391,13 @@ docs/
 
 ## 开发计划
 
-| 版本 | 目标 |
-|------|------|
-| V1.0 | 基础框架，单 Reactor，GET/SET/DEL/EXISTS |
-| V2.0 | 线程池，MainSubReactor，内存池，锁机制，优雅退出，分段锁哈希表，ExpireDict，ARU淘汰，TTL命令 |
-| V3.0 | 多种数据类型（Hash/List/Set/ZSet），RDB/AOF 持久化 |
-| V4.0 | 集群模式，哈希槽分片，主从复制 |
+| 版本 | 目标 | 状态 |
+|------|------|------|
+| V1.0 | 基础框架，单 Reactor，GET/SET/DEL/EXISTS | ✅ 已完成 |
+| V2.0 | 线程池，MainSubReactor，内存池，锁机制，优雅退出，分段锁哈希表，ExpireDict，ARU淘汰，TTL命令 | ✅ 已完成 |
+| V3.0 | 多种数据类型（LIST/HASH/SET/ZSET） | 🚧 开发中 |
+| V3.0 | RDB/AOF 持久化 | 📋 计划中 |
+| V4.0 | 集群模式，哈希槽分片，主从复制 | 📋 计划中 |
 
 ## 测试
 
