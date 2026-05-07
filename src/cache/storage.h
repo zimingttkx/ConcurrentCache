@@ -7,14 +7,15 @@
 #include <shared_mutex>
 #include <vector>
 #include "expire_dict.h"
+#include "datatype/object.h"
 
 namespace cc_server {
     // 缓存条目结构体
     struct CacheEntry {
-        std::string value;
-        int64_t last_access_time_ms; // 最后访问时间戳
+        CacheObject value;  // 替换原来的 std::string value
+        int64_t last_access_time_ms;
         CacheEntry() : last_access_time_ms(0) {}
-        CacheEntry(const std::string& v, int64_t t) : value(v), last_access_time_ms(t) {}
+        CacheEntry(const CacheObject& v, int64_t t) : value(v), last_access_time_ms(t) {}
     };
 
     // 淘汰策略配置
@@ -37,10 +38,10 @@ namespace cc_server {
         static GlobalStorage& instance();
 
         /** @brief 获取键对应的值，不存在返回空字符串 */
-        std::optional<std::string> get(const std::string& key);
+        std::optional<CacheObject> get(const std::string& key);
 
         /** @brief 设置键值对，键已存在则更新 */
-        void set(const std::string& key, const std::string& value);
+        void set(const std::string& key, const CacheObject& value);
 
         /** @brief 删除键值对，返回是否删除成功 */
         bool del(const std::string& key);

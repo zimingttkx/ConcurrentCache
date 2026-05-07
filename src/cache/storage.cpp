@@ -33,7 +33,7 @@ namespace cc_server {
     // @return 键对应的值，不存在返回空字符串
     // @note 线程安全：使用共享锁，允许多读并发
 
-    std::optional<std::string> GlobalStorage::get(const std::string& key) {
+    std::optional<CacheObject> GlobalStorage::get(const std::string& key) {
         // 参数校验
         assert(!key.empty() && "GlobalStorage::get - key is empty");
 
@@ -73,7 +73,7 @@ namespace cc_server {
     // @note 线程安全：使用独占锁，写操作互斥
     // @note 键已存在则更新值，不存在则插入新键值对
 
-    void GlobalStorage::set(const std::string& key, const std::string& value) {
+    void GlobalStorage::set(const std::string& key, const CacheObject& value) {
         // 参数校验
         assert(!key.empty() && "GlobalStorage::set - key is empty");
 
