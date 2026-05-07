@@ -41,6 +41,8 @@ add_executable(concurrentcache-server ${SOURCES}
         src/cache/expiration_checker.h
         src/cache/expiration_checker.cpp
         src/command/expire_cmd.h
+        src/datatype/object.cpp
+        src/datatype/object.h
 )
 
 if(UNIX)

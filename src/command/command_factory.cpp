@@ -4,9 +4,9 @@
 
 namespace cc_server {
 
-    
+
     // 私有构造函数：自动注册所有内置命令
-    
+
     //
     // 为什么在这里注册命令？
     // - 每次创建 CommandFactory 实例时，自动注册所有支持的命令
@@ -26,14 +26,42 @@ namespace cc_server {
         register_command("ping", std::make_unique<PingCommand>());
         register_command("expire", std::make_unique<ExpireCommand>());
         register_command("ttl", std::make_unique<TtlCommand>());
-        register_command("pttl", std::make_unique<PTtlCommand>());
+        register_command("pttl", std::make_unique<PTTlCommand>());
         register_command("persist", std::make_unique<PersistCommand>());
         register_command("setex", std::make_unique<SetexCommand>());
+
+        // List 命令
+        register_command("lpush", std::make_unique<LpushCommand>());
+        register_command("rpush", std::make_unique<RpushCommand>());
+        register_command("lpop", std::make_unique<LpopCommand>());
+        register_command("rpop", std::make_unique<RpopCommand>());
+        register_command("llen", std::make_unique<LlenCommand>());
+        register_command("lrange", std::make_unique<LrangeCommand>());
+
+        // Hash 命令
+        register_command("hset", std::make_unique<HsetCommand>());
+        register_command("hget", std::make_unique<HgetCommand>());
+        register_command("hdel", std::make_unique<HdelCommand>());
+        register_command("hlen", std::make_unique<HlenCommand>());
+        register_command("hgetall", std::make_unique<HgetallCommand>());
+
+        // Set 命令
+        register_command("sadd", std::make_unique<SaddCommand>());
+        register_command("spop", std::make_unique<SpopCommand>());
+        register_command("scard", std::make_unique<ScardCommand>());
+        register_command("sismember", std::make_unique<SismemberCommand>());
+        register_command("smembers", std::make_unique<SmembersCommand>());
+
+        // ZSet 命令
+        register_command("zadd", std::make_unique<ZaddCommand>());
+        register_command("zscore", std::make_unique<ZscoreCommand>());
+        register_command("zcard", std::make_unique<ZcardCommand>());
+        register_command("zrange", std::make_unique<ZrangeCommand>());
     }
 
-    
+
     // instance() - 获取单例实例
-    
+
     //
     // 实现：Magic Static（C++11 线程安全局部静态变量）
     //
@@ -46,9 +74,9 @@ namespace cc_server {
         return instance;
     }
 
-    
+
     // register_command() - 注册命令
-    
+
     //
     // 参数：
     //   name - 命令名（如 "get", "set"）
@@ -68,9 +96,9 @@ namespace cc_server {
         commands_[name] = std::move(cmd);  // 正确：移动语义
     }
 
-    
+
     // create() - 创建命令对象
-    
+
     //
     // 参数：
     //   name - 命令名
