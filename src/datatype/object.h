@@ -12,6 +12,7 @@
 #include <optional>
 #include <variant>
 #include <cstdint>
+#include <set>
 
 #include "base/log.h"
 
@@ -98,9 +99,12 @@ namespace cc_server {
 
         std::optional<double> zset_score(const std::string& member) const;
 
-        size_t zset_size() const { return zset_val_.size();}
+        size_t zset_size() const { return zset_val_.size(); }
 
         std::vector<std::pair<std::string, double>> zset_range_by_score(double min, double max, bool with_scores = false) const;
+
+        // 获取所有 ZSET 成员（用于 RDB 序列化）
+        std::vector<std::pair<std::string, double>> zset_all() const;
 
     private:
         // ZSet 成员结构体（按分数排序）

@@ -15,10 +15,26 @@ CacheObject::CacheObject(std::vector<std::string> vals)
 size_t CacheObject::memory_size() const {
     switch (type_) {
         case ObjectType::STRING: return string_val_.size();
-        case ObjectType::LIST: return list_val_.size();
-        case ObjectType::HASH: return hash_val_.size();
-        case ObjectType::SET: return set_val_.size();
-        case ObjectType::ZSET: return zset_val_.size();
+        case ObjectType::LIST: {
+            size_t total = 0;
+            for (const auto& s : list_val_) total += s.size();
+            return total;
+        }
+        case ObjectType::HASH: {
+            size_t total = 0;
+            for (const auto& [k, v] : hash_val_) total += k.size() + v.size();
+            return total;
+        }
+        case ObjectType::SET: {
+            size_t total = 0;
+            for (const auto& m : set_val_) total += m.size();
+            return total;
+        }
+        case ObjectType::ZSET: {
+            size_t total = 0;
+            for (const auto& z : zset_val_) total += z.member.size() + sizeof(z.score);
+            return total;
+        }
         default: return 0;
     }
 }
@@ -280,25 +296,41 @@ bool CacheObject::zset_add(const std::string& member, double score) {
     }
     type_ = ObjectType::ZSET;
 
-    // 先查找是否存在
-    ZSetMember target{member, score};
-    auto it = zset_val_.find(target);
-    if (it != zset_val_.end()) {
-        // 存在，先删除再插入（因为 set 是有序的，修改后可能需要重新排序）
-        zset_val_.erase(it);
+    // 线性查找是否存在该 member（std::set 按 (score, member) 排序，无法直接按 member 查找）
+    bool found = false;
+    bool score_changed = false;
+    auto it_to_erase = zset_val_.end();
+
+    for (auto it = zset_val_.begin(); it != zset_val_.end(); ++it) {
+        if (it->member == member) {
+            found = true;
+            if (it->score != score) {
+                // 分数不同，需要更新
+                score_changed = true;
+                it_to_erase = it;
+            }
+            break;
+        }
     }
 
+    if (score_changed && it_to_erase != zset_val_.end()) {
+        zset_val_.erase(it_to_erase);
+    }
+
+    // 插入新记录（如果 found 但 score_changed，会替换；其他情况按比较器去重）
+    ZSetMember target{member, score};
     auto [new_it, inserted] = zset_val_.insert(target);
     LOG_DEBUG(kModule, "zset_add - member=%s, score=%f, inserted=%d, new_size=%zu",
               member.c_str(), score, inserted, zset_val_.size());
-    return inserted;
+    // 返回 true 表示是新增（原来不存在）或分数有更新
+    return inserted || score_changed;
 }
 
 bool CacheObject::zset_remove(const std::string& member) {
     if (type_ != ObjectType::ZSET) [[unlikely]] {
         return false;
     }
-    // 遍历查找（因为不知道分数）
+    // 线性查找（std::set 按 (score, member) 排序，无法直接按 member 查找）
     for (auto it = zset_val_.begin(); it != zset_val_.end(); ++it) {
         if (it->member == member) {
             zset_val_.erase(it);
@@ -313,6 +345,7 @@ std::optional<double> CacheObject::zset_score(const std::string& member) const {
     if (type_ != ObjectType::ZSET) [[unlikely]] {
         return std::nullopt;
     }
+    // 线性查找（std::set 按 (score, member) 排序，无法直接按 member 查找）
     for (const auto& zmember : zset_val_) {
         if (zmember.member == member) {
             return zmember.score;
@@ -332,6 +365,18 @@ std::vector<std::pair<std::string, double>> CacheObject::zset_range_by_score(dou
         }
     }
     (void)with_scores;  // 保留参数兼容性
+    return result;
+}
+
+std::vector<std::pair<std::string, double>> CacheObject::zset_all() const {
+    if (type_ != ObjectType::ZSET) [[unlikely]] {
+        return {};
+    }
+    std::vector<std::pair<std::string, double>> result;
+    result.reserve(zset_val_.size());
+    for (const auto& zmember : zset_val_) {
+        result.emplace_back(zmember.member, zmember.score);
+    }
     return result;
 }
 
