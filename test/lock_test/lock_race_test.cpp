@@ -12,6 +12,52 @@
 using namespace cc_server;
 using namespace cc_server::testing;
 
+// 测试用的日志守卫 - 包装 Mutex，在构造时记录 LOCK，析构时记录 UNLOCK
+class LoggingMutexGuard {
+public:
+    explicit LoggingMutexGuard(Mutex& mutex, const std::string& lock_name = "mutex")
+        : mutex_(mutex), lock_name_(lock_name) {
+        mutex_.lock();
+        TRACE_LOG(OpType::LOCK, lock_name_, "acquired");
+    }
+
+    ~LoggingMutexGuard() {
+        mutex_.unlock();
+        TRACE_LOG(OpType::UNLOCK, lock_name_, "released");
+    }
+
+    // 禁止拷贝
+    LoggingMutexGuard(const LoggingMutexGuard&) = delete;
+    LoggingMutexGuard& operator=(const LoggingMutexGuard&) = delete;
+
+private:
+    Mutex& mutex_;
+    std::string lock_name_;
+};
+
+// 测试用的日志守卫 - 包装 SpinLock
+class LoggingSpinLockGuard {
+public:
+    explicit LoggingSpinLockGuard(SpinLock& spinlock, const std::string& lock_name = "spinlock")
+        : spinlock_(spinlock), lock_name_(lock_name) {
+        spinlock_.lock();
+        TRACE_LOG(OpType::LOCK, lock_name_, "acquired");
+    }
+
+    ~LoggingSpinLockGuard() {
+        spinlock_.unlock();
+        TRACE_LOG(OpType::UNLOCK, lock_name_, "released");
+    }
+
+    // 禁止拷贝
+    LoggingSpinLockGuard(const LoggingSpinLockGuard&) = delete;
+    LoggingSpinLockGuard& operator=(const LoggingSpinLockGuard&) = delete;
+
+private:
+    SpinLock& spinlock_;
+    std::string lock_name_;
+};
+
 // 测试场景1：无保护的并发读写
 void test_race_unprotected_read_write() {
     TEST_SUITE("Race Detection - Unprotected Access");
@@ -121,7 +167,7 @@ void test_no_race_with_protection() {
         std::thread writer([&]() {
             while (!start.load()) std::this_thread::yield();
             for (int i = 0; i < 100; ++i) {
-                MutexGuard guard(mutex);
+                LoggingMutexGuard guard(mutex, "test_mutex");
                 TRACE_LOG(OpType::WRITE, "shared_data", std::to_string(shared_data) + "->" + std::to_string(i + 1));
                 shared_data = i + 1;
             }
@@ -132,10 +178,10 @@ void test_no_race_with_protection() {
             for (int i = 0; i < 100; ++i) {
                 int value;
                 {
-                    MutexGuard guard(mutex);
+                    LoggingMutexGuard guard(mutex, "test_mutex");
                     value = shared_data;
+                    TRACE_LOG(OpType::READ, "shared_data", std::to_string(value));
                 }
-                TRACE_LOG(OpType::READ, "shared_data", std::to_string(value));
             }
         });
 
@@ -167,7 +213,7 @@ void test_no_race_with_protection() {
         auto increment = [&](int iterations) {
             while (!start.load()) std::this_thread::yield();
             for (int i = 0; i < iterations; ++i) {
-                SpinLockGuard guard(spinlock);
+                LoggingSpinLockGuard guard(spinlock, "test_spinlock");
                 int old = counter.load();
                 TRACE_LOG(OpType::WRITE, "counter", std::to_string(old) + "->" + std::to_string(old + 1));
                 counter.store(old + 1);

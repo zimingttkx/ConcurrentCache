@@ -66,7 +66,11 @@ FileSink::FileSink(const std::string& filepath, size_t maxSize, int maxFiles)
         // system() 调用 shell，虽然不太优雅，但简单可靠
         // 更好的做法是用 POSIX mkdir()，但需要处理路径分割
         std::string cmd = "mkdir -p " + dir;
-        system(cmd.c_str());
+        int ret = system(cmd.c_str());
+        if (ret != 0) {
+            // 创建目录失败，但继续尝试打开文件
+            // 后续文件打开失败会处理这个错误
+        }
     }
 
     // 打开文件
@@ -402,6 +406,7 @@ std::string Logger::formatMessage(const char* module, LogLevel level, const std:
         case LogLevel::WARN:  levelStr = "WARN";  break;
         case LogLevel::ERROR: levelStr = "ERROR"; break;
         case LogLevel::FATAL: levelStr = "FATAL"; break;
+        default:              levelStr = "UNKNOWN"; break;
     }
 
     // 第二步：拼接完整格式

@@ -33,10 +33,10 @@ void test_deadlock_abba_scenario() {
         };
 
         std::vector<LockInfo> lock_infos = {
-            {1, "lock1", 1000, false, 1},
-            {2, "lock2", 1001, false, 2},
-            {1, "lock2", 1002, false, 3},
-            {2, "lock1", 1003, false, 4},
+            {1, "lock1", 1000, 0, false, 1},
+            {2, "lock2", 1001, 0, false, 2},
+            {1, "lock2", 1002, 0, false, 3},
+            {2, "lock1", 1003, 0, false, 4},
         };
 
         DeadlockDetector detector;
@@ -78,12 +78,12 @@ void test_deadlock_multi_lock_cycle() {
         };
 
         std::vector<LockInfo> lock_infos = {
-            {0, "L1", 1000, false, 1},
-            {1, "L2", 1001, false, 2},
-            {2, "L3", 1002, false, 3},
-            {0, "L2", 1003, false, 4},
-            {1, "L3", 1004, false, 5},
-            {2, "L1", 1005, false, 6},
+            {0, "L1", 1000, 0, false, 1},
+            {1, "L2", 1001, 0, false, 2},
+            {2, "L3", 1002, 0, false, 3},
+            {0, "L2", 1003, 0, false, 4},
+            {1, "L3", 1004, 0, false, 5},
+            {2, "L1", 1005, 0, false, 6},
         };
 
         DeadlockDetector detector;
@@ -253,10 +253,10 @@ void test_deadlock_detector_accuracy() {
         };
 
         std::vector<LockInfo> lock_infos = {
-            {1, "lock1", 1000, false, 1},
-            {2, "lock2", 1001, false, 2},
-            {1, "lock2", 1002, false, 3},
-            {2, "lock1", 1003, false, 4},
+            {1, "lock1", 1000, 0, false, 1},
+            {2, "lock2", 1001, 0, false, 2},
+            {1, "lock2", 1002, 0, false, 3},
+            {2, "lock1", 1003, 0, false, 4},
         };
 
         DeadlockDetector detector;

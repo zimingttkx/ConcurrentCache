@@ -50,7 +50,6 @@ void RdbScheduler::stop() {
 
 void RdbScheduler::schedule_loop() {
     auto last_save_time = std::chrono::steady_clock::now();
-    size_t last_dirty_count = 0;
 
     while (running_.load(std::memory_order_acquire)) {
         // 每秒检查一次
@@ -71,7 +70,7 @@ void RdbScheduler::schedule_loop() {
         if (elapsed >= config_.interval_sec) {
             should_save = true;
             LOG_DEBUG(kSchedulerModule, "Trigger save: interval elapsed (%ld seconds)", elapsed);
-        } else if (current_dirty >= config_.dirty_threshold) {
+        } else if (current_dirty >= static_cast<size_t>(config_.dirty_threshold)) {
             // 脏键数量达到阈值，触发保存
             should_save = true;
             LOG_DEBUG(kSchedulerModule, "Trigger save: dirty threshold reached (%zu >= %zu)",
@@ -81,7 +80,6 @@ void RdbScheduler::schedule_loop() {
         if (should_save) {
             do_save();
             last_save_time = std::chrono::steady_clock::now();
-            last_dirty_count = storage_.get_dirty_count();  // 保存后重新获取
         }
     }
 }

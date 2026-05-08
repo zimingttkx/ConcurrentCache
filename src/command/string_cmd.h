@@ -903,6 +903,7 @@ namespace cc_server {
     class SaveCommand : public Command {
     public:
         std::string execute(const std::vector<std::string> &args) override {
+            (void)args; // unused
             static std::string dump_path = "./dump.rdb";
             auto& rdb = RdbPersistence::instance();
 
@@ -925,6 +926,7 @@ namespace cc_server {
     class BgsaveCommand : public Command {
     public:
         std::string execute(const std::vector<std::string>& args) override {
+            (void)args; // unused
             static std::string dump_path = "./dump.rdb";
             auto& rdb = RdbPersistence::instance();
 
@@ -948,6 +950,7 @@ namespace cc_server {
     class LastsaveCommand : public Command {
     public:
         std::string execute(const std::vector<std::string>& args) override {
+            (void)args; // unused
             auto& rdb = RdbPersistence::instance();
             int64_t lastsave = rdb.get_last_bgsave_time();
             return RespEncoder::encode_integer(lastsave);
@@ -962,8 +965,9 @@ namespace cc_server {
     class DbsizeCommand : public Command {
     public:
         std::string execute(const std::vector<std::string>& args) override {
+            (void)args; // unused
             size_t size = GlobalStorage::instance().size();
-            return RespEncoder::encode_integer(static_cast<long long>(size));
+            return RespEncoder::encode_integer(static_cast<int64_t>(size));
         }
 
         [[nodiscard]] std::unique_ptr<Command> clone() const override {
@@ -975,6 +979,7 @@ namespace cc_server {
     class FlushdbCommand : public Command {
     public:
         std::string execute(const std::vector<std::string>& args) override {
+            (void)args; // unused
             GlobalStorage::instance().clear();
             return RespEncoder::encode_simple_string("OK");
         }
