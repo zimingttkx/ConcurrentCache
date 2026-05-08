@@ -454,11 +454,25 @@ void Logger::log(const char* module, LogLevel level, const char* fmt, ...) {
  * @brief 主日志写入函数（兼容旧接口，无模块）
  */
 void Logger::log(LogLevel level, const char* fmt, ...) {
-    // 使用默认模块名
-    // 但这里有个 bug：fmt 传了两遍
-    // 应该是：log(defaultModule_.c_str(), level, fmt, fmt);
-    // 正确写法见上面的 log(module, level, fmt, ...)
-    log(defaultModule_.c_str(), level, fmt, fmt);
+    // 级别过滤
+    if (level < level_) return;
+
+    // 格式化
+    char buffer[4096];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_end(args);
+
+    // 完整格式化并递归写入（带模块版本会检查级别，这里需要再检查一次）
+    std::string message = formatMessage(defaultModule_.c_str(), level, buffer);
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        queue_.push(message);
+    }
+
+    cv_.notify_one();
 }
 
 /**
