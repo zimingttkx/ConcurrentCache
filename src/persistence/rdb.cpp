@@ -37,7 +37,7 @@ namespace cc_server {
 static constexpr const char* kRdbModule = "RDB";
 
 // 获取当前可执行文件路径（用于跨平台子进程创建）
-static std::string get_executable_path() {
+[[maybe_unused]] static std::string get_executable_path() {
 #if defined(_WIN32)
     char exe_path[MAX_PATH];
     DWORD len = GetModuleFileNameA(nullptr, exe_path, sizeof(exe_path));
@@ -112,7 +112,7 @@ RdbPersistence::RdbPersistence() = default;
 RdbPersistence::~RdbPersistence() = default;
 
 bool RdbPersistence::save(const std::string& filepath, GlobalStorage& storage) {
-    FilePtr file_guard(fopen(filepath.c_str(), "wb"));
+    FilePtr file_guard(fopen(filepath.c_str(), "w+b"));
     file_ = file_guard.get();
     if (!file_) {
         LOG_ERROR(RDB, "Failed to open file for save: %s", filepath.c_str());
@@ -123,8 +123,7 @@ bool RdbPersistence::save(const std::string& filepath, GlobalStorage& storage) {
     try {
         // 1. 写入 Header
         // MAGIC: "CCRD"
-        uint32_t magic = kRdbMagic;
-        fwrite(&magic, sizeof(magic), 1, file_);
+        write_uint32(kRdbMagic);
 
         // VERSION: "0002"
         fwrite(kRdbVersion, 4, 1, file_);
@@ -147,22 +146,20 @@ bool RdbPersistence::save(const std::string& filepath, GlobalStorage& storage) {
             write_kv_pair(key, obj, expire_time_ms);
         }
 
+        // 刷新缓冲区，确保所有数据都被写入文件
+        fflush(file_);
+
         // 5. 写入 EOF 标记
         write_uint8(static_cast<uint8_t>(RdbSpecialMarker::EOF_MARKER));
 
         // 6. 记录 CRC 位置（此时游标在 EOF 之后）
         long crc_pos = ftell(file_);
 
-        // 7. 预占 CRC 位置（写入 4 字节占位）
-        uint32_t placeholder = 0;
-        fwrite(&placeholder, sizeof(placeholder), 1, file_);
-
-        // 8. 计算 CRC（排除末尾 4 字节的 CRC 本身）
+        // 7. 计算 CRC（从文件开头到当前位置）
         uint32_t crc = calculate_crc32_for_range(crc_pos);
 
-        // 9. 回到 CRC 位置写入正确的 CRC 值
-        fseek(file_, crc_pos, SEEK_SET);
-        fwrite(&crc, sizeof(crc), 1, file_);
+        // 8. 写入 CRC 值（使用 write_uint32 保证字节序转换）
+        write_uint32(crc);
         fflush(file_);
 
         // file_guard 会自动关闭文件
@@ -425,11 +422,13 @@ bool RdbPersistence::load(const std::string& filepath, GlobalStorage& storage) {
             LOG_WARN(RDB, "Unexpected EOF marker: 0x%02X", eof);
         }
 
-        // 5. 读取 CRC32（此时游标在 CRC 之后）
+        // 5. 记录 CRC 位置（在读取 CRC 之前，此时游标在 CRC 起始位置）
         long crc_pos = ftell(file_);
+
+        // 6. 读取 CRC32
         uint32_t stored_crc = read_uint32();
 
-        // 6. 验证 CRC32（计算 CRC 范围：[0, crc_pos)，排除 CRC 本身）
+        // 7. 验证 CRC32（计算 CRC 范围：[0, crc_pos)，排除 CRC 本身）
         uint32_t calculated_crc = calculate_crc32_for_range(crc_pos);
         if (stored_crc != calculated_crc) {
             LOG_ERROR(RDB, "CRC32 mismatch: stored=0x%08X, calculated=0x%08X",
@@ -713,19 +712,45 @@ bool RdbPersistence::deserialize_zset(CacheObject& obj) {
 
 uint32_t RdbPersistence::calculate_crc32_for_range(long end_pos) {
     // 计算范围：[0, end_pos)，即排除 end_pos 本身
+
+    // 保存当前文件指针位置
+    long current_pos = ftell(file_);
+
     long crc_len = end_pos;
     fseek(file_, 0, SEEK_SET);
+
+    // 检查是否有错误
+    if (ferror(file_)) {
+        LOG_ERROR(RDB, "calculate_crc32_for_range: ferror before fread, current_pos=%ld", current_pos);
+        clearerr(file_);
+    }
 
     uint32_t crc = crc32(0L, Z_NULL, 0);
     uint8_t buf[4096];
 
+    size_t total_read = 0;
     while (crc_len > 0) {
-        size_t to_read = static_cast<size_t>(crc_len > sizeof(buf) ? sizeof(buf) : crc_len);
+        size_t to_read = static_cast<size_t>(std::min(crc_len, static_cast<long int>(sizeof(buf))));
         size_t len = fread(buf, 1, to_read, file_);
-        if (len == 0) break;
+        if (len == 0) {
+            if (feof(file_)) {
+                LOG_ERROR(RDB, "calculate_crc32_for_range: EOF at position %zu, crc_len=%ld", total_read, crc_len);
+            } else if (ferror(file_)) {
+                LOG_ERROR(RDB, "calculate_crc32_for_range: fread error at position %zu", total_read);
+                clearerr(file_);
+            }
+            break;
+        }
         crc = crc32(crc, buf, static_cast<uInt>(len));
         crc_len -= len;
+        total_read += len;
     }
+
+    LOG_INFO(RDB, "calculate_crc32_for_range: end_pos=%ld, total_read=%zu, crc=0x%08X",
+             end_pos, total_read, crc);
+
+    // 恢复文件指针位置
+    fseek(file_, current_pos, SEEK_SET);
 
     return crc;
 }

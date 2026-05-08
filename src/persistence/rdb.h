@@ -43,6 +43,17 @@ namespace cc_server {
         FAILED = 3          // 上次失败
     };
 
+    // BgsaveStatus 输出支持
+    inline std::ostream& operator<<(std::ostream& os, BgsaveStatus status) {
+        switch (status) {
+            case BgsaveStatus::IDLE: return os << "IDLE";
+            case BgsaveStatus::IN_PROGRESS: return os << "IN_PROGRESS";
+            case BgsaveStatus::SUCCESS: return os << "SUCCESS";
+            case BgsaveStatus::FAILED: return os << "FAILED";
+            default: return os << "UNKNOWN";
+        }
+    }
+
     // RDB 统计信息
     struct RdbStats {
         std::atomic<int64_t> last_bgsave_time_sec{0};      // 上次 BGSAVE 时间戳
