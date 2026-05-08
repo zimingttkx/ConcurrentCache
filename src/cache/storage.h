@@ -22,7 +22,7 @@ namespace cc_server {
 
     // 淘汰策略配置
     struct EvictionConfig {
-        static constexpr size_t kMaxEntries = 100000; // 最大键数量
+        static constexpr size_t kMaxEntries = 200000; // 最大键数量
         static constexpr double kEvictThreshold = 0.9; // 淘汰触发阈值（占用率）
         static constexpr double kEvictTargetRatio = 0.6; // 淘汰目标占用率（留出 40% 空间）
     };
@@ -129,9 +129,10 @@ namespace cc_server {
             dirty_counter_.fetch_sub(count, std::memory_order_relaxed);
         }
 
-    private:
-
+        // 构造函数 - 允许创建实例用于测试
         GlobalStorage();
+
+    private:
 
         // 根据key计算应该去哪个分片
         size_t get_shard_index(const std::string& key) const {
@@ -154,7 +155,7 @@ namespace cc_server {
         std::vector<std::unordered_map<std::string, CacheEntry>> stores_;
 
         // 分片锁数组 每个分片对应一把shared_mutex
-        mutable std::vector<std::shared_mutex> mutexes_;
+        mutable std::unique_ptr<std::shared_mutex[]> mutexes_;
 
         ExpireDict expire_dict_;
     };

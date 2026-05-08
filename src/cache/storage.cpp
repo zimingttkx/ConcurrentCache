@@ -6,17 +6,11 @@
 namespace cc_server {
 
     GlobalStorage::GlobalStorage() {
-        stores_.reserve(kDefaultShards);
-        mutexes_.reserve(kDefaultShards);
-
-        for (size_t i = 0; i < kDefaultShards; i++) {
-            stores_.emplace_back();  // 初始化每个分片的哈希表
-            mutexes_.emplace_back();
-        }
+        stores_.resize(kDefaultShards);
+        mutexes_ = std::make_unique<std::shared_mutex[]>(kDefaultShards);
 
         // 防御性检查：确保初始化成功
         assert(stores_.size() == kDefaultShards && "GlobalStorage - stores_ init failed");
-        assert(mutexes_.size() == kDefaultShards && "GlobalStorage - mutexes_ init failed");
 
         LOG_INFO(STORAGE, "GlobalStorage initialized with %zu shards", kDefaultShards);
     }
@@ -239,6 +233,7 @@ namespace cc_server {
     }
 
     void GlobalStorage::evict_if_needed(const std::string& hint_key) {
+        (void)hint_key; // unused
         // 防御性检查：阈值必须有效
         size_t threshold = static_cast<size_t>(max_entries_ * EvictionConfig::kEvictThreshold);
         assert(threshold <= max_entries_ && "GlobalStorage::evict_if_needed - threshold exceeds max");
