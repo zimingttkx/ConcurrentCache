@@ -95,6 +95,9 @@ namespace cc_server {
         // 在对应分片的unordered_map里面插入或者更新
         stores_[shard_idx].insert_or_assign(key, CacheEntry(value, now));
 
+        // 增加脏计数器
+        dirty_counter_.fetch_add(1, std::memory_order_relaxed);
+
         if (had_expiration) {
             LOG_DEBUG(STORAGE, "Set key=%s - value updated, cleared expiration, shard=%zu",
                      key.c_str(), shard_idx);
@@ -123,6 +126,8 @@ namespace cc_server {
         size_t erased = stores_[shard_idx].erase(key);
 
         if (erased > 0) {
+            // 增加脏计数器
+            dirty_counter_.fetch_add(1, std::memory_order_relaxed);
             LOG_DEBUG(STORAGE, "Delete key=%s - success, shard=%zu", key.c_str(), shard_idx);
         }
 
@@ -248,24 +253,108 @@ namespace cc_server {
         LOG_WARN(CACHE, "Cache full (size=%zu, max=%zu, threshold=%zu), starting eviction",
                 current_size, max_entries_, threshold);
 
-        // 淘汰到安全线（留出 20% 空间）
-        size_t target_size = static_cast<size_t>(max_entries_ * 0.6);
+        // 淘汰到安全线（留出 40% 空间）
+        size_t target_size = static_cast<size_t>(max_entries_ * EvictionConfig::kEvictTargetRatio);
 
         // 防御性检查：目标大小必须有效
         assert(target_size < max_entries_ && "GlobalStorage::evict_if_needed - target_size invalid");
 
         size_t evicted_count = 0;
-        while (size() > target_size) {
+        while (current_size > target_size) {
             std::string evicted = evict_one();
             if (evicted.empty()) {
                 LOG_WARN(CACHE, "Eviction stopped - no more keys to evict, evicted=%zu", evicted_count);
                 break;
             }
             ++evicted_count;
+            --current_size;
             LOG_DEBUG(CACHE, "Evicted key during auto-eviction: %s", evicted.c_str());
         }
 
         LOG_INFO(CACHE, "Eviction complete - evicted %zu keys, current_size=%zu, target_size=%zu",
                 evicted_count, size(), target_size);
     }
+
+    std::vector<std::pair<std::string, CacheObject> > GlobalStorage::get_all_objects() const {
+        std::vector<std::pair<std::string, CacheObject>> result;
+        result.reserve(size());
+
+        for (size_t i = 0; i < num_shards_; i++) {
+            std::shared_lock<std::shared_mutex> lock(mutexes_[i]);
+            for (const auto& [key, entry] : stores_[i]) {
+                if (!expire_dict_.is_expired(key)) {
+                    result.emplace_back(key, entry.value);
+                }
+            }
+        }
+        return result;
+    }
+
+    std::vector<KVWithTTL> GlobalStorage::get_all_objects_with_ttl() const {
+        std::vector<KVWithTTL> result;
+        result.reserve(size());
+
+        // 获取当前时间
+        int64_t now = current_time_ms();
+
+        for (size_t i = 0; i < num_shards_; i++) {
+            std::shared_lock<std::shared_mutex> lock(mutexes_[i]);
+            for (const auto& [key, entry] : stores_[i]) {
+                // 获取过期时间
+                int64_t expire_time_ms = expire_dict_.get_expire_time(key);
+
+                // get_expire_time 返回 -1 表示永不过期
+                // 如果有过期时间且已过期，则跳过
+                if (expire_time_ms > 0 && now >= expire_time_ms) {
+                    continue;  // 已过期，跳过
+                }
+
+                result.emplace_back(key, entry.value, expire_time_ms);
+            }
+        }
+        return result;
+    }
+
+    void GlobalStorage::set_expire(const std::string& key, int64_t ttl_ms) {
+        if (key.empty() || ttl_ms <= 0) return;
+
+        // 设置过期时间
+        expire_dict_.set(key, ttl_ms);
+        LOG_DEBUG(STORAGE, "Set expire for key=%s, ttl_ms=%ld", key.c_str(), ttl_ms);
+    }
+
+    void GlobalStorage::set_with_expire(const std::string& key, const CacheObject& value, int64_t ttl_ms) {
+        assert(!key.empty() && "GlobalStorage::set_with_expire - key is empty");
+
+        // 检查是否需要淘汰
+        evict_if_needed(key);
+
+        // 计算应该去哪个分片
+        const size_t shard_idx = get_shard_index(key);
+        // 在对应的分片加独占锁
+        std::unique_lock<std::shared_mutex> lock(mutexes_[shard_idx]);
+
+        // 获取当前时间
+        int64_t now = current_time_ms();
+
+        // 设置值
+        stores_[shard_idx].insert_or_assign(key, CacheEntry(value, now));
+
+        // 设置过期时间（如果 ttl_ms > 0，转换为绝对时间戳）
+        if (ttl_ms > 0) {
+            int64_t expire_time_ms = now + ttl_ms;
+            expire_dict_.set_expire_time(key, expire_time_ms);
+            LOG_DEBUG(STORAGE, "Set_with_expire key=%s, ttl_ms=%ld, expire_at=%ld, shard=%zu",
+                     key.c_str(), ttl_ms, expire_time_ms, shard_idx);
+        } else {
+            // ttl_ms <= 0 表示永不过期，清除过期时间
+            expire_dict_.remove(key);
+            LOG_DEBUG(STORAGE, "Set_with_expire key=%s (no expire), shard=%zu",
+                     key.c_str(), shard_idx);
+        }
+
+        // 增加脏计数器
+        dirty_counter_.fetch_add(1, std::memory_order_relaxed);
+    }
+
 }

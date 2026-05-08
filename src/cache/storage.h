@@ -6,6 +6,8 @@
 #include <unordered_map>
 #include <shared_mutex>
 #include <vector>
+#include <atomic>
+#include <chrono>
 #include "expire_dict.h"
 #include "datatype/object.h"
 
@@ -22,6 +24,17 @@ namespace cc_server {
     struct EvictionConfig {
         static constexpr size_t kMaxEntries = 100000; // 最大键数量
         static constexpr double kEvictThreshold = 0.9; // 淘汰触发阈值（占用率）
+        static constexpr double kEvictTargetRatio = 0.6; // 淘汰目标占用率（留出 40% 空间）
+    };
+
+    // 用于 RDB 持久化的键值对结构体（包含过期时间）
+    struct KVWithTTL {
+        std::string key;
+        CacheObject value;
+        int64_t expire_time_ms;  // 过期时间戳（毫秒），-1 表示永不过期
+
+        KVWithTTL(const std::string& k, const CacheObject& v, int64_t e)
+            : key(k), value(v), expire_time_ms(e) {}
     };
 
     /**
@@ -83,13 +96,40 @@ namespace cc_server {
 
         // 检查是否需要淘汰 必要时触发淘汰
         void evict_if_needed(const std::string& hint_key = "");
-    private:
 
-        // 获取当前时间戳
+        // 获取所有对象 用于RDB持久化（不带 TTL）
+        std::vector<std::pair<std::string, CacheObject>> get_all_objects() const;
+
+        // 获取所有对象用于 RDB 持久化（带 TTL）
+        std::vector<KVWithTTL> get_all_objects_with_ttl() const;
+
+        // 设置键的过期时间（供 RDB 加载时使用）
+        void set_expire(const std::string& key, int64_t ttl_ms);
+
+        // 获取当前时间戳（毫秒）- 公开给 RdbPersistence 使用
         int64_t current_time_ms() const {
             return std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count();
+                std::chrono::system_clock::now().time_since_epoch()).count();
         }
+
+        /**
+         * @brief 原子性设置键值对和过期时间
+         * @param key 键
+         * @param value 值
+         * @param ttl_ms 过期时间（毫秒），<=0 表示永不过期
+         * @note 用于 SETEX 等需要原子性设置值和过期时间的场景
+         */
+        void set_with_expire(const std::string& key, const CacheObject& value, int64_t ttl_ms);
+
+        // 脏计数器相关方法
+        void increment_dirty() { dirty_counter_.fetch_add(1, std::memory_order_relaxed); }
+        size_t get_dirty_count() const { return dirty_counter_.load(std::memory_order_relaxed); }
+        void reset_dirty_count() { dirty_counter_.store(0, std::memory_order_relaxed); }
+        void decrement_dirty_count(size_t count) {
+            dirty_counter_.fetch_sub(count, std::memory_order_relaxed);
+        }
+
+    private:
 
         GlobalStorage();
 
@@ -101,6 +141,8 @@ namespace cc_server {
         // 最大键数量
         size_t max_entries_{EvictionConfig::kMaxEntries};
 
+        // 脏计数器（自上次 BGSAVE 以来的写操作次数）
+        std::atomic<size_t> dirty_counter_{0};
 
         // 分段锁的默认分片数量 一般为CPU核心数量 * 2
         static constexpr size_t kDefaultShards = 64;
