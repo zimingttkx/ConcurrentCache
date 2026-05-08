@@ -26,6 +26,18 @@ namespace cc_server {
         ZSET = 4
     };
 
+    // ObjectType 输出支持（用于测试）
+    inline std::ostream& operator<<(std::ostream& os, ObjectType type) {
+        switch (type) {
+            case ObjectType::STRING: return os << "STRING";
+            case ObjectType::LIST: return os << "LIST";
+            case ObjectType::HASH: return os << "HASH";
+            case ObjectType::SET: return os << "SET";
+            case ObjectType::ZSET: return os << "ZSET";
+            default: return os << "UNKNOWN";
+        }
+    }
+
     // 统一对象封装 使用STL实现的数据类型
     class CacheObject {
     public:

@@ -298,6 +298,7 @@ bool CacheObject::zset_add(const std::string& member, double score) {
 
     // 线性查找是否存在该 member（std::set 按 (score, member) 排序，无法直接按 member 查找）
     bool found = false;
+    (void)found; // unused
     bool score_changed = false;
     auto it_to_erase = zset_val_.end();
 
