@@ -76,11 +76,12 @@ struct TraceEvent {
     }
 };
 
-// 锁获取信息（用于死锁检测）
+// 锁获取信息（用于死锁检测和数据竞争检测）
 struct LockInfo {
     size_t thread_id;
     std::string lock_addr;
-    uint64_t timestamp_ns;
+    uint64_t lock_start_ns;    // 锁获取时间
+    uint64_t lock_end_ns;      // 锁释放时间，0表示仍被持有
     bool is_read_lock;
     uint64_t lock_sequence_id;  // 用于追踪递归锁的序列号
 };
@@ -242,17 +243,21 @@ private:
         if (event.op_type == OpType::LOCK || event.op_type == OpType::TRY_LOCK) {
             // 为递归锁生成唯一序列号
             uint64_t seq_id = ++lock_sequence_counter_;
-            lock_infos_.push_back({event.thread_id, event.target, event.timestamp_ns, false, seq_id});
+            // lock_end_ns 初始化为0，表示锁仍被持有
+            lock_infos_.push_back({event.thread_id, event.target, event.timestamp_ns, 0, false, seq_id});
 
             // 追踪线程的锁获取顺序栈（用于死锁检测）
             thread_lock_stack_[event.thread_id].push_back({event.target, seq_id});
         } else if (event.op_type == OpType::UNLOCK) {
-            // 找到对应的锁释放
+            // 找到对应的锁释放，并记录释放时间
             auto& stack = thread_lock_stack_[event.thread_id];
             for (auto it = lock_infos_.rbegin(); it != lock_infos_.rend(); ++it) {
-                if (it->thread_id == event.thread_id && it->lock_addr == event.target) {
+                if (it->thread_id == event.thread_id && it->lock_addr == event.target && it->lock_end_ns == 0) {
+                    // 找到对应的锁获取记录，设置释放时间
+                    it->lock_end_ns = event.timestamp_ns;
+
                     // 计算持有时间
-                    uint64_t held_ns = event.timestamp_ns - it->timestamp_ns;
+                    uint64_t held_ns = event.timestamp_ns - it->lock_start_ns;
                     lock_hold_times_.push_back({it->lock_addr, held_ns});
 
                     // 从栈中移除对应的锁记录

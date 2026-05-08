@@ -255,8 +255,15 @@ private:
 class RaceDetector {
 public:
     AnalysisReport analyze(const std::vector<TraceEvent>& events,
+                          const std::vector<LockInfo>& lock_infos,
                           const std::vector<MemoryAccess>& memory_accesses) {
         AnalysisReport report;
+
+        // 构建锁区间索引：按地址分组锁信息
+        std::unordered_map<std::string, std::vector<LockInfo>> locks_by_addr;
+        for (const auto& lock : lock_infos) {
+            locks_by_addr[lock.lock_addr].push_back(lock);
+        }
 
         // 按地址分组内存访问
         std::unordered_map<std::string, std::vector<MemoryAccess>> accesses_by_addr;
@@ -282,14 +289,18 @@ public:
                     if (a.thread_id != b.thread_id && is_concurrent(a, b)) {
                         // 至少有一个是写操作
                         if (a.is_write || b.is_write) {
-                            DataRace race;
-                            race.address = addr;
-                            race.involved_threads = {a.thread_id, b.thread_id};
-                            race.description = "Threads " +
-                                std::to_string(a.thread_id) + " and " +
-                                std::to_string(b.thread_id) +
-                                " access same address concurrently without synchronization";
-                            report.data_races.push_back(race);
+                            // 检查这两个访问是否被同一个锁保护
+                            if (!is_protected_by_same_lock(a, b, locks_by_addr)) {
+                                // 没有锁保护，是数据竞争
+                                DataRace race;
+                                race.address = addr;
+                                race.involved_threads = {a.thread_id, b.thread_id};
+                                race.description = "Threads " +
+                                    std::to_string(a.thread_id) + " and " +
+                                    std::to_string(b.thread_id) +
+                                    " access same address concurrently without synchronization";
+                                report.data_races.push_back(race);
+                            }
                         }
                     }
                 }
@@ -315,9 +326,62 @@ private:
         uint64_t diff = (a.timestamp_ns > b.timestamp_ns) ?
                         (a.timestamp_ns - b.timestamp_ns) :
                         (b.timestamp_ns - a.timestamp_ns);
-        return diff < 100000; // 100μs (原为 1ms)
+        return diff < 100000; // 100μs
+    }
+
+    // 检查两个并发访问是否被同一个锁保护
+    // 分别检查每个访问是否被各自的锁保护，然后检查是否是同一个锁地址
+    bool is_protected_by_same_lock(
+        const MemoryAccess& a,
+        const MemoryAccess& b,
+        const std::unordered_map<std::string, std::vector<LockInfo>>& locks_by_addr) {
+
+        // 找到保护访问A的锁地址（如果有）
+        std::string protected_by_a = find_protecting_lock(a, locks_by_addr);
+
+        // 找到保护访问B的锁地址（如果有）
+        std::string protected_by_b = find_protecting_lock(b, locks_by_addr);
+
+        // 如果两个访问都被同一个锁地址保护，则不是竞争
+        if (!protected_by_a.empty() && protected_by_a == protected_by_b) {
+            return true;
+        }
+
+        return false; // 没有找到共同的锁保护，可能是竞争
+    }
+
+    // 找到保护特定访问的锁地址
+    std::string find_protecting_lock(
+        const MemoryAccess& access,
+        const std::unordered_map<std::string, std::vector<LockInfo>>& locks_by_addr) {
+
+        for (const auto& lock_pair : locks_by_addr) {
+            const std::string& lock_addr = lock_pair.first;
+            for (const auto& lock : lock_pair.second) {
+                // 检查这个锁是否由同一线程持有，并且覆盖了访问时间点
+                if (lock.thread_id == access.thread_id && covers_access_time(lock, access.timestamp_ns)) {
+                    return lock_addr;
+                }
+            }
+        }
+        return ""; // 没有找到保护这个访问的锁
+    }
+
+    // 检查锁区间是否覆盖了特定的访问时间点
+    bool covers_access_time(const LockInfo& lock, uint64_t access_time) {
+        // 锁必须在访问之前获取
+        if (lock.lock_start_ns > access_time) return false;
+
+        // 如果锁仍在持有中（lock_end_ns == 0），检查访问时间是否在获取之后
+        if (lock.lock_end_ns == 0) {
+            return access_time >= lock.lock_start_ns;
+        }
+
+        // 如果锁已释放，检查访问时间是否在释放之前
+        return access_time < lock.lock_end_ns;
     }
 };
+
 
 // 不变量验证器基类
 class InvariantValidator {
@@ -557,7 +621,7 @@ public:
 
         // 2. 数据竞争检测
         RaceDetector race_detector;
-        AnalysisReport race_report = race_detector.analyze(events, memory_accesses);
+        AnalysisReport race_report = race_detector.analyze(events, lock_infos, memory_accesses);
         report.data_races = race_report.data_races;
 
         // 3. 不变量验证
