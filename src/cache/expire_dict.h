@@ -36,6 +36,14 @@ public:
     void set(const std::string& key, int64_t expire_ms);
 
     /**
+     * @brief 直接设置键的过期时间戳（毫秒）
+     * @param key 键
+     * @param expire_time_ms 过期时间戳（毫秒，绝对时间）
+     * @note 内部使用，不做时间偏移计算
+     */
+    void set_expire_time(const std::string& key, int64_t expire_time_ms);
+
+    /**
      * @brief 获取键的剩余生存时间
      * @param key 键
      * @return 剩余时间(ms) 或 负数表示特殊状态

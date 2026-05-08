@@ -11,7 +11,7 @@ namespace cc_server {
 
     int64_t ExpireDict::current_time_ms() {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
+            std::chrono::system_clock::now().time_since_epoch()).count();
     }
 
     void ExpireDict::set(const std::string &key, int64_t expire_ms) {
@@ -25,6 +25,16 @@ namespace cc_server {
 
         LOG_DEBUG(EXPIRE, "Set expire for key=%s, expire_at=%ld, ttl_ms=%ld",
                  key.c_str(), expire_time, expire_ms);
+    }
+
+    void ExpireDict::set_expire_time(const std::string &key, int64_t expire_time_ms) {
+        assert(!key.empty() && "ExpireDict::set_expire_time - key is empty");
+        assert(expire_time_ms > 0 && "ExpireDict::set_expire_time - expire_time_ms must be positive");
+
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        expire_map_[key] = expire_time_ms;
+
+        LOG_DEBUG(EXPIRE, "Set expire time for key=%s, expire_at=%ld", key.c_str(), expire_time_ms);
     }
 
     int64_t ExpireDict::get_ttl(const std::string &key) const {
