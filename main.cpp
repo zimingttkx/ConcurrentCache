@@ -9,6 +9,7 @@
 #include "src/base/thread_pool.h"
 #include "src/network/main_reactor.h"
 #include "src/network/sub_reactor_pool.h"
+#include "src/cache/storage.h"
 #include "src/cache/expiration_checker.h"
 #include "src/persistence/rdb.h"
 #include "src/persistence/rdb_scheduler.h"
