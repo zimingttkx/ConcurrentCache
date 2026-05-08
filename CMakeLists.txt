@@ -12,41 +12,18 @@ file(GLOB_RECURSE SOURCES
         "${PROJECT_SOURCE_DIR}/main.cpp"
 )
 
-add_executable(concurrentcache-server ${SOURCES}
-        src/network/event_loop.cpp
-        src/network/connection.h
-        src/protocol/resp.h
-        src/protocol/resp.cpp
-        src/cache/storage.h
-        src/cache/storage.cpp
-        src/command/command.h
-        src/command/string_cmd.h
-        src/command/command_factory.h
-        src/command/command_factory.cpp
-        src/base/format.h
-        src/base/format.cpp
-        src/base/lock.h
-        src/base/lock.cpp
-        src/memorypool/memory_pool.h
-        src/network/sub_reactor.h
-        src/network/sub_reactor.cpp
-        src/network/sub_reactor_pool.h
-        src/network/sub_reactor_pool.cpp
-        src/network/main_reactor.h
-        src/network/main_reactor.cpp
-        src/base/thread_pool.h
-        src/base/thread_pool.cpp
-        src/cache/expire_dict.h
-        src/cache/expire_dict.cpp
-        src/cache/expiration_checker.h
-        src/cache/expiration_checker.cpp
-        src/command/expire_cmd.h
-        src/datatype/object.cpp
-        src/datatype/object.h
-)
+add_executable(concurrentcache-server ${SOURCES})
 
 if(UNIX)
-    target_link_libraries(concurrentcache-server pthread)
+    find_package(ZLIB REQUIRED)
+    target_link_libraries(concurrentcache-server pthread ZLIB::ZLIB)
+endif()
+
+if(WIN32)
+    find_package(ZLIB)
+    if(ZLIB_FOUND)
+        target_link_libraries(concurrentcache-server ZLIB::ZLIB)
+    endif()
 endif()
 
 if(MSVC)

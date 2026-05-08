@@ -5,9 +5,25 @@
 
 #include "central_cache.h"
 #include "page_cache.h"
+
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <unistd.h>  // getpagesize
+#endif
 
 namespace cc_server {
+
+// 获取系统页面大小（跨平台）
+static size_t get_page_size() {
+#ifdef _WIN32
+    SYSTEM_INFO sys_info;
+    GetSystemInfo(&sys_info);
+    return sys_info.dwPageSize;
+#else
+    return getpagesize();
+#endif
+}
 
 CentralCache& CentralCache::get_instance() {
     static CentralCache instance;
@@ -58,7 +74,7 @@ void CentralCache::deallocate(void* obj, size_t class_index) {
     MutexGuard lock(locks_[class_index]);
 
     // 计算对象所在的页号（假设每页4KB）
-    size_t page_size = getpagesize();
+    size_t page_size = get_page_size();
     uint64_t page_id = reinterpret_cast<uint64_t>(obj) / page_size;
 
     // 找到对象所在的Span
@@ -100,7 +116,7 @@ void CentralCache::deallocate(void* obj, size_t class_index) {
 Span* CentralCache::fetch_from_page_cache(size_t class_index) {
     // 根据SizeClass大小计算需要多少页
     size_t class_size = SizeClass::get_size(class_index);
-    size_t page_size = getpagesize();
+    size_t page_size = get_page_size();
 
     // 计算一个Span能切出多少个小对象
     // 为了效率，一次从PageCache获取较大的Span

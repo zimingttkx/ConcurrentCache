@@ -8,7 +8,36 @@
 #include <chrono>
 #include <random>
 
+#include "persistence/rdb.h"
+
 namespace cc_server {
+
+    /**
+     * @brief PingCommand - PING 命令实现
+     *
+     * PING 命令：返回 PONG 或指定消息
+     * 语法：PING [message]
+     * 返回：
+     *   - 无参数：PONG
+     *   - 有参数：返回指定消息
+     *
+     * RESP 格式：
+     *   PING        → +PONG\r\n
+     *   PING hello  → $5\r\nhello\r\n
+     */
+    class PingCommand : public Command {
+    public:
+        std::string execute(const std::vector<std::string>& args) override {
+            if (args.size() == 1) {
+                return RespEncoder::encode_simple_string("PONG");
+            }
+            return RespEncoder::encode_bulk_string(args[1]);
+        }
+
+        [[nodiscard]] std::unique_ptr<Command> clone() const override {
+            return std::make_unique<PingCommand>();
+        }
+    };
 
     /**
      * @brief GetCommand - GET 命令实现
@@ -177,7 +206,7 @@ namespace cc_server {
             }
 
             GlobalStorage::instance().set(key, obj);
-            return RespEncoder::encode_integer(obj.list_size());
+            return RespEncoder::encode_integer(static_cast<int64_t>(obj.list_size()));
         }
 
         [[nodiscard]] std::unique_ptr<Command> clone() const override {
@@ -212,7 +241,7 @@ namespace cc_server {
             }
 
             GlobalStorage::instance().set(key, obj);
-            return RespEncoder::encode_integer(obj.list_size());
+            return RespEncoder::encode_integer(static_cast<int64_t>(obj.list_size()));
         }
 
         [[nodiscard]] std::unique_ptr<Command> clone() const override {
@@ -315,7 +344,7 @@ namespace cc_server {
                 return RespEncoder::encode_integer(0);
             }
 
-            return RespEncoder::encode_integer(result.value().list_size());
+            return RespEncoder::encode_integer(static_cast<int64_t>(result.value().list_size()));
         }
 
         [[nodiscard]] std::unique_ptr<Command> clone() const override {
@@ -468,7 +497,7 @@ namespace cc_server {
             }
 
             GlobalStorage::instance().set(key, obj);
-            return RespEncoder::encode_integer(deleted);
+            return RespEncoder::encode_integer(static_cast<int64_t>(deleted));
         }
 
         [[nodiscard]] std::unique_ptr<Command> clone() const override {
@@ -497,7 +526,7 @@ namespace cc_server {
                 return RespEncoder::encode_integer(0);
             }
 
-            return RespEncoder::encode_integer(result.value().hash_size());
+            return RespEncoder::encode_integer(static_cast<int64_t>(result.value().hash_size()));
         }
 
         [[nodiscard]] std::unique_ptr<Command> clone() const override {
@@ -573,7 +602,7 @@ namespace cc_server {
             }
 
             GlobalStorage::instance().set(key, obj);
-            return RespEncoder::encode_integer(added);
+            return RespEncoder::encode_integer(static_cast<int64_t>(added));
         }
 
         [[nodiscard]] std::unique_ptr<Command> clone() const override {
@@ -646,7 +675,7 @@ namespace cc_server {
                 return RespEncoder::encode_integer(0);
             }
 
-            return RespEncoder::encode_integer(result.value().set_size());
+            return RespEncoder::encode_integer(static_cast<int64_t>(result.value().set_size()));
         }
 
         [[nodiscard]] std::unique_ptr<Command> clone() const override {
@@ -815,7 +844,7 @@ namespace cc_server {
                 return RespEncoder::encode_integer(0);
             }
 
-            return RespEncoder::encode_integer(result.value().zset_size());
+            return RespEncoder::encode_integer(static_cast<int64_t>(result.value().zset_size()));
         }
 
         [[nodiscard]] std::unique_ptr<Command> clone() const override {
@@ -868,6 +897,197 @@ namespace cc_server {
 
         [[nodiscard]] std::unique_ptr<Command> clone() const override {
             return std::make_unique<ZrangeCommand>(*this);
+        }
+    };
+
+    class SaveCommand : public Command {
+    public:
+        std::string execute(const std::vector<std::string> &args) override {
+            static std::string dump_path = "./dump.rdb";
+            auto& rdb = RdbPersistence::instance();
+
+            // 检查是否正在保存
+            if (rdb.is_bgsave_in_progress()) {
+                return RespEncoder::encode_error("ERR BGSAVE already in progress");
+            }
+
+            if (rdb.save(dump_path, GlobalStorage::instance())) {
+                return RespEncoder::encode_simple_string("OK");
+            }
+            return RespEncoder::encode_error("ERR failed to save RDB");
+        }
+
+        [[nodiscard]] std::unique_ptr<Command> clone() const override {
+            return std::make_unique<SaveCommand>();
+        }
+    };
+
+    class BgsaveCommand : public Command {
+    public:
+        std::string execute(const std::vector<std::string>& args) override {
+            static std::string dump_path = "./dump.rdb";
+            auto& rdb = RdbPersistence::instance();
+
+            // 检查是否正在保存
+            if (rdb.is_bgsave_in_progress()) {
+                return RespEncoder::encode_error("ERR BGSAVE already in progress");
+            }
+
+            if (rdb.save_in_background(dump_path, GlobalStorage::instance())) {
+                return RespEncoder::encode_simple_string("Background saving started");
+            }
+            return RespEncoder::encode_error("ERR bgsave failed");
+        }
+
+        [[nodiscard]] std::unique_ptr<Command> clone() const override {
+            return std::make_unique<BgsaveCommand>();
+        }
+    };
+
+    // LASTSAVE 命令 - 返回上次成功 RDB 保存的 Unix 时间戳
+    class LastsaveCommand : public Command {
+    public:
+        std::string execute(const std::vector<std::string>& args) override {
+            auto& rdb = RdbPersistence::instance();
+            int64_t lastsave = rdb.get_last_bgsave_time();
+            return RespEncoder::encode_integer(lastsave);
+        }
+
+        [[nodiscard]] std::unique_ptr<Command> clone() const override {
+            return std::make_unique<LastsaveCommand>();
+        }
+    };
+
+    // DBSIZE 命令 - 返回当前数据库的键数量
+    class DbsizeCommand : public Command {
+    public:
+        std::string execute(const std::vector<std::string>& args) override {
+            size_t size = GlobalStorage::instance().size();
+            return RespEncoder::encode_integer(static_cast<long long>(size));
+        }
+
+        [[nodiscard]] std::unique_ptr<Command> clone() const override {
+            return std::make_unique<DbsizeCommand>();
+        }
+    };
+
+    // FLUSHDB 命令 - 清空当前数据库
+    class FlushdbCommand : public Command {
+    public:
+        std::string execute(const std::vector<std::string>& args) override {
+            GlobalStorage::instance().clear();
+            return RespEncoder::encode_simple_string("OK");
+        }
+
+        [[nodiscard]] std::unique_ptr<Command> clone() const override {
+            return std::make_unique<FlushdbCommand>();
+        }
+    };
+
+    // INFO 命令 - 返回服务器信息和统计
+    class InfoCommand : public Command {
+    public:
+        std::string execute(const std::vector<std::string>& args) override {
+            auto& rdb = RdbPersistence::instance();
+            std::string section = (args.size() >= 2) ? args[1] : "server";
+
+            std::string result;
+            if (section == "server" || section == "all") {
+                result += "# Server\r\n";
+                result += "concurrentcache_version:3.0.0\r\n";
+                result += "os:Linux\r\n";
+                result += "arch_bits:64\r\n";
+            }
+
+            if (section == "stats" || section == "all") {
+                result += "# Stats\r\n";
+                auto& stats = rdb.get_stats();
+                result += "total_connections_received:0\r\n";
+                result += "total_commands_processed:0\r\n";
+                result += "total_bgsave_calls:" + std::to_string(stats.total_bgsave_calls.load()) + "\r\n";
+                result += "total_rdb_saved_keys:" + std::to_string(stats.total_rdb_saved_keys.load()) + "\r\n";
+            }
+
+            if (section == "persistence" || section == "all") {
+                result += "# Persistence\r\n";
+                auto& stats = rdb.get_stats();
+                result += "rdb_enabled:yes\r\n";
+                result += "rdb_last_bgsave_status:" +
+                    std::string(stats.last_bgsave_status.load() == BgsaveStatus::SUCCESS ? "ok" :
+                     stats.last_bgsave_status.load() == BgsaveStatus::FAILED ? "err" : "idle") + "\r\n";
+                result += "rdb_last_bgsave_time_sec:" + std::to_string(stats.last_bgsave_time_sec.load()) + "\r\n";
+                result += "rdb_last_bgsave_keys:" + std::to_string(stats.last_bgsave_keys.load()) + "\r\n";
+                result += "rdb_dirty_count:" + std::to_string(GlobalStorage::instance().get_dirty_count()) + "\r\n";
+            }
+
+            if (section == "keyspace" || section == "all") {
+                result += "# Keyspace\r\n";
+                size_t db_size = GlobalStorage::instance().size();
+                result += "db0:keys=" + std::to_string(db_size) + ",expires=0,avg_ttl=0\r\n";
+            }
+
+            if (result.empty()) {
+                return RespEncoder::encode_error("ERR Unknown INFO section: " + section);
+            }
+
+            return RespEncoder::encode_bulk_string(result);
+        }
+
+        [[nodiscard]] std::unique_ptr<Command> clone() const override {
+            return std::make_unique<InfoCommand>();
+        }
+    };
+
+    // DEBUG 命令 - 调试命令（简化实现）
+    class DebugCommand : public Command {
+    public:
+        std::string execute(const std::vector<std::string>& args) override {
+            if (args.size() < 2) {
+                return RespEncoder::encode_error("ERR wrong number of arguments for 'debug' command");
+            }
+
+            const std::string& subcommand = args[1];
+
+            if (subcommand == "sleep") {
+                if (args.size() < 3) {
+                    return RespEncoder::encode_error("ERR wrong number of arguments for 'debug sleep'");
+                }
+                try {
+                    double seconds = std::stod(args[2]);
+                    std::this_thread::sleep_for(std::chrono::duration<double>(seconds));
+                } catch (...) {
+                    return RespEncoder::encode_error("ERR invalid sleep time");
+                }
+                return RespEncoder::encode_simple_string("OK");
+            }
+
+            if (subcommand == "object") {
+                if (args.size() < 3) {
+                    return RespEncoder::encode_error("ERR wrong number of arguments for 'debug object'");
+                }
+                const std::string& key = args[2];
+                auto result = GlobalStorage::instance().get(key);
+                if (!result.has_value()) {
+                    return RespEncoder::encode_error("ERR no such key");
+                }
+                const CacheObject& obj = result.value();
+                std::string info = "Type: ";
+                switch (obj.type()) {
+                    case ObjectType::STRING: info += "string"; break;
+                    case ObjectType::LIST: info += "list"; break;
+                    case ObjectType::HASH: info += "hash"; break;
+                    case ObjectType::SET: info += "set"; break;
+                    case ObjectType::ZSET: info += "zset"; break;
+                    default: info += "unknown"; break;
+                }
+                return RespEncoder::encode_bulk_string(info);
+            }
+
+            return RespEncoder::encode_error("ERR Unknown DEBUG subcommand");
+        }
+
+        [[nodiscard]] std::unique_ptr<Command> clone() const override {
+            return std::make_unique<DebugCommand>();
         }
     };
 }

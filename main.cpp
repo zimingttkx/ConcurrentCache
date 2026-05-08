@@ -10,6 +10,8 @@
 #include "src/network/main_reactor.h"
 #include "src/network/sub_reactor_pool.h"
 #include "src/cache/expiration_checker.h"
+#include "src/persistence/rdb.h"
+#include "src/persistence/rdb_scheduler.h"
 
 using namespace cc_server;
 
@@ -36,6 +38,7 @@ void signal_handler(int sig) {
 int main() {
     std::cout << "========================================" << std::endl;
     std::cout << "   ConcurrentCache 高并发内存缓存服务器   " << std::endl;
+    std::cout << "           Version 3.0 (RDB Persist)       " << std::endl;
     std::cout << "========================================" << std::endl;
 
     // 1. 初始化信号系统（最先初始化，处理 SIGINT/SIGTERM 实现优雅退出）
@@ -59,10 +62,14 @@ int main() {
         static_cast<int>(std::thread::hardware_concurrency()));
     int thread_pool_size = Config::instance().getInt("thread_pool_size",
         static_cast<int>(std::thread::hardware_concurrency()));
+    int rdb_save_interval = Config::instance().getInt("rdb_save_interval", 900);
+    int rdb_dirty_threshold = Config::instance().getInt("rdb_dirty_threshold", 1);
 
     // 确保至少有一个线程
     if (reactor_count <= 0) reactor_count = 1;
     if (thread_pool_size <= 0) thread_pool_size = 1;
+    if (rdb_save_interval <= 0) rdb_save_interval = 900;
+    if (rdb_dirty_threshold <= 0) rdb_dirty_threshold = 1;
 
     std::cout << "[主线程] 监听端口: " << port << std::endl;
     std::cout << "[主线程] SubReactor 数量: " << reactor_count << std::endl;
@@ -96,10 +103,28 @@ int main() {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
-    // 10. 启动过期键检查器（后台线程定期清理过期键）
+    // 10. 加载 RDB 持久化文件（必须在 ExpirationChecker 启动之前，避免并发访问）
+    auto& rdb = RdbPersistence::instance();
+    std::string rdb_path = Config::instance().getString("rdb_path", "./dump.rdb");
+    if (rdb.load(rdb_path, GlobalStorage::instance())) {
+        std::cout << "[主线程] RDB 数据加载成功" << std::endl;
+    } else {
+        std::cout << "[主线程] 无 RDB 文件或加载失败，将从空存储开始" << std::endl;
+    }
+
+    // 11. 启动过期键检查器（后台线程定期清理过期键）
     ExpirationChecker expiration_checker(GlobalStorage::instance().expire_dict(), GlobalStorage::instance());
     expiration_checker.start();
     std::cout << "[主线程] 过期键检查器已启动" << std::endl;
+
+    // 12. 启动 RDB 自动保存调度器
+    RdbScheduler rdb_scheduler(GlobalStorage::instance(), rdb_path);
+    RdbScheduler::SaveConfig scheduler_config;
+    scheduler_config.interval_sec = rdb_save_interval;
+    scheduler_config.dirty_threshold = rdb_dirty_threshold;
+    rdb_scheduler.set_config(scheduler_config);
+    rdb_scheduler.start();
+    std::cout << "[主线程] RDB 自动保存调度器已启动 (间隔: " << rdb_save_interval << "s, 脏键阈值: " << rdb_dirty_threshold << ")" << std::endl;
 
     // 只有 MainReactor 初始化成功时才显示服务器启动信息
     if (g_running) {
@@ -110,6 +135,7 @@ int main() {
         std::cout << "   - MainReactor: 单线程处理 accept     " << std::endl;
         std::cout << "   - SubReactorPool: " << reactor_count << " 线程处理 I/O      " << std::endl;
         std::cout << "   - ThreadPool: " << thread_pool_size << " 线程处理异步任务  " << std::endl;
+        std::cout << "   - RDB Persist: 自动持久化支持        " << std::endl;
         std::cout << "========================================" << std::endl;
     } else {
         std::cout << "========================================" << std::endl;
@@ -117,13 +143,17 @@ int main() {
         std::cout << "========================================" << std::endl;
     }
 
-    // 10. 启动 MainReactor 事件循环（阻塞）
+    // 13. 启动 MainReactor 事件循环（阻塞）
     if (g_running) {
         main_reactor.start();
     }
 
-    // 11. 优雅退出流程
+    // 14. 优雅退出流程
     std::cout << "\n[主线程] 开始关闭服务器..." << std::endl;
+
+    // 停止 RDB 自动保存调度器
+    rdb_scheduler.stop();
+    std::cout << "[主线程] RDB 调度器已停止" << std::endl;
 
     // 停止 SubReactorPool
     SubReactorPool::instance().stop();
@@ -140,6 +170,13 @@ int main() {
     // 停止过期键检查器
     expiration_checker.stop();
     std::cout << "[主线程] 过期键检查器已停止" << std::endl;
+
+    // 15. 保存 RDB 持久化文件（优雅退出时自动保存）
+    if (rdb.save(rdb_path, GlobalStorage::instance())) {
+        std::cout << "[主线程] RDB 数据保存成功" << std::endl;
+    } else {
+        std::cout << "[主线程] RDB 数据保存失败" << std::endl;
+    }
 
     std::cout << "\n========================================" << std::endl;
     std::cout << "   服务器已安全退出，感谢使用！         " << std::endl;

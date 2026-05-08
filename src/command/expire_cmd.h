@@ -30,8 +30,11 @@ public:
         const std::string& key = args[1];
         const std::string& seconds_str = args[2];
 
-        // 参数防御性检查
-        assert(!key.empty() && "EXPIRE command - key is empty");
+        // 参数防御性检查（Redis 协议不允许空 key）
+        if (key.empty()) {
+            LOG_WARN(EXPIRE, "EXPIRE - empty key provided");
+            return RespEncoder::encode_error("ERR invalid key");
+        }
 
         // 解析过期秒数
         try {
@@ -84,7 +87,10 @@ public:
         }
 
         const std::string& key = args[1];
-        assert(!key.empty() && "TTL command - key is empty");
+        if (key.empty()) {
+            LOG_WARN(EXPIRE, "TTL - empty key provided");
+            return RespEncoder::encode_error("ERR invalid key");
+        }
 
         auto& storage = GlobalStorage::instance();
 
@@ -144,7 +150,10 @@ public:
         }
 
         const std::string& key = args[1];
-        assert(!key.empty() && "PTTL command - key is empty");
+        if (key.empty()) {
+            LOG_WARN(EXPIRE, "PTTL - empty key provided");
+            return RespEncoder::encode_error("ERR invalid key");
+        }
 
         auto& storage = GlobalStorage::instance();
 
@@ -208,7 +217,10 @@ public:
         }
 
         const std::string& key = args[1];
-        assert(!key.empty() && "PERSIST command - key is empty");
+        if (key.empty()) {
+            LOG_WARN(EXPIRE, "PERSIST - empty key provided");
+            return RespEncoder::encode_error("ERR invalid key");
+        }
 
         // 键必须存在
         auto& storage = GlobalStorage::instance();
@@ -251,8 +263,14 @@ public:
         const std::string& seconds_str = args[2];
 
         // 参数防御性检查
-        assert(!key.empty() && "SETEX command - key is empty");
-        assert(!seconds_str.empty() && "SETEX command - seconds is empty");
+        if (key.empty()) {
+            LOG_WARN(EXPIRE, "SETEX - empty key provided");
+            return RespEncoder::encode_error("ERR invalid key");
+        }
+        if (seconds_str.empty()) {
+            LOG_WARN(EXPIRE, "SETEX - empty seconds provided");
+            return RespEncoder::encode_error("ERR value is not an integer");
+        }
 
         // 解析过期秒数
         try {
@@ -264,14 +282,11 @@ public:
 
             auto& storage = GlobalStorage::instance();
 
-            // 先设置值
-            storage.set(key, value);
+            // 传入相对 TTL（毫秒），set_with_expire 内部会转换为绝对时间戳
+            storage.set_with_expire(key, CacheObject(value), seconds * 1000);
 
-            // 再设置过期时间
-            storage.expire_dict().set(key, seconds * 1000);
-
-            LOG_INFO(EXPIRE, "SETEX - key=%s, seconds=%ld, value_len=%zu, ttl_ms=%ld",
-                    key.c_str(), seconds, value.size(), seconds * 1000);
+            LOG_INFO(EXPIRE, "SETEX - key=%s, seconds=%ld, value_len=%zu",
+                    key.c_str(), seconds, value.size());
             return RespEncoder::encode_ok();
 
         } catch (const std::exception& e) {

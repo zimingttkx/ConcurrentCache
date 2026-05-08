@@ -1,6 +1,7 @@
 #include "command_factory.h"
 #include "string_cmd.h"
 #include "expire_cmd.h"
+#include <algorithm>
 
 namespace cc_server {
 
@@ -26,7 +27,7 @@ namespace cc_server {
         register_command("ping", std::make_unique<PingCommand>());
         register_command("expire", std::make_unique<ExpireCommand>());
         register_command("ttl", std::make_unique<TtlCommand>());
-        register_command("pttl", std::make_unique<PTTlCommand>());
+        register_command("pttl", std::make_unique<PTtlCommand>());
         register_command("persist", std::make_unique<PersistCommand>());
         register_command("setex", std::make_unique<SetexCommand>());
 
@@ -57,6 +58,17 @@ namespace cc_server {
         register_command("zscore", std::make_unique<ZscoreCommand>());
         register_command("zcard", std::make_unique<ZcardCommand>());
         register_command("zrange", std::make_unique<ZrangeCommand>());
+
+        // RDB 持久化命令
+        register_command("save", std::make_unique<SaveCommand>());
+        register_command("bgsave", std::make_unique<BgsaveCommand>());
+        register_command("lastsave", std::make_unique<LastsaveCommand>());
+        register_command("dbsize", std::make_unique<DbsizeCommand>());
+        register_command("flushdb", std::make_unique<FlushdbCommand>());
+
+        // 服务器信息命令
+        register_command("info", std::make_unique<InfoCommand>());
+        register_command("debug", std::make_unique<DebugCommand>());
     }
 
 
@@ -115,6 +127,15 @@ namespace cc_server {
     std::unique_ptr<Command> CommandFactory::create(const std::string& name) {
         // 在 map 中查找命令
         auto it = commands_.find(name);
+
+        // 如果没找到，尝试大小写不敏感查找
+        if (it == commands_.end()) {
+            // 转换为小写后查找
+            std::string lower_name = name;
+            std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(),
+                           [](unsigned char c) { return std::tolower(c); });
+            it = commands_.find(lower_name);
+        }
 
         if (it != commands_.end()) {
             // 找到命令，使用 clone() 创建新实例
