@@ -9,23 +9,30 @@
 - 学习 Reactor 事件驱动模型和 epoll 多路复用
 - 理解缓存系统的核心设计思想
 
+## 版本分支
+
+本项目采用多分支开发策略，每个版本独立演进：
+
+| 分支 | 版本 | 状态 | 说明 |
+|------|------|------|------|
+| [version1](https://github.com/dingziming/ConcurrentCache/tree/version1) | V1.0 | 已完成 | 基础框架，单 Reactor，GET/SET/DEL/EXISTS |
+| [version2](https://github.com/dingziming/ConcurrentCache/tree/version2) | V2.0 | 已完成 | MainSubReactor，内存池，锁机制，优雅退出，ExpireDict，ARU淘汰 |
+| [version3](https://github.com/dingziming/ConcurrentCache/tree/version3) | V3.0 | 已完成 | LIST/HASH/SET/ZSET 数据类型 |
+| [main](https://github.com/dingziming/ConcurrentCache/tree/main) | V3.1 | 开发中 | RDB 持久化（当前开发版本） |
+
 ## 当前版本状态
 
-**V2.0** - 基础版本（已发布）
-- MainSubReactor 多线程网络模型
-- 三级内存池
-- 完整锁机制
-- 线程池
-- 优雅退出
-- 分段锁哈希表（64分片）
-- 过期字典 + ARU淘汰算法
-- TTL命令（EXPIRE/TTL/PTTL/PERSIST/SETEX）
-
-**V3.1** - RDB 持久化（已完成）
+**V3.1** (main 分支) - RDB 持久化（开发中）
 - ✅ RDB 快照持久化（BGSAVE/FORK/COW）
 - ✅ 定时自动保存（可配置间隔）
 - ✅ 服务启动时自动恢复
 - ✅ SAVE/BGSAVE 命令
+
+**V3.0** (version3 分支) - 多数据类型（已完成）
+- ✅ LIST 数据结构（LPUSH/RPUSH/LPOP/RPOP/LLEN/LRANGE）
+- ✅ HASH 数据结构（HSET/HGET/HDEL/HLEN/HGETALL）
+- ✅ SET 数据结构（SADD/SPOP/SCARD/SISMEMBER/SMEMBERS）
+- ✅ ZSET 数据结构（ZADD/ZSCORE/ZCARD/ZRANGE）
 
 ## 技术栈
 
@@ -423,13 +430,13 @@ docs/
 
 ## 开发计划
 
-| 版本 | 目标 | 状态 |
-|------|------|------|
-| V1.0 | 基础框架，单 Reactor，GET/SET/DEL/EXISTS | ✅ 已完成 |
-| V2.0 | 线程池，MainSubReactor，内存池，锁机制，优雅退出，分段锁哈希表，ExpireDict，ARU淘汰，TTL命令 | ✅ 已完成 |
-| V3.0 | 多种数据类型（LIST/HASH/SET/ZSET） | ✅ 已完成 |
-| V3.1 | RDB 持久化（BGSAVE/FORK/COW/自动保存） | ✅ 已完成 |
-| V4.0 | 集群模式，哈希槽分片，主从复制 | 📋 计划中 |
+| 版本 | 目标 | 状态 | 分支 |
+|------|------|------|------|
+| V1.0 | 基础框架，单 Reactor，GET/SET/DEL/EXISTS | ✅ 已完成 | version1 |
+| V2.0 | 线程池，MainSubReactor，内存池，锁机制，优雅退出，ExpireDict，ARU淘汰，TTL命令 | ✅ 已完成 | version2 |
+| V3.0 | 多种数据类型（LIST/HASH/SET/ZSET） | ✅ 已完成 | version3 |
+| V3.1 | RDB 持久化（BGSAVE/FORK/COW/自动保存） | ✅ 已完成 | main |
+| V4.0 | 集群模式，哈希槽分片，主从复制 | 📋 计划中 | - |
 
 ## 测试
 
