@@ -21,12 +21,11 @@
 - 过期字典 + ARU淘汰算法
 - TTL命令（EXPIRE/TTL/PTTL/PERSIST/SETEX）
 
-**V3.0** - 多数据类型扩展（开发中）
-- ✅ LIST 数据结构（LPUSH/RPUSH/LPOP/RPOP/LLEN/LRANGE）
-- ✅ HASH 数据结构（HSET/HGET/HDEL/HLEN/HGETALL）
-- ✅ SET 数据结构（SADD/SPOP/SCARD/SISMEMBER/SMEMBERS）
-- ✅ ZSET 数据结构（ZADD/ZSCORE/ZCARD/ZRANGE）
-- 📋 RDB/AOF 持久化（计划中）
+**V3.1** - RDB 持久化（已完成）
+- ✅ RDB 快照持久化（BGSAVE/FORK/COW）
+- ✅ 定时自动保存（可配置间隔）
+- ✅ 服务启动时自动恢复
+- ✅ SAVE/BGSAVE 命令
 
 ## 技术栈
 
@@ -100,6 +99,10 @@
 | ZSCORE | 获取成员的分数 |
 | ZCARD | 获取有序集合成员数量 |
 | ZRANGE | 按分数范围获取成员（支持 WITHSCORES） |
+| **RDB 命令** | |
+| SAVE | 同步保存快照到磁盘 |
+| BGSAVE | 后台异步保存快照 |
+| LASTSAVE | 获取上次成功保存的时间戳 |
 
 ### 基础组件
 
@@ -140,6 +143,14 @@
 | GlobalStorage | 分段锁哈希表（64分片），线程安全 |
 | ExpireDict | 过期字典，TTL管理 |
 | ARU淘汰 | 近似LRU淘汰算法 |
+| RDBScheduler | RDB 快照调度器，支持 Fork/COW |
+
+### 持久化层
+
+| 模块 | 功能 |
+|------|------|
+| RDB | RDB 文件读写，CRC64 校验 |
+| RDBScheduler | 后台保存调度，Fork 进程，Copy-on-Write |
 
 ## 架构概览
 
@@ -182,7 +193,8 @@
 
 - Linux 系统
 - C++20 编译器
-- CMake 3.28+
+- CMake 3.20+
+- ZLIB
 - spdlog
 
 ### 编译
@@ -319,6 +331,23 @@ OK
 (integer) 3
 ```
 
+#### RDB 持久化测试
+
+```bash
+127.0.0.1:6379> SET key1 value1
+OK
+127.0.0.1:6379> SET key2 value2
+OK
+127.0.0.1:6379> BGSAVE
+Background saving started
+127.0.0.1:6379> LASTSAVE
+(integer) 1700000000
+127.0.0.1:6379> SAVE
+OK
+```
+
+服务器退出时会自动执行 BGSAVE 保存快照，启动时自动从 dump.rdb 恢复数据。
+
 ### 优雅退出
 
 服务器支持通过信号优雅退出：
@@ -372,6 +401,9 @@ src/
     ├── storage.cpp/h # 全局存储
     ├── expire_dict.cpp/h # 过期字典
     └── expiration_checker.cpp/h # 定期删除器
+└── persistence/    # 持久化层（V3.1 新增）
+    ├── rdb.cpp/h    # RDB 文件读写
+    └── rdb_scheduler.cpp/h # RDB 调度器
 
 test/               # 测试套件
 ├── trace/         # 测试框架
@@ -395,8 +427,8 @@ docs/
 |------|------|------|
 | V1.0 | 基础框架，单 Reactor，GET/SET/DEL/EXISTS | ✅ 已完成 |
 | V2.0 | 线程池，MainSubReactor，内存池，锁机制，优雅退出，分段锁哈希表，ExpireDict，ARU淘汰，TTL命令 | ✅ 已完成 |
-| V3.0 | 多种数据类型（LIST/HASH/SET/ZSET） | 🚧 开发中 |
-| V3.0 | RDB/AOF 持久化 | 📋 计划中 |
+| V3.0 | 多种数据类型（LIST/HASH/SET/ZSET） | ✅ 已完成 |
+| V3.1 | RDB 持久化（BGSAVE/FORK/COW/自动保存） | ✅ 已完成 |
 | V4.0 | 集群模式，哈希槽分片，主从复制 | 📋 计划中 |
 
 ## 测试
@@ -404,26 +436,38 @@ docs/
 项目包含完整的测试套件：
 
 ```bash
-# 锁正确性测试
-./build/test/test_lock_correctness
-
-# 死锁检测测试
-./build/test/test_lock_deadlock
-
-# 数据竞争测试
-./build/test/test_lock_race
-
-# 压力测试
-./build/test/test_lock_stress
-
-# 边界测试
-./build/test/test_lock_boundary
+# V3 数据类型测试
+./build/test/concurrentcache-v3-tests
 
 # 原子操作测试
-./build/test/test_atomic_correctness
+./build/test/atomic-tests
+
+# 锁正确性测试
+./build/test/lock-correctness-tests
+
+# 死锁检测测试
+./build/test/lock-deadlock-tests
+
+# 数据竞争测试
+./build/test/lock-race-tests
+
+# 锁边界测试
+./build/test/lock-boundary-tests
 
 # 同步原语测试
-./build/test/test_sync_primitives
+./build/test/sync-primitives-tests
+
+# 压力测试
+./build/test/stress-test
+
+# 长时间压力测试
+./build/test/long-running-stress-test
+
+# 负载限制测试
+./build/test/load-limit-test
+
+# 网络压力测试
+./build/test/network-stress-test
 ```
 
 ## 参考资料
