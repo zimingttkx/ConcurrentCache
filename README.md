@@ -18,11 +18,22 @@
 | [version1](https://github.com/dingziming/ConcurrentCache/tree/version1) | V1.0 | 已完成 | 基础框架，单 Reactor，GET/SET/DEL/EXISTS |
 | [version2](https://github.com/dingziming/ConcurrentCache/tree/version2) | V2.0 | 已完成 | MainSubReactor，内存池，锁机制，优雅退出，ExpireDict，ARU淘汰 |
 | [version3](https://github.com/dingziming/ConcurrentCache/tree/version3) | V3.0 | 已完成 | LIST/HASH/SET/ZSET 数据类型 |
-| [main](https://github.com/dingziming/ConcurrentCache/tree/main) | V3.1 | 开发中 | RDB 持久化（当前开发版本） |
+| [main](https://github.com/dingziming/ConcurrentCache/tree/main) | V4.0 | 开发中 | 集群模式（当前开发版本） |
 
 ## 当前版本状态
 
-**V3.1** (main 分支) - RDB 持久化（开发中）
+**V4.0** (main 分支) - 集群模式（开发中）
+- ✅ 集群配置解析
+- ✅ 节点数据结构（ClusterNode）
+- ✅ 集群状态管理（ClusterState）
+- ✅ 集群服务器（ClusterServer）
+- ✅ CRC16 槽算法
+- 📋 CLUSTER MEET 命令（待开发）
+- 📋 Gossip 协议（待开发）
+- 📋 主从复制（待开发）
+- 📋 故障转移（待开发）
+
+**V3.1** (version3 分支) - RDB 持久化（已完成）
 - ✅ RDB 快照持久化（BGSAVE/FORK/COW）
 - ✅ 定时自动保存（可配置间隔）
 - ✅ 服务启动时自动恢复
@@ -111,12 +122,21 @@
 | BGSAVE | 后台异步保存快照 |
 | LASTSAVE | 获取上次成功保存的时间戳 |
 
+### 集群模块（V4 开发中）
+
+| 模块 | 功能 |
+|------|------|
+| ClusterNode | 集群节点数据结构 |
+| ClusterState | 集群状态管理（节点列表、槽映射） |
+| ClusterServer | 集群服务器入口（单例） |
+| CRC16 | 槽计算算法（与 Redis 兼容） |
+
 ### 基础组件
 
 | 模块 | 功能 |
 |------|------|
 | Logger | 日志系统，支持多级别输出、Sink 抽象、热加载 |
-| Config | 配置管理模块，支持热加载 |
+| Config | 配置管理模块，支持热加载、集群配置 |
 | Signal | 信号处理（SIGSEGV 堆栈捕获、SIGPIPE 忽略） |
 | Format | 字符串格式化工具 |
 | Lock | 完整锁机制（Mutex/SpinLock/RWLock/Semaphore 等） |
@@ -192,6 +212,11 @@
 │        GlobalStorage                      │
 │     (全局哈希表存储，线程安全)           │
 └─────────────────────────────────────────┘
+
+┌─────────────────────────────────────────┐
+│        ClusterServer (V4)                │
+│     (集群管理，节点状态，槽映射)         │
+└─────────────────────────────────────────┘
 ```
 
 ## 快速开始
@@ -202,7 +227,6 @@
 - C++20 编译器
 - CMake 3.20+
 - ZLIB
-- spdlog
 
 ### 编译
 
@@ -404,18 +428,24 @@ src/
 │   ├── command.h  # 命令基类
 │   ├── command_factory.cpp/h # 命令工厂
 │   └── string_cmd.h # 全部命令实现
-└── cache/          # 缓存层
-    ├── storage.cpp/h # 全局存储
-    ├── expire_dict.cpp/h # 过期字典
-    └── expiration_checker.cpp/h # 定期删除器
-└── persistence/    # 持久化层（V3.1 新增）
-    ├── rdb.cpp/h    # RDB 文件读写
-    └── rdb_scheduler.cpp/h # RDB 调度器
+├── cache/          # 缓存层
+│   ├── storage.cpp/h # 全局存储
+│   ├── expire_dict.cpp/h # 过期字典
+│   └── expiration_checker.cpp/h # 定期删除器
+├── persistence/    # 持久化层（V3.1 新增）
+│   ├── rdb.cpp/h    # RDB 文件读写
+│   └── rdb_scheduler.cpp/h # RDB 调度器
+└── cluster/        # 集群层（V4 开发中）
+    ├── cluster_common.h   # 节点角色、标志定义
+    ├── cluster_node.h/cpp  # 节点数据结构
+    ├── cluster_state.h/cpp # 集群状态管理
+    └── cluster_server.h/cpp # 集群服务器入口
 
 test/               # 测试套件
 ├── trace/         # 测试框架
 ├── lock_test/     # 锁测试
 ├── atomic_test/   # 原子操作测试
+├── cluster_test/  # 集群测试（V4）
 └── sync_primitives_test/ # 同步原语测试
 
 conf/               # 配置文件
@@ -435,14 +465,17 @@ docs/
 | V1.0 | 基础框架，单 Reactor，GET/SET/DEL/EXISTS | ✅ 已完成 | version1 |
 | V2.0 | 线程池，MainSubReactor，内存池，锁机制，优雅退出，ExpireDict，ARU淘汰，TTL命令 | ✅ 已完成 | version2 |
 | V3.0 | 多种数据类型（LIST/HASH/SET/ZSET） | ✅ 已完成 | version3 |
-| V3.1 | RDB 持久化（BGSAVE/FORK/COW/自动保存） | ✅ 已完成 | main |
-| V4.0 | 集群模式，哈希槽分片，主从复制 | 📋 计划中 | - |
+| V3.1 | RDB 持久化（BGSAVE/FORK/COW/自动保存） | ✅ 已完成 | version3 |
+| V4.0 | 集群模式，哈希槽分片，主从复制 | 🔄 开发中 | main |
 
 ## 测试
 
 项目包含完整的测试套件：
 
 ```bash
+# 集群模块测试
+./build/test/cluster-test
+
 # V3 数据类型测试
 ./build/test/concurrentcache-v3-tests
 

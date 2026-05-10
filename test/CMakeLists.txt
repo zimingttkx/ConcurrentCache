@@ -99,7 +99,7 @@ add_executable(cluster-tests
 )
 
 # ========== 链接公共源文件 ==========
-foreach(test_target atomic-tests lock-correctness-tests lock-deadlock-tests
+foreach(test_target concurrentcache-v3-tests atomic-tests lock-correctness-tests lock-deadlock-tests
                   lock-race-tests lock-boundary-tests sync-primitives-tests
                   stress-test long-running-stress-test load-limit-test network-stress-test
                   cluster-tests)
