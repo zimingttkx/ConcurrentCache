@@ -158,6 +158,28 @@ void Config::notifyObservers(const std::string& key) {
     }
 }
 
+// 集群配置
+
+bool Config::clusterEnabled() const {
+    return getBool("cluster_enabled", false);
+}
+
+std::string Config::clusterConfigFile() const {
+    return getString("cluster_config_file", "nodes.conf");
+}
+
+int Config::clusterNodeTimeout() const {
+    return getInt("cluster_node_timeout", 15000);
+}
+
+int Config::clusterReplicaValidityFactor() const {
+    return getInt("cluster_replica_validity_factor", 10);
+}
+
+bool Config::clusterRequireFullCoverage() const {
+    return getBool("cluster_require_full_coverage", false);
+}
+
 // 工具函数
 
 void Config::trim(std::string& s) {

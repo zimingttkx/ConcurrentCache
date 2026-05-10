@@ -84,6 +84,13 @@ public:
     // 通知观察者（配置变化时调用）
     void notifyObservers(const std::string& key);
 
+    // 集群配置
+    bool clusterEnabled() const;
+    std::string clusterConfigFile() const;
+    int clusterNodeTimeout() const;
+    int clusterReplicaValidityFactor() const;
+    bool clusterRequireFullCoverage() const;
+
     // 禁用拷贝
     Config(const Config&) = delete;
     Config& operator=(const Config&) = delete;
