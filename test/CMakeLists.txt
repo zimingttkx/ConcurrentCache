@@ -24,6 +24,9 @@ set(COMMON_SOURCES
     ${CMAKE_SOURCE_DIR}/src/persistence/rdb.cpp
     ${CMAKE_SOURCE_DIR}/src/persistence/rdb_scheduler.cpp
     ${CMAKE_SOURCE_DIR}/src/protocol/resp.cpp
+    ${CMAKE_SOURCE_DIR}/src/cluster/cluster_node.cpp
+    ${CMAKE_SOURCE_DIR}/src/cluster/cluster_state.cpp
+    ${CMAKE_SOURCE_DIR}/src/cluster/cluster_server.cpp
 )
 
 # 包含目录
@@ -90,10 +93,16 @@ add_executable(network-stress-test
     network_test/network_stress_test.cpp
 )
 
+# Cluster 测试
+add_executable(cluster-tests
+    cluster_test/cluster_test.cpp
+)
+
 # ========== 链接公共源文件 ==========
 foreach(test_target atomic-tests lock-correctness-tests lock-deadlock-tests
                   lock-race-tests lock-boundary-tests sync-primitives-tests
-                  stress-test long-running-stress-test load-limit-test network-stress-test)
+                  stress-test long-running-stress-test load-limit-test network-stress-test
+                  cluster-tests)
     target_sources(${test_target} PRIVATE ${COMMON_SOURCES})
 endforeach()
 
@@ -101,7 +110,7 @@ endforeach()
 foreach(test_target concurrentcache-v3-tests atomic-tests lock-correctness-tests
                   lock-deadlock-tests lock-race-tests lock-boundary-tests
                   sync-primitives-tests stress-test long-running-stress-test
-                  load-limit-test network-stress-test)
+                  load-limit-test network-stress-test cluster-tests)
     target_include_directories(${test_target} PRIVATE ${TEST_INCLUDE_DIRS})
 endforeach()
 
@@ -119,6 +128,7 @@ if(UNIX)
     target_link_libraries(long-running-stress-test pthread ZLIB::ZLIB)
     target_link_libraries(load-limit-test pthread ZLIB::ZLIB)
     target_link_libraries(network-stress-test pthread ZLIB::ZLIB)
+    target_link_libraries(cluster-tests pthread ZLIB::ZLIB)
 endif()
 
 # ========== 编译选项 ==========
@@ -126,14 +136,14 @@ if(MSVC)
     foreach(test_target concurrentcache-v3-tests atomic-tests lock-correctness-tests
                       lock-deadlock-tests lock-race-tests lock-boundary-tests
                       sync-primitives-tests stress-test long-running-stress-test
-                      load-limit-test network-stress-test)
+                      load-limit-test network-stress-test cluster-tests)
         target_compile_options(${test_target} PRIVATE /W4)
     endforeach()
 else()
     foreach(test_target concurrentcache-v3-tests atomic-tests lock-correctness-tests
                       lock-deadlock-tests lock-race-tests lock-boundary-tests
                       sync-primitives-tests stress-test long-running-stress-test
-                      load-limit-test network-stress-test)
+                      load-limit-test network-stress-test cluster-tests)
         target_compile_options(${test_target} PRIVATE -Wall -Wextra)
     endforeach()
 endif()
@@ -144,3 +154,4 @@ add_test(NAME AtomicTests COMMAND atomic-tests)
 add_test(NAME LockCorrectnessTests COMMAND lock-correctness-tests)
 add_test(NAME LockDeadlockTests COMMAND lock-deadlock-tests)
 add_test(NAME LockRaceTests COMMAND lock-race-tests)
+add_test(NAME ClusterTests COMMAND cluster-tests)

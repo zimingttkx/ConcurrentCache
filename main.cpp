@@ -13,6 +13,7 @@
 #include "src/cache/expiration_checker.h"
 #include "src/persistence/rdb.h"
 #include "src/persistence/rdb_scheduler.h"
+#include "src/cluster/cluster_server.h"
 
 using namespace cc_server;
 
@@ -113,6 +114,12 @@ int main() {
         std::cout << "[主线程] 无 RDB 文件或加载失败，将从空存储开始" << std::endl;
     }
 
+    // 10. 初始化集群（如果启用）
+    ClusterServer::instance().init();
+    if (ClusterServer::instance().isEnabled()) {
+        std::cout << "[主线程] 集群模块初始化完成" << std::endl;
+    }
+
     // 11. 启动过期键检查器（后台线程定期清理过期键）
     ExpirationChecker expiration_checker(GlobalStorage::instance().expire_dict(), GlobalStorage::instance());
     expiration_checker.start();
@@ -144,7 +151,10 @@ int main() {
         std::cout << "========================================" << std::endl;
     }
 
-    // 13. 启动 MainReactor 事件循环（阻塞）
+    // 13. 启动集群（如果启用）
+    ClusterServer::instance().start();
+
+    // 14. 启动 MainReactor 事件循环（阻塞）
     if (g_running) {
         main_reactor.start();
     }
@@ -171,6 +181,10 @@ int main() {
     // 停止过期键检查器
     expiration_checker.stop();
     std::cout << "[主线程] 过期键检查器已停止" << std::endl;
+
+    // 停止集群
+    ClusterServer::instance().stop();
+    std::cout << "[主线程] 集群已停止" << std::endl;
 
     // 15. 保存 RDB 持久化文件（优雅退出时自动保存）
     if (rdb.save(rdb_path, GlobalStorage::instance())) {

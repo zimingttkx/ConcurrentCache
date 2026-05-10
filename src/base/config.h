@@ -69,9 +69,9 @@ public:
     void reload();
 
     // 获取配置项
-    std::string getString(const std::string& key, const std::string& default_value = "");
-    int getInt(const std::string& key, int default_value = 0);
-    bool getBool(const std::string& key, bool default_value = false);
+    [[nodiscard]] std::string getString(const std::string& key, const std::string& default_value = "") const;
+    [[nodiscard]] int getInt(const std::string& key, int default_value = 0) const;
+    [[nodiscard]] bool getBool(const std::string& key, bool default_value = false) const;
 
     // 观察者模式 - 注册观察者
     // @param key 要监听的配置项名
@@ -85,11 +85,11 @@ public:
     void notifyObservers(const std::string& key);
 
     // 集群配置
-    bool clusterEnabled() const;
-    std::string clusterConfigFile() const;
-    int clusterNodeTimeout() const;
-    int clusterReplicaValidityFactor() const;
-    bool clusterRequireFullCoverage() const;
+    [[nodiscard]] bool clusterEnabled() const;
+    [[nodiscard]] std::string clusterConfigFile() const;
+    [[nodiscard]] int clusterNodeTimeout() const;
+    [[nodiscard]] int clusterReplicaValidityFactor() const;
+    [[nodiscard]] bool clusterRequireFullCoverage() const;
 
     // 禁用拷贝
     Config(const Config&) = delete;
@@ -112,7 +112,7 @@ private:
     std::map<std::string, std::vector<ConfigObserver*>> observers_;
 
     // 互斥锁（保护 config_data_ 和 observers_）
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
 
     // 配置文件路径
     std::string config_file_;

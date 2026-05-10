@@ -95,7 +95,7 @@ void Config::reload() {
 
 // 配置获取
 
-std::string Config::getString(const std::string& key, const std::string& default_value) {
+std::string Config::getString(const std::string& key, const std::string& default_value) const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = config_data_.find(key);
     if (it != config_data_.end()) {
@@ -104,7 +104,7 @@ std::string Config::getString(const std::string& key, const std::string& default
     return default_value;
 }
 
-int Config::getInt(const std::string& key, int default_value) {
+int Config::getInt(const std::string& key, int default_value) const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = config_data_.find(key);
     if (it != config_data_.end()) {
@@ -117,7 +117,7 @@ int Config::getInt(const std::string& key, int default_value) {
     return default_value;
 }
 
-bool Config::getBool(const std::string& key, bool default_value) {
+bool Config::getBool(const std::string& key, bool default_value) const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = config_data_.find(key);
     if (it != config_data_.end()) {

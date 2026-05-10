@@ -68,6 +68,13 @@ set(PROTOCOL_SOURCES
     src/protocol/resp.cpp
 )
 
+# ========== Cluster 模块 ==========
+set(CLUSTER_SOURCES
+    src/cluster/cluster_node.cpp
+        src/cluster/cluster_state.cpp
+        src/cluster/cluster_server.cpp
+)
+
 # ========== 主程序 ==========
 add_executable(concurrentcache-server
     main.cpp
@@ -79,6 +86,7 @@ add_executable(concurrentcache-server
     ${NETWORK_SOURCES}
     ${PERSISTENCE_SOURCES}
     ${PROTOCOL_SOURCES}
+    ${CLUSTER_SOURCES}
 )
 
 # ========== 链接库 ==========
