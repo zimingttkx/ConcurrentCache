@@ -39,6 +39,58 @@ void ClusterServer::init() {
     // 将本节点添加到集群状态
     state_.addNode(my_node_);
 
+    // 初始化连接管理器
+    connection_.init();
+    connection_.set_state(&state_);
+
+    // 初始化 Gossip 协议
+    gossip_.init(&state_);
+
+    // 设置连接回调 - 当收到 PONG 时将对端节点添加到状态
+    // 这完成 MEET 命令的三次握手:发送 MEET -> 收到 PONG -> 添加对端节点
+    connection_.set_node_connected_callback([this](const std::string& node_name) {
+        // 解析 node_name (格式: ip:port)
+        auto colon_pos = node_name.find(':');
+        if (colon_pos == std::string::npos) {
+            return;
+        }
+        std::string ip = node_name.substr(0, colon_pos);
+        int port = std::stoi(node_name.substr(colon_pos + 1));
+
+        // 检查节点是否已存在
+        if (state_.getNode(node_name)) {
+            return;
+        }
+
+        // 创建节点并添加到状态
+        auto node = std::make_shared<ClusterNode>(node_name, ip, port, NodeRole::kNodeUnknown);
+        node->addFlags(static_cast<uint64_t>(NodeFlags::kHandshake));
+        state_.addNode(node);
+        LOG_INFO(CLUSTER, "Added node via PONG: %s (%s:%d)", node_name.c_str(), ip.c_str(), port);
+    });
+
+    // 设置断开回调
+    connection_.set_node_disconnected_callback([this](const std::string& node_name) {
+        state_.delNode(node_name);
+        LOG_INFO(CLUSTER, "Removed node: %s", node_name.c_str());
+    });
+
+    // 设置 MEET 回调 - 当收到其他节点发来的 MEET 消息时，将其添加到状态
+    connection_.set_meet_callback([this](const std::string& ip, int port) {
+        std::string name = ip + ":" + std::to_string(port);
+
+        // 检查节点是否已存在
+        if (state_.getNode(name)) {
+            return;
+        }
+
+        // 创建握手节点并添加到状态
+        auto node = std::make_shared<ClusterNode>(name, ip, port, NodeRole::kNodeUnknown);
+        node->addFlags(static_cast<uint64_t>(NodeFlags::kHandshake));
+        state_.addNode(node);
+        LOG_INFO(CLUSTER, "Added node via MEET: %s (%s:%d)", name.c_str(), ip.c_str(), port);
+    });
+
     LOG_INFO(CLUSTER, "Cluster initialized: node_name=%s, enabled=%s",
              my_name.c_str(), enabled_ ? "yes" : "no");
 }
@@ -47,14 +99,21 @@ void ClusterServer::start() {
     if (!enabled_) return;
 
     running_ = true;
+    connection_.start_heartbeat();
     LOG_INFO(CLUSTER, "Cluster server started");
 }
 
 void ClusterServer::stop() {
     if (!enabled_) return;
 
+    connection_.stop_heartbeat();
     running_ = false;
     LOG_INFO(CLUSTER, "Cluster server stopped");
+}
+
+void ClusterServer::on_timer() {
+    if (!enabled_ || !running_) return;
+    connection_.on_timer();
 }
 
 // CRC16 查找表（预计算，必须在 crc16 函数之前）
@@ -140,6 +199,13 @@ std::shared_ptr<ClusterNode> ClusterServer::getNodeBySlot(int slot) const {
     assert(slot >= 0 && slot <= 16383 && "getNodeBySlot: slot out of range");
 
     return state_.getNodeForSlot(slot);
+}
+
+std::string ClusterServer::getMyNodeName() const {
+    if (my_node_) {
+        return my_node_->getName();
+    }
+    return "";
 }
 
 } // namespace cc_server
