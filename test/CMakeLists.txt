@@ -27,6 +27,10 @@ set(COMMON_SOURCES
     ${CMAKE_SOURCE_DIR}/src/cluster/cluster_node.cpp
     ${CMAKE_SOURCE_DIR}/src/cluster/cluster_state.cpp
     ${CMAKE_SOURCE_DIR}/src/cluster/cluster_server.cpp
+    ${CMAKE_SOURCE_DIR}/src/cluster/cluster_link.cpp
+    ${CMAKE_SOURCE_DIR}/src/cluster/cluster_connection.cpp
+    ${CMAKE_SOURCE_DIR}/src/cluster/cluster_gossip.cpp
+    ${CMAKE_SOURCE_DIR}/src/command/cluster_cmd.cpp
 )
 
 # 包含目录

@@ -28,6 +28,7 @@ set(CACHE_SOURCES
 # ========== Command 模块 ==========
 set(COMMAND_SOURCES
     src/command/command_factory.cpp
+    src/command/cluster_cmd.cpp
 )
 
 # ========== Datatype 模块 ==========
@@ -71,8 +72,11 @@ set(PROTOCOL_SOURCES
 # ========== Cluster 模块 ==========
 set(CLUSTER_SOURCES
     src/cluster/cluster_node.cpp
-        src/cluster/cluster_state.cpp
-        src/cluster/cluster_server.cpp
+    src/cluster/cluster_state.cpp
+    src/cluster/cluster_server.cpp
+    src/cluster/cluster_link.cpp
+    src/cluster/cluster_connection.cpp
+    src/cluster/cluster_gossip.cpp
 )
 
 # ========== 主程序 ==========
