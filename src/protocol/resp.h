@@ -349,8 +349,21 @@ public:
     //   "*2\r\n$3\r\nget\r\n$3\r\nkey\r\n"
     
     static std::string encode_array(const std::vector<std::string>& arr);
-    
-    
+
+
+    // encode_nested_array() - 编码嵌套数组
+    // 用于 CLUSTER SLOTS 等返回嵌套结构的命令
+    //
+    // 参数：nested - 外层数组，每个元素是内层数组
+    // 返回：RESP 格式的嵌套数组
+    //
+    // 示例: encode_nested_array({{"127.0.0.1", "6379", "0", "1", "2"},
+    //                               {"127.0.0.2", "6380", "3", "4", "5"}})
+    //   返回嵌套数组格式
+
+    static std::string encode_nested_array(const std::vector<std::vector<std::string>>& nested);
+
+
     // encode_ok() - 便捷方法，编码 OK 响应
     
     // 等同于 encode_simple_string("OK")

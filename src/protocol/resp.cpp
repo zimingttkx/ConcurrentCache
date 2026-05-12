@@ -754,4 +754,18 @@ std::string RespEncoder::encode_array(const std::vector<std::string>& arr) {
     return result;
 }
 
+// 编码嵌套数组
+std::string RespEncoder::encode_nested_array(const std::vector<std::vector<std::string>>& nested) {
+    std::string result = "*" + std::to_string(nested.size()) + "\r\n";
+
+    for (const auto& inner : nested) {
+        result += "*" + std::to_string(inner.size()) + "\r\n";
+        for (const auto& item : inner) {
+            result += encode_bulk_string(item);
+        }
+    }
+
+    return result;
+}
+
 }  // namespace cc_server
