@@ -1,6 +1,7 @@
 #ifndef CONCURRENTCACHE_COMMAND_COMMAND_H
 #define CONCURRENTCACHE_COMMAND_COMMAND_H
 
+#include <memory>
 #include <string>
 #include <vector>
 

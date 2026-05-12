@@ -1,6 +1,7 @@
 #include "command_factory.h"
 #include "string_cmd.h"
 #include "expire_cmd.h"
+#include "cluster_cmd.h"
 #include <algorithm>
 
 namespace cc_server {
@@ -69,6 +70,9 @@ namespace cc_server {
         // 服务器信息命令
         register_command("info", std::make_unique<InfoCommand>());
         register_command("debug", std::make_unique<DebugCommand>());
+
+        // Cluster 命令
+        register_command("cluster", std::make_unique<ClusterCommand>());
     }
 
 
