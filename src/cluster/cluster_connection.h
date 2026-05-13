@@ -5,6 +5,8 @@
 #include "cluster_link.h"
 #include "cluster_state.h"
 #include "cluster_gossip.h"
+#include "../network/event_loop.h"
+#include "../network/channel.h"
 #include <unordered_map>
 #include <memory>
 #include <shared_mutex>
@@ -24,6 +26,9 @@ public:
 
     // 初始化
     void init();
+
+    // 设置 EventLoop（用于注册 ClusterLink 的 socket fd）
+    void set_event_loop(EventLoop* loop) { event_loop_ = loop; }
 
     // 启动/停止心跳
     void start_heartbeat();
@@ -47,6 +52,7 @@ public:
     // 广播消息
     void broadcast_ping();
     void broadcast_pong();
+    void broadcast_gossip(const GossipMsg& msg);
 
     // 连接状态检查
     [[nodiscard]] size_t connected_count() const;
@@ -69,6 +75,10 @@ public:
     // 定时任务（供外部调用）
     void on_timer();
 
+    // 注册/注销 ClusterLink 的 fd 到 EventLoop
+    void register_link_to_loop(ClusterLink* link);
+    void unregister_link_from_loop(ClusterLink* link);
+
 private:
     // 定时任务
     void check_connections();
@@ -80,9 +90,14 @@ private:
     void handle_link_msg(ClusterMsg&& msg, ClusterLink* link);
 
     ClusterState* state_ = nullptr;  // 集群状态
+    EventLoop* event_loop_ = nullptr;  // EventLoop 指针
 
     std::unordered_map<std::string, std::unique_ptr<ClusterLink>> links_;  // 节点连接
     mutable std::shared_mutex links_mutex_;  // 保护 links_
+
+    // ClusterLink fd 到 Channel 的映射（用于 EventLoop 注销）
+    std::unordered_map<int, Channel*> link_channels_;
+    std::mutex channel_mutex_;  // 保护 link_channels_
 
     NodeCallback node_connected_callback_;
     NodeCallback node_disconnected_callback_;

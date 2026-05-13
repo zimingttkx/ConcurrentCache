@@ -83,10 +83,18 @@ bool ClusterConnection::connect_to_node(const std::string& node_name,
         return false;
     }
 
+    // 获取原始指针（用于注册到 EventLoop）
+    ClusterLink* raw_link = link.get();
+
     // 添加到连接列表
     {
         std::unique_lock<std::shared_mutex> lock(links_mutex_);
         links_[node_name] = std::move(link);
+    }
+
+    // 注册到 EventLoop（如果有）
+    if (event_loop_) {
+        register_link_to_loop(raw_link);
     }
 
     LOG_INFO(CLUSTER, "Connected to node: %s (%s:%d)", node_name.c_str(), ip.c_str(), port);
@@ -99,12 +107,24 @@ bool ClusterConnection::connect_to_node(const std::string& node_name,
 }
 
 void ClusterConnection::disconnect_from_node(const std::string& node_name) {
-    std::unique_lock<std::shared_mutex> lock(links_mutex_);
+    ClusterLink* link_ptr = nullptr;
 
-    auto it = links_.find(node_name);
-    if (it != links_.end()) {
-        it->second->disconnect();
-        links_.erase(it);
+    {
+        std::unique_lock<std::shared_mutex> lock(links_mutex_);
+
+        auto it = links_.find(node_name);
+        if (it != links_.end()) {
+            link_ptr = it->second.get();
+            links_.erase(it);
+        }
+    }
+
+    if (link_ptr) {
+        // 先从 EventLoop 注销 Channel
+        if (event_loop_) {
+            unregister_link_from_loop(link_ptr);
+        }
+        link_ptr->disconnect();
         LOG_INFO(CLUSTER, "Disconnected from node: %s", node_name.c_str());
 
         if (node_disconnected_callback_) {
@@ -114,12 +134,33 @@ void ClusterConnection::disconnect_from_node(const std::string& node_name) {
 }
 
 void ClusterConnection::disconnect_all() {
-    std::unique_lock<std::shared_mutex> lock(links_mutex_);
+    // 先收集所有 Link 指针并从 EventLoop 注销
+    std::vector<ClusterLink*> links_to_disconnect;
 
-    for (auto& [name, link] : links_) {
-        link->disconnect();
+    {
+        std::unique_lock<std::shared_mutex> lock(links_mutex_);
+
+        for (auto& [name, link] : links_) {
+            links_to_disconnect.push_back(link.get());
+        }
     }
-    links_.clear();
+
+    // 在锁外注销所有 Channel
+    if (event_loop_) {
+        for (auto* link : links_to_disconnect) {
+            unregister_link_from_loop(link);
+        }
+    }
+
+    // 断开所有连接
+    {
+        std::unique_lock<std::shared_mutex> lock(links_mutex_);
+
+        for (auto* link : links_to_disconnect) {
+            link->disconnect();
+        }
+        links_.clear();
+    }
 
     LOG_INFO(CLUSTER, "Disconnected from all nodes");
 }
@@ -200,6 +241,16 @@ void ClusterConnection::broadcast_pong() {
     }
 }
 
+void ClusterConnection::broadcast_gossip(const GossipMsg& msg) {
+    std::shared_lock<std::shared_mutex> lock(links_mutex_);
+
+    for (auto& [name, link] : links_) {
+        if (link->is_connected()) {
+            link->send_gossip(msg);
+        }
+    }
+}
+
 size_t ClusterConnection::connected_count() const {
     std::shared_lock<std::shared_mutex> lock(links_mutex_);
 
@@ -223,7 +274,10 @@ bool ClusterConnection::is_node_connected(const std::string& node_name) const {
 }
 
 void ClusterConnection::on_node_disconnected(const std::string& node_name, ClusterLink* link) {
-    (void)link;
+    // 先从 EventLoop 注销 Channel
+    if (link && event_loop_) {
+        unregister_link_from_loop(link);
+    }
 
     std::unique_lock<std::shared_mutex> lock(links_mutex_);
     links_.erase(node_name);
@@ -232,6 +286,76 @@ void ClusterConnection::on_node_disconnected(const std::string& node_name, Clust
 
     if (node_disconnected_callback_) {
         node_disconnected_callback_(node_name);
+    }
+}
+
+void ClusterConnection::register_link_to_loop(ClusterLink* link) {
+    if (!event_loop_ || !link) {
+        return;
+    }
+
+    int fd = link->fd();
+    if (fd < 0) {
+        return;
+    }
+
+    // 创建 Channel
+    auto* channel = new Channel(event_loop_, fd);
+
+    // 设置回调：当 fd 可读时调用 handle_read
+    channel->set_read_callback([link]() {
+        link->handle_read();
+    });
+
+    // 设置回调：当 fd 可写时调用 handle_write（用于发送缓冲区数据）
+    channel->set_write_callback([link]() {
+        link->handle_write();
+    });
+
+    // 设置错误回调
+    channel->set_error_callback([link]() {
+        LOG_ERROR(CLUSTER, "ClusterLink fd error: %s", link->node_name().c_str());
+        link->disconnect();
+    });
+
+    // 监听读和写事件
+    channel->enable_reading();
+    channel->enable_writing();
+
+    // 注册到 EventLoop
+    event_loop_->update_channel(channel);
+
+    // 保存 Channel 引用（用于后续注销）
+    {
+        std::lock_guard<std::mutex> lock(channel_mutex_);
+        link_channels_[fd] = channel;
+    }
+
+    LOG_INFO(CLUSTER, "Registered ClusterLink to EventLoop: fd=%d, node=%s",
+             fd, link->node_name().c_str());
+}
+
+void ClusterConnection::unregister_link_from_loop(ClusterLink* link) {
+    if (!event_loop_ || !link) {
+        return;
+    }
+
+    int fd = link->fd();
+
+    Channel* channel = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(channel_mutex_);
+        auto it = link_channels_.find(fd);
+        if (it != link_channels_.end()) {
+            channel = it->second;
+            link_channels_.erase(it);
+        }
+    }
+
+    if (channel) {
+        event_loop_->remove_channel(channel);
+        delete channel;
+        LOG_INFO(CLUSTER, "Unregistered ClusterLink from EventLoop: fd=%d", fd);
     }
 }
 
@@ -244,6 +368,13 @@ void ClusterConnection::handle_link_msg(ClusterMsg&& msg, ClusterLink* link) {
         sender_name_str = sender_name_str.substr(0, null_pos);
     }
 
+    // 验证 sender_name 格式是否有效 (必须是 ip:port 格式)
+    auto colon_pos = sender_name_str.find(':');
+    if (colon_pos == std::string::npos || sender_name_str.empty()) {
+        LOG_WARN(CLUSTER, "Invalid sender_name in message, ignoring");
+        return;
+    }
+
     // 根据消息类型处理
     if (msg.header.type == static_cast<uint16_t>(ClusterMsgType::kPing)) {
         // 收到 PING，回复 PONG
@@ -252,11 +383,15 @@ void ClusterConnection::handle_link_msg(ClusterMsg&& msg, ClusterLink* link) {
     } else if (msg.header.type == static_cast<uint16_t>(ClusterMsgType::kMeet)) {
         // 收到 MEET 消息，对端请求认识本端
         // 解析 ip:port
-        auto colon_pos = sender_name_str.find(':');
-        if (colon_pos != std::string::npos) {
-            std::string ip = sender_name_str.substr(0, colon_pos);
-            int port = std::stoi(sender_name_str.substr(colon_pos + 1));
+        std::string ip = sender_name_str.substr(0, colon_pos);
+        std::string port_str = sender_name_str.substr(colon_pos + 1);
+        if (ip.empty() || port_str.empty()) {
+            LOG_WARN(CLUSTER, "Invalid MEET message sender format: %s", sender_name_str.c_str());
+            return;
+        }
 
+        try {
+            int port = std::stoi(port_str);
             // 调用 meet_callback_ 将对端添加到本端状态
             if (meet_callback_) {
                 meet_callback_(ip, port);
@@ -265,6 +400,8 @@ void ClusterConnection::handle_link_msg(ClusterMsg&& msg, ClusterLink* link) {
             // 回复 PONG 让对端知道本端收到了 MEET
             link->send_pong();
             LOG_INFO(CLUSTER, "Received MEET from %s, sent PONG", sender_name_str.c_str());
+        } catch (...) {
+            LOG_WARN(CLUSTER, "Invalid port in MEET message: %s", port_str.c_str());
         }
     } else if (msg.header.type == static_cast<uint16_t>(ClusterMsgType::kPong)) {
         // 收到 PONG 消息，对端确认了本端的 MEET
