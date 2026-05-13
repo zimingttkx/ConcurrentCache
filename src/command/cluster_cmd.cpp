@@ -29,6 +29,12 @@ std::string ClusterCommand::execute(const std::vector<std::string>& args) {
         return handleSlots(args);
     } else if (subcommand == "delslots") {
         return handleDelSlots(args);
+    } else if (subcommand == "setslot") {
+        return handleSetSlot(args);
+    } else if (subcommand == "replicate") {
+        return handleReplicate(args);
+    } else if (subcommand == "fail") {
+        return handleFail(args);
     } else {
         return RespEncoder::encode_error("ERR Unknown CLUSTER subcommand");
     }
@@ -409,6 +415,179 @@ std::string ClusterCommand::handleDelSlots(const std::vector<std::string>& args)
     }
 
     LOG_INFO(CLUSTER, "Removed %d slots from node %s", removed, my_node->getName().c_str());
+    return RespEncoder::encode_simple_string("OK");
+}
+
+std::string ClusterCommand::handleSetSlot(const std::vector<std::string>& args) {
+    // 参数检查：CLUSTER SETSLOT <slot> <state> [node]
+    // 状态可以是：MIGRATING | IMPORTING | NODE | STABLE | ...
+    if (args.size() < 4) {
+        return RespEncoder::encode_error("ERR wrong number of arguments for 'cluster setslot' command");
+    }
+
+    if (!ClusterServer::instance().isEnabled()) {
+        return RespEncoder::encode_error("ERR cluster mode is not enabled");
+    }
+
+    auto my_node = ClusterServer::instance().getMyNode();
+    if (!my_node) {
+        return RespEncoder::encode_error("ERR cluster not initialized");
+    }
+
+    // 解析槽号
+    int slot = -1;
+    try {
+        slot = std::stoi(args[2]);
+        if (slot < 0 || slot > 16383) {
+            return RespEncoder::encode_error("ERR invalid slot number");
+        }
+    } catch (...) {
+        return RespEncoder::encode_error("ERR invalid slot number");
+    }
+
+    const std::string& state = args[3];
+    auto* state_mgr = ClusterServer::instance().getState();
+    if (!state_mgr) {
+        return RespEncoder::encode_error("ERR cluster state not available");
+    }
+
+    // 处理不同的迁移状态
+    if (state == "MIGRATING") {
+        // CLUSTER SETSLOT <slot> MIGRATING <target_node>
+        if (args.size() < 5) {
+            return RespEncoder::encode_error("ERR syntax error, MIGRATING needs target node");
+        }
+
+        const std::string& target_node_name = args[4];
+        auto target_node = state_mgr->getNode(target_node_name);
+        if (!target_node) {
+            return RespEncoder::encode_error("ERR target node not found");
+        }
+
+        ClusterServer::instance().setSlotMigrating(slot, target_node_name);
+        LOG_INFO(CLUSTER, "Set slot %d to MIGRATING, target=%s", slot, target_node_name.c_str());
+        return RespEncoder::encode_simple_string("OK");
+
+    } else if (state == "IMPORTING") {
+        // CLUSTER SETSLOT <slot> IMPORTING <source_node>
+        if (args.size() < 5) {
+            return RespEncoder::encode_error("ERR syntax error, IMPORTING needs source node");
+        }
+
+        const std::string& source_node_name = args[4];
+        auto source_node = state_mgr->getNode(source_node_name);
+        if (!source_node) {
+            return RespEncoder::encode_error("ERR source node not found");
+        }
+
+        ClusterServer::instance().setSlotImporting(slot, source_node_name);
+        LOG_INFO(CLUSTER, "Set slot %d to IMPORTING, source=%s", slot, source_node_name.c_str());
+        return RespEncoder::encode_simple_string("OK");
+
+    } else if (state == "NODE") {
+        // CLUSTER SETSLOT <slot> NODE <node_name>
+        // 迁移完成，正式设置槽归属
+        if (args.size() < 5) {
+            return RespEncoder::encode_error("ERR syntax error, NODE needs node name");
+        }
+
+        const std::string& node_name = args[4];
+        auto node = state_mgr->getNode(node_name);
+        if (!node) {
+            return RespEncoder::encode_error("ERR node not found");
+        }
+
+        // 从原节点删除该槽
+        auto old_owner = state_mgr->getNodeForSlot(slot);
+        if (old_owner && old_owner != node) {
+            old_owner->delSlot(slot);
+        }
+
+        // 设置新的槽归属并清除迁移状态
+        ClusterServer::instance().setSlotOwner(slot, node_name);
+        LOG_INFO(CLUSTER, "Set slot %d owner to %s", slot, node_name.c_str());
+        return RespEncoder::encode_simple_string("OK");
+
+    } else if (state == "STABLE") {
+        // CLUSTER SETSLOT <slot> STABLE
+        // 取消槽的迁移状态（一般在迁移取消时使用）
+        ClusterServer::instance().clearSlotMigration(slot);
+        LOG_INFO(CLUSTER, "Set slot %d to STABLE", slot);
+        return RespEncoder::encode_simple_string("OK");
+
+    } else {
+        return RespEncoder::encode_error("ERR invalid slot state");
+    }
+}
+
+std::string ClusterCommand::handleReplicate(const std::vector<std::string>& args) {
+    // 参数检查：CLUSTER REPLICATE <node_name>
+    if (args.size() < 3) {
+        return RespEncoder::encode_error("ERR wrong number of arguments for 'cluster replicate' command");
+    }
+
+    if (!ClusterServer::instance().isEnabled()) {
+        return RespEncoder::encode_error("ERR cluster mode is not enabled");
+    }
+
+    auto my_node = ClusterServer::instance().getMyNode();
+    if (!my_node) {
+        return RespEncoder::encode_error("ERR cluster not initialized");
+    }
+
+    // 检查本节点是否已经是从节点
+    if (my_node->isReplica()) {
+        return RespEncoder::encode_error("ERR node is already a replica");
+    }
+
+    // 获取目标主节点名称
+    const std::string& master_name = args[2];
+    auto master = ClusterServer::instance().getState()->getNode(master_name);
+    if (!master) {
+        return RespEncoder::encode_error("ERR node not found: " + master_name);
+    }
+
+    if (!master->isMaster()) {
+        return RespEncoder::encode_error("ERR target node is not a master");
+    }
+
+    // 设置复制关系
+    if (ClusterServer::instance().setReplicaOf(master_name)) {
+        LOG_INFO(CLUSTER, "Node %s is now replica of %s",
+                 my_node->getName().c_str(), master_name.c_str());
+        return RespEncoder::encode_simple_string("OK");
+    }
+
+    return RespEncoder::encode_error("ERR failed to set replica");
+}
+
+std::string ClusterCommand::handleFail(const std::vector<std::string>& args) {
+    // 参数检查：CLUSTER FAIL <node_name>
+    if (args.size() < 3) {
+        return RespEncoder::encode_error("ERR wrong number of arguments for 'cluster fail' command");
+    }
+
+    if (!ClusterServer::instance().isEnabled()) {
+        return RespEncoder::encode_error("ERR cluster mode is not enabled");
+    }
+
+    auto my_node = ClusterServer::instance().getMyNode();
+    if (!my_node) {
+        return RespEncoder::encode_error("ERR cluster not initialized");
+    }
+
+    // 获取目标节点名称
+    const std::string& node_name = args[2];
+    auto node = ClusterServer::instance().getState()->getNode(node_name);
+    if (!node) {
+        return RespEncoder::encode_error("ERR node not found: " + node_name);
+    }
+
+    // 手动标记节点为 FAIL
+    ClusterServer::instance().markNodeAsFail(node_name);
+
+    LOG_INFO(CLUSTER, "Node %s manually marked as FAIL by %s",
+             node_name.c_str(), my_node->getName().c_str());
     return RespEncoder::encode_simple_string("OK");
 }
 

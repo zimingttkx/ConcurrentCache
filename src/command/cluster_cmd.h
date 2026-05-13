@@ -26,6 +26,9 @@ private:
     std::string handleAddSlots(const std::vector<std::string>& args);
     std::string handleSlots(const std::vector<std::string>& args);
     std::string handleDelSlots(const std::vector<std::string>& args);
+    std::string handleSetSlot(const std::vector<std::string>& args);
+    std::string handleReplicate(const std::vector<std::string>& args);
+    std::string handleFail(const std::vector<std::string>& args);
 
     // 验证 IP 地址格式
     static bool isValidIp(const std::string& ip);
