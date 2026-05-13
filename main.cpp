@@ -114,7 +114,12 @@ int main() {
         std::cout << "[主线程] 无 RDB 文件或加载失败，将从空存储开始" << std::endl;
     }
 
-    // 10. 初始化集群（如果启用）
+    // 10.1 设置集群的 EventLoop（在集群初始化之前）
+    if (g_main_reactor) {
+        ClusterServer::instance().set_event_loop(g_main_reactor->event_loop());
+    }
+
+    // 11. 初始化集群（如果启用）
     ClusterServer::instance().init();
     if (ClusterServer::instance().isEnabled()) {
         std::cout << "[主线程] 集群模块初始化完成" << std::endl;

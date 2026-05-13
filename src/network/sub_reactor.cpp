@@ -6,6 +6,7 @@
 #include "sub_reactor.h"
 #include "command/command_factory.h"
 #include "protocol/resp.h"
+#include "cluster/cluster_server.h"
 #include <algorithm>
 #include <cctype>
 
@@ -107,6 +108,62 @@ void SubReactor::join_thread() {
         std::string cmd_name = args[0];
         std::transform(cmd_name.begin(), cmd_name.end(), cmd_name.begin(),
                        [](unsigned char c){ return std::tolower(c); });
+
+        // 检查是否是写命令
+        bool is_write_command = (cmd_name == "set" || cmd_name == "del" ||
+                                  cmd_name == "lpush" || cmd_name == "rpush" ||
+                                  cmd_name == "lpop" || cmd_name == "rpop" ||
+                                  cmd_name == "hset" || cmd_name == "hdel" ||
+                                  cmd_name == "sadd" || cmd_name == "spop" ||
+                                  cmd_name == "zadd" || cmd_name == "expire" ||
+                                  cmd_name == "setex" || cmd_name == "persist" ||
+                                  cmd_name == "flushdb");
+
+        // 检查本节点是否是从节点（从节点只能处理读命令）
+        if (ClusterServer::instance().isEnabled() &&
+            ClusterServer::instance().isReplica() &&
+            is_write_command) {
+            conn->send_response(RespEncoder::encode_error("READONLY You can't write against a read only replica."));
+            return;
+        }
+
+        // 检查是否是集群模式需要重定向的键命令
+        if (ClusterServer::instance().isEnabled()) {
+            // 只有集群启用时才检查重定向
+            std::string key;
+            bool is_key_command = false;
+
+            // 判断是否是键命令，并提取 key
+            if (cmd_name == "get" || cmd_name == "set" || cmd_name == "del" ||
+                cmd_name == "exists" || cmd_name == "expire" || cmd_name == "ttl" ||
+                cmd_name == "pttl" || cmd_name == "persist" || cmd_name == "setex") {
+                is_key_command = true;
+                if (args.size() >= 2) {
+                    key = args[1];
+                }
+            } else if (cmd_name == "lpush" || cmd_name == "rpush" || cmd_name == "lpop" ||
+                       cmd_name == "rpop" || cmd_name == "llen" || cmd_name == "lrange" ||
+                       cmd_name == "hset" || cmd_name == "hget" || cmd_name == "hdel" ||
+                       cmd_name == "hlen" || cmd_name == "hgetall" || cmd_name == "sadd" ||
+                       cmd_name == "spop" || cmd_name == "scard" || cmd_name == "sismember" ||
+                       cmd_name == "smembers" || cmd_name == "zadd" || cmd_name == "zscore" ||
+                       cmd_name == "zcard" || cmd_name == "zrange") {
+                is_key_command = true;
+                if (args.size() >= 2) {
+                    key = args[1];
+                }
+            }
+
+            // 如果是键命令且有 key，检查是否需要重定向
+            if (is_key_command && !key.empty()) {
+                std::string redirect = ClusterServer::instance().checkRedirect(key);
+                if (!redirect.empty()) {
+                    // 需要重定向
+                    conn->send_response(redirect);
+                    return;
+                }
+            }
+        }
 
         auto command = CommandFactory::instance().create(cmd_name);
         if (command) {

@@ -497,14 +497,20 @@ public:
 };
 ```
 
-#### 验收标准
+#### 验收标准 ✅
 
-- 本地槽请求正确处理
-- 非本地槽返回正确的MOVED/ASK响应
+- [x] 本地槽请求正确处理
+- [x] 非本地槽返回正确的MOVED/ASK响应
+
+**实现方式**：
+- `ClusterServer::checkRedirect(key)` 检查键是否需要重定向
+- `SubReactor` 命令回调在执行前调用 `checkRedirect()`
+- 槽正在迁出时返回 ASK 重定向
+- 槽归属不是本节点时返回 MOVED 重定向
 
 ---
 
-### 5.4.3 槽迁移
+### 5.4.3 槽迁移 ✅ 已实现
 
 #### 为什么需要槽迁移？
 
@@ -578,49 +584,73 @@ public:
 
 #### 实现要点
 
+**1. 槽迁移状态管理** (cluster_common.h)
 ```cpp
-class SlotMigration {
-private:
-    uint16_t slot_;
-    std::string source_node_;
-    std::string target_node_;
-    MigrationState state_;  // START/IN_PROGRESS/COMPLETE
+// 槽迁移状态
+enum class SlotMigrationStatus {
+    kNone = 0,           // 槽无迁移状态
+    kMigrating = 1,     // 源节点正在迁出
+    kImporting = 2,      // 目标节点正在迁入
+};
 
-public:
-    void start_migration(uint16_t slot, const std::string& target) {
-        slot_ = slot;
-        target_node_ = target;
-        state_ = MIGRATING;
-
-        // 通知源节点开始迁出
-        send_to_source(SETSLOT MIGRATING);
-        // 通知目标节点开始迁入
-        send_to_target(SETSLOT IMPORTING);
-    }
-
-    void migrate_keys() {
-        // 遍历源节点上该槽的所有键
-        auto keys = source_node_->get_keys_in_slot(slot_);
-        for (auto& key : keys) {
-            auto value = source_node_->get(key);
-            target_node_->import(key, value);
-            source_node_->delete(key);
-        }
-    }
-
-    void complete_migration() {
-        state_ = COMPLETE;
-        // 广播槽归属变更
-        broadcast_slot_update(slot_, target_node_);
-    }
+// 槽迁移信息结构体
+struct SlotMigrationInfo {
+    int slot = -1;
+    SlotMigrationStatus status = SlotMigrationStatus::kNone;
+    std::string source_node;
+    std::string target_node;
 };
 ```
 
-#### 验收标准
+**2. ClusterState 迁移状态管理** (cluster_state.h/cpp)
+```cpp
+// 槽迁移状态管理
+void setSlotMigrating(int slot, const std::string& target_node);
+void setSlotImporting(int slot, const std::string& source_node);
+void clearSlotMigration(int slot);
+SlotMigrationInfo getSlotMigrationInfo(int slot) const;
+bool isSlotMigrating(int slot) const;
+bool isSlotImporting(int slot) const;
+```
 
-- 槽迁移能正确完成
-- 迁移过程中数据不丢失
-- 迁移过程中请求能正确处理
+**3. ClusterServer 槽迁移方法** (cluster_server.h/cpp)
+```cpp
+// 槽迁移状态管理
+void setSlotMigrating(int slot, const std::string& target_node);
+void setSlotImporting(int slot, const std::string& source_node);
+void clearSlotMigration(int slot);
+void setSlotOwner(int slot, const std::string& node_name);
+
+// 请求路由检查
+std::string checkRedirect(const std::string& key) const;
+```
+
+**4. CLUSTER SETSLOT 命令** (cluster_cmd.cpp)
+```
+CLUSTER SETSLOT <slot> MIGRATING <target_node>  # 标记槽正在迁出
+CLUSTER SETSLOT <slot> IMPORTING <source_node>   # 标记槽正在迁入
+CLUSTER SETSLOT <slot> NODE <node_name>          # 迁移完成，设置槽归属
+CLUSTER SETSLOT <slot> STABLE                    # 取消迁移状态
+```
+
+**5. ASK/MOVED 重定向** (sub_reactor.cpp)
+- 在命令执行前检查槽迁移状态
+- 槽正在迁出时返回 ASK 重定向
+- 槽归属不是本节点时返回 MOVED 重定向
+
+#### 验收标准 ✅
+
+- [x] 槽迁移状态正确管理（MIGRATING/IMPORTING）
+- [x] CLUSTER SETSLOT 命令正确执行
+- [x] ASK 重定向正确返回
+- [x] MOVED 重定向正确返回
+- [ ] 键值数据迁移（需要实现 MIGRATE 命令）
+
+#### 待完成
+
+- **MIGRATE 命令**：实际迁移键值数据
+- **批量槽迁移**：支持一次性迁移多个槽
+- **迁移进度跟踪**：记录迁移进度，支持断点续迁
 
 ---
 
@@ -682,7 +712,7 @@ Node4: 槽12288-16383
 
 ---
 
-## 5.5 章节4：主从复制
+## 5.5 章节4：主从复制 ✅ 已部分实现
 
 ### 5.5.1 问题分析
 
@@ -728,9 +758,67 @@ Node4: 槽12288-16383
 
 ---
 
-### 5.5.2 全量复制
+### 5.5.2 主从复制基础 ✅ 已实现
 
-#### 为什么需要全量复制？
+#### 已实现功能
+
+**1. 主从关系管理** (cluster_common.h, cluster_node.h/cpp)
+```cpp
+// 复制状态枚举
+enum class ReplicationState {
+    kNone = 0,                // 无复制关系
+    kConnect = 1,             // 正在连接主节点
+    kHandshake = 2,           // 正在握手
+    kSync = 3,                // 正在同步
+    kConnected = 4,           // 复制已建立
+};
+
+// ClusterNode 复制相关成员和方法
+ReplicationState replication_state_;           // 复制状态
+std::weak_ptr<ClusterNode> master_node_;      // 主节点指针
+void setReplicationState(ReplicationState state);
+void setMasterNode(std::shared_ptr<ClusterNode> node);
+std::shared_ptr<ClusterNode> getMasterNode() const;
+```
+
+**2. ClusterState 主从关系管理** (cluster_state.h/cpp)
+```cpp
+// 主从复制管理
+void addReplica(const std::string& master_name, std::shared_ptr<ClusterNode> replica);
+void removeReplica(const std::string& master_name, const std::string& replica_name);
+std::vector<std::shared_ptr<ClusterNode>> getReplicas(const std::string& master_name) const;
+std::shared_ptr<ClusterNode> getMasterOfReplica(const std::string& replica_name) const;
+```
+
+**3. ClusterServer 主从复制方法** (cluster_server.h/cpp)
+```cpp
+bool setReplicaOf(const std::string& master_name);       // 设置本节点为指定主节点的从节点
+void clearReplicaOf();                                    // 取消复制关系，本节点变为主节点
+bool isReplica() const;                                  // 检查本节点是否是从节点
+std::shared_ptr<ClusterNode> getMyMaster() const;        // 获取本节点的主节点
+std::vector<std::shared_ptr<ClusterNode>> getMyReplicas() const;  // 获取本节点的所有从节点
+```
+
+**4. CLUSTER REPLICATE 命令** (cluster_cmd.cpp)
+```
+CLUSTER REPLICATE <node_name>   # 将本节点设置为指定主节点的从节点
+```
+
+**5. 从节点只读** (sub_reactor.cpp)
+```cpp
+// 从节点只能处理读命令，写命令返回错误
+if (ClusterServer::instance().isReplica() && is_write_command) {
+    conn->send_response(RespEncoder::encode_error("READONLY You can't write against a read only replica."));
+    return;
+}
+```
+
+#### 待实现功能
+
+- ❌ PSYNC 同步协议（增量/全量复制）
+- ❌ 复制积压缓冲区
+- ❌ RDB 文件传输
+- ❌ 主节点向从节点同步写命令
 
 从节点刚加入或复制链路断开时，需要全量复制来同步数据：
 
@@ -1142,19 +1230,50 @@ mno345 192.168.1.14:6379@16379 replica def456@16379 0 1234567894 2
 
 ## 5.8 分布式版本验收清单
 
-| 模块 | 功能 | 验收标准 |
-|------|------|----------|
-| 集群配置 | 节点配置 | 配置正确读取 |
-| 槽映射 | 16384槽映射 | 键正确路由到槽 |
-| Gossip协议 | 状态同步 | 节点状态正确同步 |
-| 节点发现 | 新节点加入 | 能正确加入集群 |
-| 请求路由 | MOVED/ASK | 正确重定向 |
-| 槽迁移 | 动态扩缩容 | 迁移正确完成 |
-| 全量复制 | RDB同步 | 数据完整 |
-| 增量复制 | 命令同步 | 数据同步 |
-| 故障检测 | 心跳检测 | 正确检测故障 |
-| 故障转移 | 自动failover | <30秒完成 |
-| 集群命令 | 管理命令 | 所有命令正确 |
+| 模块 | 功能 | 验收标准 | 状态 |
+|------|------|----------|------|
+| 集群配置 | 节点配置 | 配置正确读取 | ✅ 完成 |
+| 槽映射 | 16384槽映射 | 键正确路由到槽 | ✅ 完成 |
+| Gossip协议 | 状态同步 | 节点状态正确同步 | ✅ 完成 |
+| 节点发现 | 新节点加入 | 能正确加入集群 | ✅ 完成 |
+| 请求路由 | MOVED/ASK | 正确重定向 | ✅ 完成 |
+| 槽迁移 | 动态扩缩容 | 迁移正确完成 | 🔄 部分完成 |
+| 主从复制基础 | 主从关系管理 | CLUSTER REPLICATE 命令 | ✅ 完成 |
+| 从节点只读 | 读写分离 | 从节点拒绝写命令 | ✅ 完成 |
+| 全量复制 | RDB同步 | 数据完整 | ❌ 未实现 |
+| 增量复制 | 命令同步 | 数据同步 | ❌ 未实现 |
+| 故障检测 | 心跳检测 | 正确检测故障 | ❌ 未实现 |
+| 故障转移 | 自动failover | <30秒完成 | ❌ 未实现 |
+| 集群命令 | 管理命令 | 所有命令正确 | 🔄 部分完成 |
+
+### 槽迁移开发进度
+
+**已完成**：
+- ✅ 槽迁移状态管理（MIGRATING/IMPORTING）
+- ✅ CLUSTER SETSLOT 命令（MIGRATING/IMPORTING/NODE/STABLE）
+- ✅ ASK 重定向响应
+- ✅ MOVED 重定向响应
+
+**待完成**：
+- ❌ MIGRATE 命令（键值数据迁移）
+- ❌ 批量槽迁移
+- ❌ 迁移进度跟踪
+
+### 主从复制开发进度
+
+**已完成**：
+- ✅ 主从关系数据结构（ReplicationState）
+- ✅ ClusterNode 复制状态管理
+- ✅ ClusterState 主从关系管理（addReplica/removeReplica）
+- ✅ ClusterServer 主从复制方法（setReplicaOf/clearReplicaOf）
+- ✅ CLUSTER REPLICATE 命令
+- ✅ 从节点只读检查
+
+**待完成**：
+- ❌ PSYNC 同步协议
+- ❌ 复制积压缓冲区
+- ❌ RDB 文件传输
+- ❌ 主节点向从节点同步写命令
 
 ---
 
