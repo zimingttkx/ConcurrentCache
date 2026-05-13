@@ -2,6 +2,7 @@
 #include "cluster_server.h"
 #include "base/config.h"
 #include "base/log.h"
+#include "protocol/resp.h"
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -114,6 +115,8 @@ void ClusterServer::stop() {
 void ClusterServer::on_timer() {
     if (!enabled_ || !running_) return;
     connection_.on_timer();
+    // 执行故障转移状态机
+    executeFailover();
 }
 
 // CRC16 查找表（预计算，必须在 crc16 函数之前）
@@ -206,6 +209,512 @@ std::string ClusterServer::getMyNodeName() const {
         return my_node_->getName();
     }
     return "";
+}
+
+void ClusterServer::setSlotMigrating(int slot, const std::string& target_node) {
+    assert(slot >= 0 && slot <= 16383 && "setSlotMigrating: slot out of range");
+    assert(!target_node.empty() && "setSlotMigrating: target_node is empty");
+
+    // 清除之前的迁移状态
+    state_.clearSlotMigration(slot);
+
+    // 设置新的迁出状态
+    state_.setSlotMigrating(slot, target_node);
+    LOG_INFO(CLUSTER, "Set slot %d to MIGRATING, target=%s", slot, target_node.c_str());
+}
+
+void ClusterServer::setSlotImporting(int slot, const std::string& source_node) {
+    assert(slot >= 0 && slot <= 16383 && "setSlotImporting: slot out of range");
+    assert(!source_node.empty() && "setSlotImporting: source_node is empty");
+
+    // 清除之前的迁移状态
+    state_.clearSlotMigration(slot);
+
+    // 设置新的迁入状态
+    state_.setSlotImporting(slot, source_node);
+    LOG_INFO(CLUSTER, "Set slot %d to IMPORTING, source=%s", slot, source_node.c_str());
+}
+
+void ClusterServer::clearSlotMigration(int slot) {
+    assert(slot >= 0 && slot <= 16383 && "clearSlotMigration: slot out of range");
+
+    state_.clearSlotMigration(slot);
+    LOG_INFO(CLUSTER, "Cleared slot %d migration state", slot);
+}
+
+void ClusterServer::setSlotOwner(int slot, const std::string& node_name) {
+    assert(slot >= 0 && slot <= 16383 && "setSlotOwner: slot out of range");
+    assert(!node_name.empty() && "setSlotOwner: node_name is empty");
+
+    auto node = state_.getNode(node_name);
+    if (!node) {
+        LOG_ERROR(CLUSTER, "Cannot set slot owner: node not found: %s", node_name.c_str());
+        return;
+    }
+
+    // 清除迁移状态
+    state_.clearSlotMigration(slot);
+
+    // 设置槽归属
+    state_.setNodeForSlot(slot, node);
+
+    // 更新节点的槽列表
+    node->addSlot(slot);
+
+    LOG_INFO(CLUSTER, "Set slot %d owner to %s", slot, node_name.c_str());
+}
+
+bool ClusterServer::isSlotMigrating(int slot) const {
+    assert(slot >= 0 && slot <= 16383 && "isSlotMigrating: slot out of range");
+    return state_.isSlotMigrating(slot);
+}
+
+bool ClusterServer::isSlotImporting(int slot) const {
+    assert(slot >= 0 && slot <= 16383 && "isSlotImporting: slot out of range");
+    return state_.isSlotImporting(slot);
+}
+
+SlotMigrationInfo ClusterServer::getSlotMigrationInfo(int slot) const {
+    assert(slot >= 0 && slot <= 16383 && "getSlotMigrationInfo: slot out of range");
+    return state_.getSlotMigrationInfo(slot);
+}
+
+std::shared_ptr<ClusterNode> ClusterServer::getSlotMigrationTarget(int slot) const {
+    assert(slot >= 0 && slot <= 16383 && "getSlotMigrationTarget: slot out of range");
+
+    SlotMigrationInfo info = state_.getSlotMigrationInfo(slot);
+    if (info.status == SlotMigrationStatus::kMigrating && !info.target_node.empty()) {
+        return state_.getNode(info.target_node);
+    }
+    return nullptr;
+}
+
+std::shared_ptr<ClusterNode> ClusterServer::getSlotMigrationSource(int slot) const {
+    assert(slot >= 0 && slot <= 16383 && "getSlotMigrationSource: slot out of range");
+
+    SlotMigrationInfo info = state_.getSlotMigrationInfo(slot);
+    if (info.status == SlotMigrationStatus::kImporting && !info.source_node.empty()) {
+        return state_.getNode(info.source_node);
+    }
+    return nullptr;
+}
+
+std::string ClusterServer::checkRedirect(const std::string& key) const {
+    // 计算 key 对应的槽
+    int slot = keyToSlot(key);
+
+    // 检查槽是否正在迁移（迁出状态）
+    if (state_.isSlotMigrating(slot)) {
+        // 槽正在迁出，返回 ASK 重定向
+        SlotMigrationInfo info = state_.getSlotMigrationInfo(slot);
+        auto target = state_.getNode(info.target_node);
+        if (target) {
+            std::string redirect = "ASK " + std::to_string(slot) + " " +
+                                   target->getInfo().ip + ":" + std::to_string(target->getInfo().port);
+            LOG_DEBUG(CLUSTER, "ASK redirect for key '%s' slot %d -> %s",
+                     key.c_str(), slot, redirect.c_str());
+            return RespEncoder::encode_error(redirect);
+        }
+    }
+
+    // 检查槽是否正在迁入
+    if (state_.isSlotImporting(slot)) {
+        // 槽正在迁入，检查本地是否有数据
+        // 如果本地没有数据，则返回 ASK 重定向到源节点
+        SlotMigrationInfo info = state_.getSlotMigrationInfo(slot);
+        auto source = state_.getNode(info.source_node);
+        if (source) {
+            // TODO: 实际应该检查本地是否有该 key 的数据
+            // 如果没有，返回 ASK 重定向
+            // 这里暂时返回空，让命令正常执行
+            LOG_DEBUG(CLUSTER, "Slot %d is IMPORTING from %s, key '%s'",
+                     slot, info.source_node.c_str(), key.c_str());
+        }
+    }
+
+    // 检查槽归属
+    auto owner = state_.getNodeForSlot(slot);
+    if (!owner) {
+        // 槽没有归属，可能是刚加入集群的新节点
+        // 允许执行命令
+        return "";
+    }
+
+    // 如果槽归属不是本节点，返回 MOVED 重定向
+    if (owner->getName() != getMyNodeName()) {
+        std::string redirect = "MOVED " + std::to_string(slot) + " " +
+                               owner->getInfo().ip + ":" + std::to_string(owner->getInfo().port);
+        LOG_DEBUG(CLUSTER, "MOVED redirect for key '%s' slot %d -> %s",
+                 key.c_str(), slot, redirect.c_str());
+        return RespEncoder::encode_error(redirect);
+    }
+
+    return "";
+}
+
+bool ClusterServer::setReplicaOf(const std::string& master_name) {
+    assert(!master_name.empty() && "setReplicaOf: master_name is empty");
+
+    if (!enabled_) {
+        LOG_ERROR(CLUSTER, "Cannot set replica: cluster mode is disabled");
+        return false;
+    }
+
+    // 获取主节点
+    auto master = state_.getNode(master_name);
+    if (!master) {
+        LOG_ERROR(CLUSTER, "Cannot set replica: master node not found: %s", master_name.c_str());
+        return false;
+    }
+
+    if (!master->isMaster()) {
+        LOG_ERROR(CLUSTER, "Cannot set replica: node %s is not a master", master_name.c_str());
+        return false;
+    }
+
+    // 获取主节点的 IP 和端口
+    const auto& master_info = master->getInfo();
+    std::string master_ip = master_info.ip;
+    int master_port = master_info.port;
+
+    // 设置本节点的复制信息
+    my_node_->setRole(NodeRole::kReplica);
+    my_node_->setReplicationState(ReplicationState::kConnect);
+    my_node_->setMaster(master_ip, master_port);  // 设置 info_.replicaof_ip/port
+    my_node_->setMasterNode(master);               // 设置 master_node_ 指针
+
+    // 更新主节点的从节点列表
+    state_.addReplica(master_name, my_node_);
+
+    LOG_INFO(CLUSTER, "Set replica of master %s (%s:%d)", master_name.c_str(), master_ip.c_str(), master_port);
+    return true;
+}
+
+void ClusterServer::clearReplicaOf() {
+    if (!isReplica()) {
+        return;
+    }
+
+    auto master = my_node_->getMasterNode();
+    if (master) {
+        state_.removeReplica(master->getName(), getMyNodeName());
+    }
+
+    my_node_->setRole(NodeRole::kMaster);
+    my_node_->setReplicationState(ReplicationState::kNone);
+    my_node_->setMasterNode(nullptr);
+
+    // 清除 info_.replicaof_ip/port
+    my_node_->getInfo().replicaof_ip.clear();
+    my_node_->getInfo().replicaof_port = 0;
+
+    LOG_INFO(CLUSTER, "Cleared replica relationship, now master");
+}
+
+bool ClusterServer::isReplica() const {
+    if (!my_node_) return false;
+    return my_node_->isReplica();
+}
+
+std::shared_ptr<ClusterNode> ClusterServer::getMyMaster() const {
+    if (!my_node_) return nullptr;
+    return my_node_->getMasterNode();
+}
+
+std::vector<std::shared_ptr<ClusterNode>> ClusterServer::getMyReplicas() const {
+    if (!my_node_) return {};
+    return state_.getReplicas(my_node_->getName());
+}
+
+void ClusterServer::handleNodeTimeout(const std::string& node_name) {
+    if (!enabled_ || !running_) return;
+    if (node_name.empty()) return;
+
+    auto node = state_.getNode(node_name);
+    if (!node) return;
+
+    // 如果节点已经是 FAIL 状态，不再处理
+    if (node->isFailed()) return;
+
+    // 增加失败计数
+    node->incrementFailureCount();
+
+    // 如果失败计数超过阈值，标记为疑似下线
+    const int max_ping_failures = 3;  // TODO: 从配置读取
+    if (node->getFailureCount() >= max_ping_failures) {
+        state_.markNodeAsPfail(node_name);
+        LOG_WARN(CLUSTER, "Node %s ping timeout, marked as PFAIL (failures=%d)",
+                 node_name.c_str(), node->getFailureCount());
+    }
+}
+
+void ClusterServer::handleNodeRecovery(const std::string& node_name) {
+    if (!enabled_) return;
+    if (node_name.empty()) return;
+
+    auto node = state_.getNode(node_name);
+    if (!node) return;
+
+    // 重置失败计数
+    node->resetFailureCount();
+
+    // 如果节点是疑似下线状态，清除
+    if (node->isPfailed()) {
+        state_.clearNodePfail(node_name);
+        LOG_INFO(CLUSTER, "Node %s recovered, cleared PFAIL", node_name.c_str());
+    }
+
+    // 如果节点是客观下线状态，清除
+    if (node->isFailed()) {
+        state_.clearNodeFail(node_name);
+        LOG_INFO(CLUSTER, "Node %s recovered, cleared FAIL", node_name.c_str());
+    }
+}
+
+bool ClusterServer::checkFailQuorum(const std::string& node_name) {
+    if (!enabled_) return false;
+    if (node_name.empty()) return false;
+
+    auto node = state_.getNode(node_name);
+    if (!node) return false;
+
+    // 如果不是疑似下线，不检查客观下线
+    if (!node->isPfailed()) return false;
+
+    // 获取集群中存活的主节点数量
+    auto nodes = state_.getAllNodes();
+    int live_master_count = 0;
+    for (const auto& n : nodes) {
+        // 只计算主节点
+        if (n->isMaster() && n->isConnected() && !n->isFailed()) {
+            live_master_count++;
+        }
+    }
+
+    // 多数原则：超过一半的主节点认为该节点下线
+    int quorum = (live_master_count / 2) + 1;
+    const int min_quorum = 2;  // 最小 quorum 值
+
+    // TODO: 实际上应该通过 Gossip 协议收集其他节点对同一节点的 pfailing 报告
+    // 这里简化处理：如果本节点认为节点疑似下线，且存活主节点数 >= 最小 quorum
+    if (live_master_count >= min_quorum) {
+        LOG_INFO(CLUSTER, "Node %s fail quorum reached: live_masters=%d, quorum=%d",
+                 node_name.c_str(), live_master_count, quorum);
+        return true;
+    }
+
+    return false;
+}
+
+void ClusterServer::markNodeAsFail(const std::string& node_name) {
+    if (!enabled_) return;
+    if (node_name.empty()) return;
+
+    auto node = state_.getNode(node_name);
+    if (!node) return;
+
+    // 直接标记为客观下线
+    state_.markNodeAsFail(node_name);
+
+    // 构建 FAIL 广播消息
+    GossipMsg gossip_msg;
+    gossip_msg.type = GossipType::kFail;
+    gossip_msg.sender_name = getMyNodeName();
+    gossip_msg.sender_epoch = my_node_->getInfo().config_epoch;
+
+    GossipNodeInfo info;
+    info.name = node->getName();
+    info.ip = node->getInfo().ip;
+    info.port = node->getInfo().port;
+    info.flags = node->getFlags();
+    info.role = node->isMaster() ? 0 : 1;
+    gossip_msg.nodes.push_back(info);
+
+    // 通过连接管理器广播 FAIL 消息
+    connection_.broadcast_gossip(gossip_msg);
+
+    LOG_INFO(CLUSTER, "Node %s manually marked as FAIL", node_name.c_str());
+}
+
+// ==================== 故障转移相关实现 ====================
+
+bool ClusterServer::startFailover(const std::string& master_name) {
+    if (!enabled_) return false;
+    if (!isReplica()) return false;  // 只有从节点能发起故障转移
+
+    // 获取主节点
+    auto master = state_.getNode(master_name);
+    if (!master) {
+        LOG_ERROR(CLUSTER, "Cannot start failover: master not found: %s", master_name.c_str());
+        return false;
+    }
+
+    // 检查主节点是否已下线
+    if (!master->isFailed()) {
+        LOG_WARN(CLUSTER, "Cannot start failover: master %s is not failed", master_name.c_str());
+        return false;
+    }
+
+    // 检查本节点是否已在故障转移中
+    if (my_node_->getFailoverState() != FailoverState::kNoFailover) {
+        LOG_WARN(CLUSTER, "Already in failover state: %d", static_cast<int>(my_node_->getFailoverState()));
+        return false;
+    }
+
+    // 增加 failover_epoch
+    int64_t new_epoch = master->getInfo().config_epoch + 1;
+    my_node_->setFailoverEpoch(new_epoch);
+    my_node_->setFailoverState(FailoverState::kWaitStart);
+
+    LOG_INFO(CLUSTER, "Started failover for master %s (epoch=%ld)", master_name.c_str(), new_epoch);
+    return true;
+}
+
+bool ClusterServer::shouldStartFailover() {
+    if (!enabled_) return false;
+    if (!isReplica()) return false;
+
+    auto master = getMyMaster();
+    if (!master) return false;
+
+    // 主节点必须已下线
+    if (!master->isFailed()) return false;
+
+    // 本节点必须未在故障转移中
+    if (my_node_->getFailoverState() != FailoverState::kNoFailover) return false;
+
+    // 检查复制偏移量是否足够新（与主节点的差距在可接受范围内）
+    // 这里简化处理：只要主节点FAIL且本节点数据不是太旧就允许
+    return true;
+}
+
+bool ClusterServer::handleFailoverAuthRequest(const std::string& replica_name, int64_t epoch, int64_t offset) {
+    if (!enabled_) return false;
+
+    // 只能给主节点投票
+    if (!my_node_->isMaster()) return false;
+
+    auto replica = state_.getNode(replica_name);
+    if (!replica) return false;
+
+    // 检查 epoch 是否更新
+    if (epoch <= my_node_->getFailoverEpoch()) {
+        LOG_WARN(CLUSTER, "Rejecting auth request from %s: epoch %ld <= my epoch %ld",
+                 replica_name.c_str(), epoch, my_node_->getFailoverEpoch());
+        return false;
+    }
+
+    // 检查 replica 的数据是否够新（复制偏移量接近本节点）
+    // 这里简化处理：直接批准投票
+    // TODO: 实际应该比较 offset 与 master_repl_offset_
+
+    // 记录投票
+    my_node_->addVote(replica_name, epoch, offset);
+    my_node_->setFailoverEpoch(epoch);
+
+    LOG_INFO(CLUSTER, "Granted vote to %s for failover (epoch=%ld, offset=%ld)",
+             replica_name.c_str(), epoch, offset);
+    return true;
+}
+
+void ClusterServer::handleFailoverAuthAck(const std::string& node_name) {
+    // 从节点收到主节点的投票确认
+    LOG_INFO(CLUSTER, "Received failover auth ack from %s", node_name.c_str());
+    // 投票计数由 ClusterNode 自行管理
+}
+
+std::vector<std::shared_ptr<ClusterNode>> ClusterServer::getReplicasForMaster(const std::string& master_name) const {
+    return state_.getReplicas(master_name);
+}
+
+void ClusterServer::executeFailover() {
+    if (!enabled_) return;
+    if (!isReplica()) return;
+
+    auto master = getMyMaster();
+    if (!master) return;
+
+    FailoverState state = my_node_->getFailoverState();
+
+    switch (state) {
+        case FailoverState::kNoFailover:
+            // 检查是否应该开始故障转移
+            if (shouldStartFailover()) {
+                startFailover(master->getName());
+            }
+            break;
+
+        case FailoverState::kWaitStart:
+            // 等待开始状态，切换到等待投票
+            my_node_->setFailoverState(FailoverState::kWaitAuth);
+            LOG_INFO(CLUSTER, "Failover state: WaitAuth");
+            break;
+
+        case FailoverState::kWaitAuth: {
+            // 等待投票状态
+            // 计算需要的票数（多数派）
+            auto all_nodes = state_.getAllNodes();
+            int master_count = 0;
+            for (const auto& node : all_nodes) {
+                if (node->isMaster() && !node->isFailed()) {
+                    master_count++;
+                }
+            }
+            int needed_votes = (master_count / 2) + 1;
+
+            int current_votes = my_node_->getVoteCount();
+            LOG_INFO(CLUSTER, "Failover state: WaitAuth, votes=%d, needed=%d", current_votes, needed_votes);
+
+            if (current_votes >= needed_votes) {
+                // 获得足够票数，开始执行故障转移
+                my_node_->setFailoverState(FailoverState::kFailoverInProgress);
+                LOG_INFO(CLUSTER, "Failover state: FailoverInProgress");
+            }
+            break;
+        }
+
+        case FailoverState::kFailoverInProgress:
+            // 执行故障转移：接管主节点的槽
+            completeFailover();
+            break;
+
+        case FailoverState::kFailoverCompleted:
+            // 故障转移已完成
+            LOG_INFO(CLUSTER, "Failover completed successfully");
+            break;
+
+        case FailoverState::kFailoverTimeout:
+            // 故障转移超时，重置状态
+            my_node_->setFailoverState(FailoverState::kNoFailover);
+            my_node_->clearVotes();
+            LOG_WARN(CLUSTER, "Failover timeout, resetting state");
+            break;
+    }
+}
+
+void ClusterServer::completeFailover() {
+    if (!enabled_) return;
+    if (!isReplica()) return;
+
+    auto master = getMyMaster();
+    if (!master) return;
+
+    // 获取主节点负责的所有槽
+    std::vector<int> master_slots = master->getSlots();
+
+    // 将槽转移到本节点
+    for (int slot : master_slots) {
+        setSlotOwner(slot, getMyNodeName());
+    }
+
+    // 清除复制关系，本节点变为主节点
+    clearReplicaOf();
+
+    // 更新故障转移状态
+    my_node_->setFailoverState(FailoverState::kFailoverCompleted);
+
+    LOG_INFO(CLUSTER, "Failover completed: took over %zu slots from %s",
+             master_slots.size(), master->getName().c_str());
 }
 
 } // namespace cc_server
