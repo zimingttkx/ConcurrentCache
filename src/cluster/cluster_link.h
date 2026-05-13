@@ -13,6 +13,9 @@
 
 namespace cc_server {
 
+// 前向声明
+struct GossipMsg;
+
 // 集群消息类型
 enum class ClusterMsgType : uint16_t {
     kPing = 1,       // PING 消息
@@ -76,6 +79,7 @@ public:
     bool send_ping();
     bool send_pong();
     bool send_meet(const std::string& my_ip, int my_port);
+    bool send_gossip(const GossipMsg& msg);
 
     // 接收消息
     void handle_read();

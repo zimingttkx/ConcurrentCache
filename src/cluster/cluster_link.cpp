@@ -1,6 +1,7 @@
 // cluster_link.cpp
 #include "cluster_link.h"
 #include "cluster_server.h"
+#include "cluster_gossip.h"
 #include "base/log.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -139,6 +140,26 @@ bool ClusterLink::send_meet(const std::string& my_ip, int my_port) {
     msg.header.type = static_cast<uint16_t>(ClusterMsgType::kMeet);
     msg.args.push_back(my_ip);
     msg.args.push_back(std::to_string(my_port));
+    return send_msg(msg);
+}
+
+bool ClusterLink::send_gossip(const GossipMsg& gossip_msg) {
+    ClusterMsg msg;
+    msg.header.type = static_cast<uint16_t>(ClusterMsgType::kFail);
+    msg.header.sender_epoch = gossip_msg.sender_epoch;
+    strncpy(msg.header.sender_name, gossip_msg.sender_name.c_str(), sizeof(msg.header.sender_name) - 1);
+
+    // 将Gossip消息的节点信息编码到args中
+    // 格式: node_name,ip,port,flags,role
+    for (const auto& node : gossip_msg.nodes) {
+        std::string node_info = node.name + "," + node.ip + "," +
+                                std::to_string(node.port) + "," +
+                                std::to_string(node.flags) + "," +
+                                std::to_string(static_cast<int>(node.role));
+        msg.args.push_back(node_info);
+    }
+
+    LOG_DEBUG(CLUSTER, "Sending GOSSIP FAIL broadcast for %zu nodes", gossip_msg.nodes.size());
     return send_msg(msg);
 }
 
