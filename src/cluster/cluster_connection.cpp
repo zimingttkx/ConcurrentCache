@@ -3,6 +3,7 @@
 #include "cluster_server.h"
 #include "cluster_gossip.h"
 #include "base/log.h"
+#include "protocol/resp.h"
 #include <chrono>
 
 // 获取当前时间的毫秒数
@@ -219,6 +220,19 @@ bool ClusterConnection::meet_node(const std::string& node_name,
         return false;
     }
     return link->send_meet(my_ip, my_port);
+}
+
+bool ClusterConnection::send_command_to_node(const std::string& node_name,
+                                           const std::vector<std::string>& args) {
+    auto* link = get_link(node_name);
+    if (!link) {
+        LOG_WARN(CLUSTER, "No link to node for command: %s", node_name.c_str());
+        return false;
+    }
+
+    // 将命令编码为 RESP 格式
+    std::string resp_data = RespEncoder::encode_array(args);
+    return link->send_raw(resp_data);
 }
 
 void ClusterConnection::broadcast_ping() {

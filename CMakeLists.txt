@@ -29,6 +29,8 @@ set(CACHE_SOURCES
 set(COMMAND_SOURCES
     src/command/command_factory.cpp
     src/command/cluster_cmd.cpp
+    src/command/restore_cmd.cpp
+    src/command/psync_cmd.cpp
 )
 
 # ========== Datatype 模块 ==========
@@ -77,6 +79,7 @@ set(CLUSTER_SOURCES
     src/cluster/cluster_link.cpp
     src/cluster/cluster_connection.cpp
     src/cluster/cluster_gossip.cpp
+    src/cluster/replication_mgr.cpp
 )
 
 # ========== 主程序 ==========

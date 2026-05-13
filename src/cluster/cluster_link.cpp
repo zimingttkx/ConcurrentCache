@@ -145,22 +145,75 @@ bool ClusterLink::send_meet(const std::string& my_ip, int my_port) {
 
 bool ClusterLink::send_gossip(const GossipMsg& gossip_msg) {
     ClusterMsg msg;
-    msg.header.type = static_cast<uint16_t>(ClusterMsgType::kFail);
+
+    // 根据 GossipType 设置正确的 ClusterMsgType
+    // 注意：GossipType 和 ClusterMsgType 的枚举值不同，需要映射
+    // GossipType: kPing=1, kPong=2, kMeet=3, kFail=4, kFailoverAuthReq=5, kFailoverAuthAck=6, kPush=7, kPull=8
+    // ClusterMsgType: kPing=1, kPong=2, kMeet=3, kMail=4, kFail=5, kPublish=6, kFailoverAuthReq=7, kFailoverAuthAck=8, kUpdate=9
+    switch (gossip_msg.type) {
+        case GossipType::kPing:
+            msg.header.type = static_cast<uint16_t>(ClusterMsgType::kPing);
+            break;
+        case GossipType::kPong:
+            msg.header.type = static_cast<uint16_t>(ClusterMsgType::kPong);
+            break;
+        case GossipType::kMeet:
+            msg.header.type = static_cast<uint16_t>(ClusterMsgType::kMeet);
+            break;
+        case GossipType::kFail:
+            msg.header.type = static_cast<uint16_t>(ClusterMsgType::kFail);
+            break;
+        case GossipType::kFailoverAuthReq:
+            msg.header.type = static_cast<uint16_t>(ClusterMsgType::kFailoverAuthReq);
+            break;
+        case GossipType::kFailoverAuthAck:
+            msg.header.type = static_cast<uint16_t>(ClusterMsgType::kFailoverAuthAck);
+            break;
+        case GossipType::kPush:
+            msg.header.type = static_cast<uint16_t>(ClusterMsgType::kUpdate);
+            break;
+        case GossipType::kPull:
+            msg.header.type = static_cast<uint16_t>(ClusterMsgType::kMail);
+            break;
+        default:
+            msg.header.type = static_cast<uint16_t>(ClusterMsgType::kPing);
+            break;
+    }
+
     msg.header.sender_epoch = gossip_msg.sender_epoch;
     strncpy(msg.header.sender_name, gossip_msg.sender_name.c_str(), sizeof(msg.header.sender_name) - 1);
 
     // 将Gossip消息的节点信息编码到args中
-    // 格式: node_name,ip,port,flags,role
+    // 格式: node_name,ip,port,flags,role[,failover_offset]
     for (const auto& node : gossip_msg.nodes) {
         std::string node_info = node.name + "," + node.ip + "," +
                                 std::to_string(node.port) + "," +
                                 std::to_string(node.flags) + "," +
                                 std::to_string(static_cast<int>(node.role));
+
+        // 如果有故障转移相关信息，添加到末尾
+        if (node.failover_offset != 0) {
+            node_info += "," + std::to_string(node.failover_offset);
+        }
+
         msg.args.push_back(node_info);
     }
 
-    LOG_DEBUG(CLUSTER, "Sending GOSSIP FAIL broadcast for %zu nodes", gossip_msg.nodes.size());
+    LOG_DEBUG(CLUSTER, "Sending GOSSIP type=%d broadcast for %zu nodes",
+              static_cast<int>(gossip_msg.type), gossip_msg.nodes.size());
     return send_msg(msg);
+}
+
+bool ClusterLink::send_raw(const std::string& data) {
+    if (!connected_.load()) {
+        LOG_WARN(CLUSTER, "Cannot send raw data to disconnected link: %s", node_name_.c_str());
+        return false;
+    }
+
+    // 直接添加数据到发送缓冲区
+    send_buffer_.append(data.data(), data.size());
+    handle_write();
+    return true;
 }
 
 void ClusterLink::handle_read() {

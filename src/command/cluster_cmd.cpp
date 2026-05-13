@@ -1,8 +1,11 @@
 #include "cluster_cmd.h"
 #include "cluster/cluster_server.h"
 #include "cluster/cluster_node.h"
+#include "cluster/cluster_connection.h"
 #include "base/log.h"
 #include "protocol/resp.h"
+#include "cache/storage.h"
+#include "datatype/object.h"
 #include <cctype>
 #include <cstdlib>
 
@@ -35,6 +38,8 @@ std::string ClusterCommand::execute(const std::vector<std::string>& args) {
         return handleReplicate(args);
     } else if (subcommand == "fail") {
         return handleFail(args);
+    } else if (subcommand == "migrate") {
+        return handleMigrate(args);
     } else {
         return RespEncoder::encode_error("ERR Unknown CLUSTER subcommand");
     }
@@ -674,6 +679,118 @@ bool ClusterCommand::isValidIp(const std::string& ip) {
 
     // 简单检查：至少有一个冒号
     return ip.find(':') != std::string::npos;
+}
+
+std::string ClusterCommand::handleMigrate(const std::vector<std::string>& args) {
+    // MIGRATE host port key dbid timeout [COPY | REPLACE]
+    // 简化版本: CLUSTER MIGRATE host port key timeout [REPLACE]
+    if (args.size() < 6) {
+        return RespEncoder::encode_error("ERR wrong number of arguments for 'cluster migrate' command");
+    }
+
+    if (!ClusterServer::instance().isEnabled()) {
+        return RespEncoder::encode_error("ERR cluster mode is not enabled");
+    }
+
+    const std::string& host = args[2];
+
+    // 解析端口号
+    int port = 0;
+    try {
+        port = std::stoi(args[3]);
+    } catch (...) {
+        return RespEncoder::encode_error("ERR invalid port number");
+    }
+
+    if (port <= 0 || port > 65535) {
+        return RespEncoder::encode_error("ERR invalid port number");
+    }
+
+    const std::string& key = args[4];
+
+    // 解析超时
+    int timeout = 0;
+    try {
+        timeout = std::stoi(args[5]);
+    } catch (...) {
+        return RespEncoder::encode_error("ERR invalid timeout");
+    }
+
+    // 检查是否有 REPLACE 标志
+    bool replace = false;
+    if (args.size() > 6 && args[6] == "REPLACE") {
+        replace = true;
+    }
+
+    LOG_INFO(CLUSTER, "MIGRATE %s:%d key=%s timeout=%d replace=%d",
+             host.c_str(), port, key.c_str(), timeout, replace);
+
+    // 获取键值
+    auto value_opt = GlobalStorage::instance().get(key);
+
+    if (!value_opt.has_value()) {
+        return RespEncoder::encode_error("ERR no such key");
+    }
+
+    const auto& value = value_opt.value();
+
+    // 检查键的过期时间
+    int64_t ttl_ms = -1;  // -1 表示永不过期
+    if (GlobalStorage::instance().expire_dict().is_expired(key)) {
+        // 键已过期，删除并返回错误
+        GlobalStorage::instance().del(key);
+        return RespEncoder::encode_error("ERR no such key");
+    } else {
+        // 获取剩余的 TTL
+        int64_t remaining = GlobalStorage::instance().expire_dict().get_ttl(key);
+        // get_ttl 返回 -2 表示没有过期时间（即永不过期）
+        // 其他正数表示剩余的过期时间（毫秒）
+        if (remaining > 0) {
+            ttl_ms = remaining;
+        }
+        // 否则 ttl_ms 保持 -1（永不过期）
+    }
+
+    // 获取目标节点名称
+    std::string target_name = host + ":" + std::to_string(port);
+
+    // 连接到目标节点
+    auto* conn = ClusterServer::instance().getConnection();
+    if (!conn) {
+        return RespEncoder::encode_error("ERR connection not available");
+    }
+
+    // 检查是否已连接，没有则建立连接
+    if (!conn->is_node_connected(target_name)) {
+        if (!conn->connect_to_node(target_name, host, port)) {
+            return RespEncoder::encode_error("ERR failed to connect to target node");
+        }
+    }
+
+    // 构建 RESTORE 命令发送到目标节点
+    // RESTORE key ttl_ms serialized_value [REPLACE]
+    // 注意：这里需要发送原始的序列化数据，实际实现中需要将 CacheObject 序列化为字节流
+
+    // 获取序列化后的数据
+    std::string serialized_value = value.serialize();
+
+    // 构建 RESTORE 命令
+    std::vector<std::string> restore_args;
+    restore_args.push_back("RESTORE");
+    restore_args.push_back(key);
+    restore_args.push_back(std::to_string(ttl_ms));
+    restore_args.push_back(serialized_value);
+    if (replace) {
+        restore_args.push_back("REPLACE");
+    }
+
+    // 发送 RESTORE 命令到目标节点
+    if (!conn->send_command_to_node(target_name, restore_args)) {
+        return RespEncoder::encode_error("ERR failed to send data to target node");
+    }
+
+    LOG_INFO(CLUSTER, "MIGRATE completed: key=%s -> %s:%d", key.c_str(), host.c_str(), port);
+    return RespEncoder::encode_simple_string("OK");
 }
 
 } // namespace cc_server

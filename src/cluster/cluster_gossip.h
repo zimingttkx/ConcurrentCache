@@ -18,8 +18,10 @@ enum class GossipType : uint8_t {
     kPong = 2,       // 心跳响应
     kMeet = 3,       // 节点加入请求
     kFail = 4,       // 节点故障广播
-    kPush = 5,       // 推送节点信息
-    kPull = 6,       // 拉取节点信息
+    kFailoverAuthReq = 5,  // 故障转移投票请求
+    kFailoverAuthAck = 6,  // 故障转移投票确认
+    kPush = 7,       // 推送节点信息
+    kPull = 8,       // 拉取节点信息
 };
 
 // Gossip 节点信息（在网络间传播的节点信息）
@@ -34,7 +36,10 @@ struct GossipNodeInfo {
     uint16_t slot_count;   // 槽数量
     std::vector<uint16_t> used_slot; // 槽列表（动态数组，避免32KB栈占用）
 
-    GossipNodeInfo() : port(0), flags(0), epoch(0), state(0), role(0), slot_count(0) {}
+    // 故障转移投票辅助字段
+    int64_t failover_offset = 0;  // 复制偏移量（用于投票）
+
+    GossipNodeInfo() : port(0), flags(0), epoch(0), state(0), role(0), slot_count(0), failover_offset(0) {}
 };
 
 // Gossip 消息
@@ -65,12 +70,16 @@ public:
     void handle_pong(const GossipMsg& msg);
     void handle_meet(const GossipMsg& msg);
     void handle_fail(const GossipMsg& msg);
+    void handle_failover_auth_req(const GossipMsg& msg);
+    void handle_failover_auth_ack(const GossipMsg& msg);
 
     // 发送消息给邻居
     void send_gossip(const GossipMsg& msg);
 
-    // 广播 FAIL 消息
+    // 广播消息
     void broadcast_fail(const std::string& node_name);
+    void broadcast_failover_auth_req(const std::string& replica_name, int64_t epoch, int64_t offset);
+    void broadcast_failover_auth_ack(const std::string& replica_name, int64_t epoch);
 
     // 获取随机节点列表（用于 Gossip 传播）
     std::vector<std::shared_ptr<ClusterNode>> get_random_nodes(size_t count);

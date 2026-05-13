@@ -118,6 +118,10 @@ namespace cc_server {
         // 获取所有 ZSET 成员（用于 RDB 序列化）
         std::vector<std::pair<std::string, double>> zset_all() const;
 
+        // 序列化对象为字符串（用于 MIGRATE 命令）
+        // 格式：type:string_value 或 type:json_value
+        std::string serialize() const;
+
     private:
         // ZSet 成员结构体（按分数排序）
         struct ZSetMember {

@@ -2,6 +2,8 @@
 #include "string_cmd.h"
 #include "expire_cmd.h"
 #include "cluster_cmd.h"
+#include "restore_cmd.h"
+#include "psync_cmd.h"
 #include <algorithm>
 
 namespace cc_server {
@@ -73,6 +75,14 @@ namespace cc_server {
 
         // Cluster 命令
         register_command("cluster", std::make_unique<ClusterCommand>());
+
+        // Restore 命令（用于 MIGRATE）
+        register_command("restore", std::make_unique<RestoreCommand>());
+
+        // 复制命令
+        register_command("psync", std::make_unique<PsyncCommand>());
+        register_command("sync", std::make_unique<SyncCommand>());
+        register_command("replconf", std::make_unique<ReplconfCommand>());
     }
 
 

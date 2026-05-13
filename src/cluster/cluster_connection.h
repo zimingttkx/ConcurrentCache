@@ -49,6 +49,9 @@ public:
     bool pong_node(const std::string& node_name);
     bool meet_node(const std::string& node_name, const std::string& my_ip, int my_port);
 
+    // 向节点发送 RESP 命令（用于 MIGRATE 等场景）
+    bool send_command_to_node(const std::string& node_name, const std::vector<std::string>& args);
+
     // 广播消息
     void broadcast_ping();
     void broadcast_pong();

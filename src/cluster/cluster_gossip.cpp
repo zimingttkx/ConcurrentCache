@@ -291,4 +291,81 @@ void ClusterGossip::broadcast_fail(const std::string& node_name) {
     send_gossip(msg);
 }
 
+void ClusterGossip::handle_failover_auth_req(const GossipMsg& msg) {
+    assert(state_ != nullptr);
+    LOG_INFO(CLUSTER, "Received FAILOVER_AUTH_REQ from %s (epoch=%lu)",
+             msg.sender_name.c_str(), msg.sender_epoch);
+
+    // 从nodes中获取投票请求信息
+    for (const auto& info : msg.nodes) {
+        // 使用 name 存储投票目标节点名
+        // 使用 epoch 存储投票epoch
+        // 使用 failover_offset 存储复制偏移量
+        LOG_INFO(CLUSTER, "Failover auth request: node=%s, epoch=%lu, offset=%ld",
+                 info.name.c_str(), info.epoch, info.failover_offset);
+
+        // 触发回调，让 ClusterServer 处理投票逻辑
+        // 这里简化处理：直接由本节点（如果是主节点）决定是否投票
+        if (update_callback_) {
+            auto node = state_->getNode(info.name);
+            if (node) {
+                update_callback_(node);
+            }
+        }
+    }
+}
+
+void ClusterGossip::handle_failover_auth_ack(const GossipMsg& msg) {
+    assert(state_ != nullptr);
+    LOG_INFO(CLUSTER, "Received FAILOVER_AUTH_ACK from %s", msg.sender_name.c_str());
+
+    // 从nodes中获取投票确认信息
+    for (const auto& info : msg.nodes) {
+        LOG_INFO(CLUSTER, "Failover auth ack from node: %s", info.name.c_str());
+    }
+}
+
+void ClusterGossip::broadcast_failover_auth_req(const std::string& replica_name, int64_t epoch, int64_t offset) {
+    if (!state_) return;
+
+    auto my_node = state_->getNode(state_->getMyNodeName());
+    if (!my_node) return;
+
+    GossipMsg msg;
+    msg.type = GossipType::kFailoverAuthReq;
+    msg.sender_name = my_node->getName();
+    msg.sender_epoch = epoch;
+
+    // 添加投票请求信息到nodes
+    GossipNodeInfo info;
+    info.name = replica_name;  // 投票目标（从节点名）
+    info.epoch = epoch;       // 投票epoch
+    info.failover_offset = offset;  // 复制偏移量
+    msg.nodes.push_back(info);
+
+    LOG_INFO(CLUSTER, "Broadcasting FAILOVER_AUTH_REQ for %s (epoch=%ld, offset=%ld)",
+             replica_name.c_str(), epoch, offset);
+    send_gossip(msg);
+}
+
+void ClusterGossip::broadcast_failover_auth_ack(const std::string& replica_name, int64_t epoch) {
+    if (!state_) return;
+
+    auto my_node = state_->getNode(state_->getMyNodeName());
+    if (!my_node) return;
+
+    GossipMsg msg;
+    msg.type = GossipType::kFailoverAuthAck;
+    msg.sender_name = my_node->getName();
+    msg.sender_epoch = epoch;
+
+    // 添加投票确认信息到nodes
+    GossipNodeInfo info;
+    info.name = replica_name;  // 投票目标（从节点名）
+    msg.nodes.push_back(info);
+
+    LOG_INFO(CLUSTER, "Broadcasting FAILOVER_AUTH_ACK for %s", replica_name.c_str());
+    send_gossip(msg);
+}
+
 } // namespace cc_server

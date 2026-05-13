@@ -381,4 +381,53 @@ std::vector<std::pair<std::string, double>> CacheObject::zset_all() const {
     return result;
 }
 
+std::string CacheObject::serialize() const {
+    std::string result;
+    result.reserve(256);  // 预分配
+
+    switch (type_) {
+        case ObjectType::STRING: {
+            // 格式：STRING\n<value>
+            result = "STRING\n" + string_val_;
+            break;
+        }
+        case ObjectType::LIST: {
+            // 格式：LIST\n<size>\n<element1>\n<element2>\n...
+            result = "LIST\n" + std::to_string(list_val_.size()) + "\n";
+            for (const auto& elem : list_val_) {
+                result += elem + "\n";
+            }
+            break;
+        }
+        case ObjectType::HASH: {
+            // 格式：HASH\n<size>\n<field1>\n<value1>\n<field2>\n<value2>\n...
+            result = "HASH\n" + std::to_string(hash_val_.size()) + "\n";
+            for (const auto& [k, v] : hash_val_) {
+                result += k + "\n" + v + "\n";
+            }
+            break;
+        }
+        case ObjectType::SET: {
+            // 格式：SET\n<size>\n<member1>\n<member2>\n...
+            result = "SET\n" + std::to_string(set_val_.size()) + "\n";
+            for (const auto& m : set_val_) {
+                result += m + "\n";
+            }
+            break;
+        }
+        case ObjectType::ZSET: {
+            // 格式：ZSET\n<size>\n<member1>\n<score1>\n<member2>\n<score2>\n...
+            result = "ZSET\n" + std::to_string(zset_val_.size()) + "\n";
+            for (const auto& z : zset_val_) {
+                result += z.member + "\n" + std::to_string(z.score) + "\n";
+            }
+            break;
+        }
+        default:
+            result = "";
+            break;
+    }
+    return result;
+}
+
 }  // namespace cc_server

@@ -88,6 +88,8 @@ public:
     [[nodiscard]] int64_t getMaxVotedOffset() const;  // 获取最大投票偏移量
     void setReplicaPriority(int priority) { replica_priority_ = priority; }  // 设置从节点优先级
     [[nodiscard]] int getReplicaPriority() const { return replica_priority_; }  // 获取从节点优先级
+    void setFailoverStartTime(int64_t time) { failover_start_time_ = time; }  // 设置故障转移开始时间
+    [[nodiscard]] int64_t getFailoverStartTime() const { return failover_start_time_; }  // 获取故障转移开始时间
 
 private:
     NodeInfo info_;                      // 节点信息
@@ -110,6 +112,7 @@ private:
     int64_t failover_epoch_ = 0;         // 故障转移轮次
     std::vector<VoteInfo> votes_;        // 收集的投票
     int replica_priority_ = 100;         // 从节点优先级
+    int64_t failover_start_time_ = 0;    // 故障转移开始时间（毫秒）
 };
 
 } // namespace cc_server

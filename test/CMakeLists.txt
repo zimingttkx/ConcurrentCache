@@ -12,6 +12,7 @@ set(COMMON_SOURCES
     ${CMAKE_SOURCE_DIR}/src/cache/expire_dict.cpp
     ${CMAKE_SOURCE_DIR}/src/cache/storage.cpp
     ${CMAKE_SOURCE_DIR}/src/command/command_factory.cpp
+    ${CMAKE_SOURCE_DIR}/src/command/psync_cmd.cpp
     ${CMAKE_SOURCE_DIR}/src/datatype/object.cpp
     ${CMAKE_SOURCE_DIR}/src/network/buffer.cpp
     ${CMAKE_SOURCE_DIR}/src/network/channel.cpp
@@ -30,7 +31,9 @@ set(COMMON_SOURCES
     ${CMAKE_SOURCE_DIR}/src/cluster/cluster_link.cpp
     ${CMAKE_SOURCE_DIR}/src/cluster/cluster_connection.cpp
     ${CMAKE_SOURCE_DIR}/src/cluster/cluster_gossip.cpp
+    ${CMAKE_SOURCE_DIR}/src/cluster/replication_mgr.cpp
     ${CMAKE_SOURCE_DIR}/src/command/cluster_cmd.cpp
+    ${CMAKE_SOURCE_DIR}/src/command/restore_cmd.cpp
 )
 
 # 包含目录

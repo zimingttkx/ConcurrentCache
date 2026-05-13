@@ -81,6 +81,9 @@ public:
     bool send_meet(const std::string& my_ip, int my_port);
     bool send_gossip(const GossipMsg& msg);
 
+    // 发送原始 RESP 命令数据（用于 MIGRATE 等场景）
+    bool send_raw(const std::string& data);
+
     // 接收消息
     void handle_read();
     void handle_write();

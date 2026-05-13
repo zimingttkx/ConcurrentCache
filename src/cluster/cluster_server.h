@@ -114,6 +114,10 @@ public:
     void completeFailover();
     // 获取需要故障转移的主节点的从节点列表
     std::vector<std::shared_ptr<ClusterNode>> getReplicasForMaster(const std::string& master_name) const;
+    // 检查故障转移是否超时
+    bool isFailoverTimeout() const;
+    // 广播故障转移完成消息（UPDATE）
+    void broadcastFailoverUpdate();
 
     // 禁用拷贝
     ClusterServer(const ClusterServer&) = delete;

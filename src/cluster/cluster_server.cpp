@@ -1,11 +1,13 @@
 // cluster_server.cpp
 #include "cluster_server.h"
+#include "cluster_link.h"
 #include "base/config.h"
 #include "base/log.h"
 #include "protocol/resp.h"
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <sstream>
 namespace cc_server {
 
 ClusterServer& ClusterServer::instance() {
@@ -90,6 +92,66 @@ void ClusterServer::init() {
         node->addFlags(static_cast<uint64_t>(NodeFlags::kHandshake));
         state_.addNode(node);
         LOG_INFO(CLUSTER, "Added node via MEET: %s (%s:%d)", name.c_str(), ip.c_str(), port);
+    });
+
+    // 设置 Gossip 回调 - 处理收到的 Gossip 消息
+    connection_.set_gossip_callback([this](const std::string& sender, const ClusterMsg& msg) {
+        // 将 ClusterMsg 转换为 GossipMsg
+        GossipMsg gossip_msg;
+        gossip_msg.sender_name = sender;
+        gossip_msg.sender_epoch = msg.header.sender_epoch;
+
+        // 从 args 解析节点信息
+        // 格式: node_name,ip,port,flags,role 或 node_name,ip,port,flags,role,failover_offset
+        for (const auto& arg : msg.args) {
+            std::stringstream ss(arg);
+            std::string node_name, ip, port_str, flags_str, role_str, offset_str;
+            if (!std::getline(ss, node_name, ',') ||
+                !std::getline(ss, ip, ',') ||
+                !std::getline(ss, port_str, ',') ||
+                !std::getline(ss, flags_str, ',') ||
+                !std::getline(ss, role_str, ',')) {
+                continue;
+            }
+
+            GossipNodeInfo info;
+            info.name = node_name;
+            info.ip = ip;
+            info.port = static_cast<uint16_t>(std::stoi(port_str));
+            info.flags = static_cast<uint16_t>(std::stoi(flags_str));
+            info.role = static_cast<uint8_t>(std::stoi(role_str));
+
+            // 可选：解析 failover_offset
+            if (std::getline(ss, offset_str, ',')) {
+                info.failover_offset = std::stoll(offset_str);
+            }
+
+            gossip_msg.nodes.push_back(info);
+        }
+
+        // 根据 ClusterMsgType 处理
+        if (msg.header.type == static_cast<uint16_t>(ClusterMsgType::kFail)) {
+            gossip_msg.type = GossipType::kFail;
+            gossip_.handle_fail(gossip_msg);
+        } else if (msg.header.type == static_cast<uint16_t>(ClusterMsgType::kFailoverAuthReq)) {
+            gossip_msg.type = GossipType::kFailoverAuthReq;
+            gossip_.handle_failover_auth_req(gossip_msg);
+            // 处理投票请求：如果本节点是主节点，发送投票确认
+            for (const auto& info : gossip_msg.nodes) {
+                if (handleFailoverAuthRequest(info.name, info.epoch, info.failover_offset)) {
+                    // 发送投票确认
+                    gossip_.broadcast_failover_auth_ack(info.name, info.epoch);
+                }
+            }
+        } else if (msg.header.type == static_cast<uint16_t>(ClusterMsgType::kFailoverAuthAck)) {
+            gossip_msg.type = GossipType::kFailoverAuthAck;
+            gossip_.handle_failover_auth_ack(gossip_msg);
+            // 从节点收到投票确认
+            for (const auto& info : gossip_msg.nodes) {
+                // 增加投票计数
+                handleFailoverAuthAck(info.name);
+            }
+        }
     });
 
     LOG_INFO(CLUSTER, "Cluster initialized: node_name=%s, enabled=%s",
@@ -566,6 +628,10 @@ bool ClusterServer::startFailover(const std::string& master_name) {
     my_node_->setFailoverEpoch(new_epoch);
     my_node_->setFailoverState(FailoverState::kWaitStart);
 
+    // 记录故障转移开始时间
+    my_node_->setFailoverStartTime(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+
     LOG_INFO(CLUSTER, "Started failover for master %s (epoch=%ld)", master_name.c_str(), new_epoch);
     return true;
 }
@@ -619,8 +685,10 @@ bool ClusterServer::handleFailoverAuthRequest(const std::string& replica_name, i
 
 void ClusterServer::handleFailoverAuthAck(const std::string& node_name) {
     // 从节点收到主节点的投票确认
-    LOG_INFO(CLUSTER, "Received failover auth ack from %s", node_name.c_str());
-    // 投票计数由 ClusterNode 自行管理
+    // 记录投票（用于多数派判断）
+    my_node_->addVote(node_name, my_node_->getFailoverEpoch(), my_node_->getMasterReplOffset());
+    LOG_INFO(CLUSTER, "Recorded failover auth ack from %s, vote count=%d",
+             node_name.c_str(), my_node_->getVoteCount());
 }
 
 std::vector<std::shared_ptr<ClusterNode>> ClusterServer::getReplicasForMaster(const std::string& master_name) const {
@@ -648,10 +716,19 @@ void ClusterServer::executeFailover() {
             // 等待开始状态，切换到等待投票
             my_node_->setFailoverState(FailoverState::kWaitAuth);
             LOG_INFO(CLUSTER, "Failover state: WaitAuth");
+            // 发送投票请求到所有主节点
+            gossip_.broadcast_failover_auth_req(getMyNodeName(), my_node_->getFailoverEpoch(), my_node_->getMasterReplOffset());
             break;
 
         case FailoverState::kWaitAuth: {
             // 等待投票状态
+            // 检查是否超时
+            if (isFailoverTimeout()) {
+                LOG_WARN(CLUSTER, "Failover timeout in WaitAuth state");
+                my_node_->setFailoverState(FailoverState::kFailoverTimeout);
+                break;
+            }
+
             // 计算需要的票数（多数派）
             auto all_nodes = state_.getAllNodes();
             int master_count = 0;
@@ -679,14 +756,19 @@ void ClusterServer::executeFailover() {
             break;
 
         case FailoverState::kFailoverCompleted:
-            // 故障转移已完成
+            // 故障转移已完成，广播UPDATE消息，然后重置状态
             LOG_INFO(CLUSTER, "Failover completed successfully");
+            broadcastFailoverUpdate();
+            // 重置故障转移状态，允许下次故障转移
+            my_node_->setFailoverState(FailoverState::kNoFailover);
+            my_node_->clearVotes();
             break;
 
         case FailoverState::kFailoverTimeout:
             // 故障转移超时，重置状态
             my_node_->setFailoverState(FailoverState::kNoFailover);
             my_node_->clearVotes();
+            my_node_->setFailoverStartTime(0);
             LOG_WARN(CLUSTER, "Failover timeout, resetting state");
             break;
     }
@@ -715,6 +797,56 @@ void ClusterServer::completeFailover() {
 
     LOG_INFO(CLUSTER, "Failover completed: took over %zu slots from %s",
              master_slots.size(), master->getName().c_str());
+}
+
+bool ClusterServer::isFailoverTimeout() const {
+    if (my_node_->getFailoverStartTime() == 0) {
+        return false;
+    }
+
+    int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+
+    // 默认超时时间 30 秒
+    constexpr int64_t failover_timeout_ms = 30000;
+
+    if (now - my_node_->getFailoverStartTime() > failover_timeout_ms) {
+        LOG_WARN(CLUSTER, "Failover timeout: elapsed=%ldms, limit=%ldms",
+                 now - my_node_->getFailoverStartTime(), failover_timeout_ms);
+        return true;
+    }
+    return false;
+}
+
+void ClusterServer::broadcastFailoverUpdate() {
+    if (!enabled_) return;
+
+    // 构建 UPDATE 消息，包含本节点的新槽信息
+    GossipMsg msg;
+    msg.type = GossipType::kPush;  // 使用 kPush 作为 UPDATE
+    msg.sender_name = getMyNodeName();
+    msg.sender_epoch = my_node_->getInfo().config_epoch;
+
+    GossipNodeInfo info;
+    info.name = my_node_->getName();
+    info.ip = my_node_->getInfo().ip;
+    info.port = my_node_->getInfo().port;
+    info.flags = my_node_->getFlags();
+    info.role = my_node_->isMaster() ? 0 : 1;
+    info.epoch = my_node_->getInfo().config_epoch;
+
+    const auto& slots = my_node_->getSlots();
+    info.slot_count = static_cast<uint16_t>(std::min(slots.size(), static_cast<size_t>(16384)));
+    for (size_t i = 0; i < info.slot_count; ++i) {
+        info.used_slot.push_back(static_cast<uint16_t>(slots[i]));
+    }
+    msg.nodes.push_back(info);
+
+    // 通过连接管理器广播
+    connection_.broadcast_gossip(msg);
+
+    LOG_INFO(CLUSTER, "Broadcasted failover UPDATE for node %s with %zu slots",
+             getMyNodeName().c_str(), slots.size());
 }
 
 } // namespace cc_server
