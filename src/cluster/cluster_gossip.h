@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <vector>
 #include <random>
+#include <functional>
 
 namespace cc_server {
 
@@ -16,8 +17,9 @@ enum class GossipType : uint8_t {
     kPing = 1,       // 心跳
     kPong = 2,       // 心跳响应
     kMeet = 3,       // 节点加入请求
-    kPush = 4,       // 推送节点信息
-    kPull = 5,       // 拉取节点信息
+    kFail = 4,       // 节点故障广播
+    kPush = 5,       // 推送节点信息
+    kPull = 6,       // 拉取节点信息
 };
 
 // Gossip 节点信息（在网络间传播的节点信息）
@@ -62,9 +64,13 @@ public:
     void handle_ping(const GossipMsg& msg);
     void handle_pong(const GossipMsg& msg);
     void handle_meet(const GossipMsg& msg);
+    void handle_fail(const GossipMsg& msg);
 
     // 发送消息给邻居
     void send_gossip(const GossipMsg& msg);
+
+    // 广播 FAIL 消息
+    void broadcast_fail(const std::string& node_name);
 
     // 获取随机节点列表（用于 Gossip 传播）
     std::vector<std::shared_ptr<ClusterNode>> get_random_nodes(size_t count);

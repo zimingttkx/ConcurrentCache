@@ -245,4 +245,50 @@ void ClusterGossip::pull_node_info() {
     // 实际请求由 ClusterConnection 处理
 }
 
+void ClusterGossip::handle_fail(const GossipMsg& msg) {
+    assert(state_ != nullptr);
+    LOG_INFO(CLUSTER, "Received FAIL broadcast from %s", msg.sender_name.c_str());
+
+    // 处理 FAIL 消息中的节点信息
+    for (const auto& info : msg.nodes) {
+        auto node = state_->getNode(info.name);
+        if (node) {
+            // 标记节点为 FAIL
+            node->setFailFlag(true);
+            LOG_INFO(CLUSTER, "Node %s marked as FAIL via gossip from %s",
+                     info.name.c_str(), msg.sender_name.c_str());
+        }
+    }
+}
+
+void ClusterGossip::broadcast_fail(const std::string& node_name) {
+    if (!state_) return;
+
+    auto my_node = state_->getNode(state_->getMyNodeName());
+    if (!my_node) return;
+
+    GossipMsg msg;
+    msg.type = GossipType::kFail;
+    msg.sender_name = my_node->getName();
+    msg.sender_epoch = my_node->getInfo().config_epoch;
+
+    // 添加要广播的故障节点信息
+    auto failed_node = state_->getNode(node_name);
+    if (failed_node) {
+        GossipNodeInfo info;
+        info.name = failed_node->getName();
+        info.ip = failed_node->getInfo().ip;
+        info.port = failed_node->getInfo().port;
+        info.flags = failed_node->getFlags();
+        info.role = failed_node->isMaster() ? 0 : 1;
+        msg.nodes.push_back(info);
+
+        LOG_INFO(CLUSTER, "Broadcasting FAIL for node %s", node_name.c_str());
+    }
+
+    // 实际发送由 ClusterConnection 处理
+    // 这里只是将消息放入发送队列
+    send_gossip(msg);
+}
+
 } // namespace cc_server
