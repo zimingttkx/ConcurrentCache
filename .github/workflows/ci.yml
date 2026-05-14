@@ -8,10 +8,7 @@ on:
 
 env:
   BUILD_TYPE: Release
-  # CMake 选项
-  ENABLE_ASAN: OFF
-  ENABLE_TSAN: OFF
-  ENABLE_UBSAN: OFF
+  IMAGE_NAME: ghcr.io/${{ github.repository }}/concurrentcache
 
 jobs:
   # ============================================================
@@ -19,30 +16,26 @@ jobs:
   # ============================================================
   build-linux:
     name: Build Linux (GCC)
-    runs-on: ubuntu-latest
-    container: gcc:14
+    runs-on: ubuntu-24.04
 
     steps:
-      - name: Install dependencies
-        run: |
-          apt-get update && apt-get install -y cmake ninja-build zlib1g-dev
-
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential zlib1g-dev
 
       - name: Configure CMake
         run: |
           mkdir -p build
           cd build
           cmake .. \
-            -G Ninja \
-            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
-            -DENABLE_ASAN=${{ env.ENABLE_ASAN }} \
-            -DENABLE_TSAN=${{ env.ENABLE_TSAN }} \
-            -DENABLE_UBSAN=${{ env.ENABLE_UBSAN }}
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
 
       - name: Build
-        run: cmake --build build --parallel $(nproc)
+        run: cmake --build build --parallel
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -52,67 +45,29 @@ jobs:
           retention-days: 7
 
   # ============================================================
-  # Job 2: 构建 (macOS)
-  # ============================================================
-  build-macos:
-    name: Build macOS (Clang)
-    runs-on: macos-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: brew install cmake zlib
-
-      - name: Configure CMake
-        run: |
-          mkdir -p build
-          cd build
-          cmake .. \
-            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
-            -DENABLE_ASAN=${{ env.ENABLE_ASAN }} \
-            -DENABLE_TSAN=${{ env.ENABLE_TSAN }} \
-            -DENABLE_UBSAN=${{ env.ENABLE_UBSAN }}
-
-      - name: Build
-        run: cmake --build build --parallel $(sysctl -n hw.ncpu)
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-build
-          path: build/concurrentcache-server
-          retention-days: 7
-
-  # ============================================================
-  # Job 3: 测试 (Linux)
+  # Job 2: 测试 (Linux)
   # ============================================================
   test:
     name: Test (Ubuntu)
-    runs-on: ubuntu-latest
-    container: gcc:14
+    runs-on: ubuntu-24.04
 
     steps:
-      - name: Install dependencies
-        run: |
-          apt-get update && apt-get install -y cmake ninja-build zlib1g-dev redis-tools
-
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential zlib1g-dev redis-tools
 
       - name: Configure CMake
         run: |
           mkdir -p build
           cd build
-          cmake .. \
-            -G Ninja \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DENABLE_ASAN=ON \
-            -DENABLE_TSAN=ON
+          cmake .. -DCMAKE_BUILD_TYPE=Debug -DENABLE_ASAN=ON -DENABLE_TSAN=ON
 
       - name: Build
-        run: cmake --build build --parallel $(nproc)
+        run: cmake --build build --parallel
 
       - name: Run tests
         run: |
@@ -120,28 +75,29 @@ jobs:
           ctest --output-on-failure -j$(nproc)
 
   # ============================================================
-  # Job 4: Sanitizers (AddressSanitizer)
+  # Job 3: Sanitizers (AddressSanitizer)
   # ============================================================
   sanitizer-asan:
     name: Sanitizer ASAN
-    runs-on: ubuntu-latest
-    container: gcc:14
+    runs-on: ubuntu-24.04
 
     steps:
-      - name: Install dependencies
-        run: apt-get update && apt-get install -y cmake ninja-build zlib1g-dev
-
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential zlib1g-dev
 
       - name: Configure with ASAN
         run: |
           mkdir -p build
           cd build
-          cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Debug -DENABLE_ASAN=ON
+          cmake .. -DCMAKE_BUILD_TYPE=Debug -DENABLE_ASAN=ON
 
       - name: Build
-        run: cmake --build build --parallel $(nproc)
+        run: cmake --build build --parallel
 
       - name: Run tests with ASAN
         run: |
@@ -149,30 +105,80 @@ jobs:
           ctest --output-on-failure -j$(nproc)
 
   # ============================================================
-  # Job 5: Sanitizers (ThreadSanitizer)
+  # Job 4: Sanitizers (ThreadSanitizer)
   # ============================================================
   sanitizer-tsan:
     name: Sanitizer TSAN
-    runs-on: ubuntu-latest
-    container: gcc:14
+    runs-on: ubuntu-24.04
 
     steps:
-      - name: Install dependencies
-        run: apt-get update && apt-get install -y cmake ninja-build zlib1g-dev
-
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential zlib1g-dev
 
       - name: Configure with TSAN
         run: |
           mkdir -p build
           cd build
-          cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Debug -DENABLE_TSAN=ON
+          cmake .. -DCMAKE_BUILD_TYPE=Debug -DENABLE_TSAN=ON
 
       - name: Build
-        run: cmake --build build --parallel $(nproc)
+        run: cmake --build build --parallel
 
       - name: Run tests with TSAN
         run: |
           cd build
           ctest --output-on-failure -j$(nproc)
+
+  # ============================================================
+  # Job 5: Docker Build & Push (Main Branch Only)
+  # ============================================================
+  docker:
+    name: Docker Build & Push
+    runs-on: ubuntu-24.04
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=sha,prefix=
+
+      - name: Build and Push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Image digest
+        run: echo "Image pushed to ${{ env.IMAGE_NAME }}"

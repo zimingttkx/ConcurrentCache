@@ -4,6 +4,7 @@
 
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Docker](https://img.shields.io/badge/Docker-ghcr.io-blue.svg)](https://github.com/dingziming/ConcurrentCache/pkgs/container/concurrentcache)
 
 ## 项目简介
 
@@ -241,6 +242,89 @@ rdb_save_interval = 3600
 rdb_dirty_threshold = 10000
 max_entries = 2000000
 cluster_enabled = false
+```
+
+---
+
+## Docker
+
+### 使用预构建镜像
+
+```bash
+# 拉取镜像 (GitHub Container Registry)
+docker pull ghcr.io/dingziming/concurrentcache:latest
+
+# 运行
+docker run -d -p 6379:6379 --name concurrentcache ghcr.io/dingziming/concurrentcache:latest
+
+# 测试
+redis-cli -p 6379 PING
+
+# 停止
+docker stop concurrentcache
+
+# 启动
+docker start concurrentcache
+```
+
+### 本地构建镜像
+
+```bash
+# 构建镜像
+docker build -t concurrentcache:latest .
+
+# 运行
+docker run -d -p 6379:6379 concurrentcache:latest
+
+# 进入容器 (调试)
+docker run -it --rm concurrentcache:latest /bin/bash
+```
+
+### Docker Compose
+
+```yaml
+# docker-compose.yml
+version: '3.8'
+services:
+  concurrentcache:
+    image: ghcr.io/dingziming/concurrentcache:latest
+    container_name: concurrentcache
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./data:/app/data
+      - ./conf:/app/conf
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6379", "PING"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+```
+
+```bash
+# 启动
+docker-compose up -d
+
+# 查看日志
+docker-compose logs -f concurrentcache
+
+# 停止
+docker-compose down
+```
+
+### 自定义配置
+
+```bash
+# 使用自定义配置文件
+docker run -d -p 6379:6379 \
+  -v /path/to/concurrentcache.conf:/app/conf/concurrentcache.conf \
+  ghcr.io/dingziming/concurrentcache:latest
+
+# 持久化数据卷
+docker run -d -p 6379:6379 \
+  -v /path/to/data:/app/data \
+  ghcr.io/dingziming/concurrentcache:latest
 ```
 
 ---

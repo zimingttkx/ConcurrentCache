@@ -1,0 +1,33 @@
+# Build artifacts
+build/
+*.o
+*.a
+*.so
+*.dylib
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Git
+.git/
+.github/
+
+# Test files
+test/
+
+# Documentation
+*.md
+docs/
+
+# Docker
+Dockerfile*
+.dockerignore
+
+# Misc
+*.log
+*.tmp
+*.bak
+*.orig
