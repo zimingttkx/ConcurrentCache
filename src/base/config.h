@@ -90,6 +90,7 @@ public:
     [[nodiscard]] int clusterNodeTimeout() const;
     [[nodiscard]] int clusterReplicaValidityFactor() const;
     [[nodiscard]] bool clusterRequireFullCoverage() const;
+    [[nodiscard]] std::string clusterBindAddr() const;
 
     // 禁用拷贝
     Config(const Config&) = delete;

@@ -26,6 +26,8 @@ namespace cc_server {
         register_command("get", std::make_unique<GetCommand>());
         register_command("set", std::make_unique<SetCommand>());
         register_command("del", std::make_unique<DelCommand>());
+        register_command("incr", std::make_unique<IncrCommand>());
+        register_command("decr", std::make_unique<DecrCommand>());
         register_command("exists", std::make_unique<ExistsCommand>());
         register_command("ping", std::make_unique<PingCommand>());
         register_command("expire", std::make_unique<ExpireCommand>());

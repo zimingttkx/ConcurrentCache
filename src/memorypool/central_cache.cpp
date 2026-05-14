@@ -21,7 +21,7 @@ static size_t get_page_size() {
     GetSystemInfo(&sys_info);
     return sys_info.dwPageSize;
 #else
-    return getpagesize();
+    return static_cast<size_t>(getpagesize());
 #endif
 }
 

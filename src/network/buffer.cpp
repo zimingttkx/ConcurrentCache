@@ -21,7 +21,7 @@ namespace cc_server {
     // - 移动写指针
     void Buffer::append(const char* data, size_t len) {
         ensure_writable(len);
-        std::copy(data, data + len, buffer_.begin() + writer_idx_);
+        std::copy(data, data + len, buffer_.begin() + static_cast<long>(writer_idx_));
         writer_idx_ += len;
     }
 
@@ -66,8 +66,8 @@ namespace cc_server {
     void Buffer::compact() {
         if (reader_idx_ == 0) return;
         std::copy(
-            buffer_.begin() + reader_idx_,
-            buffer_.begin() + writer_idx_,
+            buffer_.begin() + static_cast<long>(reader_idx_),
+            buffer_.begin() + static_cast<long>(writer_idx_),
             buffer_.begin()
         );
         writer_idx_ -= reader_idx_;

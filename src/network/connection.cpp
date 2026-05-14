@@ -27,14 +27,13 @@ namespace cc_server {
     Connection::Connection(int client_fd, EventLoop* loop)
         : client_socket_(client_fd),   // 用 client_fd 构造 Socket，管理已连接套接字
           loop_(loop),                 // 保存 EventLoop 指针
-          channel_(nullptr),           // 先设为 nullptr，后面 new
           input_buffer_(),            // 构造空输入缓冲区
           output_buffer_(),             // 构造空输出缓冲区
           resp_parser_()             // 构造 RESP 解析器
     {
         // Channel 负责监听这个客户端连接的 IO 事件
         // 当 epoll 检测到 client_fd 可读/可写时，通知 Connection 处理
-        channel_ = new Channel(loop_, client_socket_.fd());
+        channel_ = std::make_unique<Channel>(loop_, client_socket_.fd());
 
         // Channel 本身不处理业务，只是把事件分发给我们
         // 所以要告诉 Channel："事件来了调我这些函数"
@@ -84,13 +83,9 @@ namespace cc_server {
      *   - 这个 fd 可能被其他文件复用，导致 epoll 通知错误的事件
      */
     Connection::~Connection() {
-        // 告诉 EventLoop："这个 Channel 我不要了，别再通知我了"
-        if (channel_ != nullptr) {
-            loop_->remove_channel(channel_);
+        if (channel_ && !closed_) {
+            loop_->remove_channel(channel_.get());
         }
-
-        delete channel_;
-        channel_ = nullptr;
 
         LOG_DEBUG(connection, "Connection destroyed: fd=%d", client_socket_.fd());
         // 注意：client_socket_ 在这里析构，会自动 close(fd)
@@ -144,7 +139,7 @@ namespace cc_server {
             // 追加到输入缓冲区
             // input_buffer_ 现在缓存了所有收到的数据
             // 业务层可以从这里按"消息"为单位读取
-            input_buffer_.append(temp_buffer, bytes_read);
+            input_buffer_.append(temp_buffer, static_cast<size_t>(bytes_read));
             // 协议解析 调用RespParaser解析命令
             std::vector<RespValue> commands = resp_parser_.parse(input_buffer());
             for (auto & cmd : commands) {
@@ -240,7 +235,7 @@ namespace cc_server {
 
             // 移动读指针，标记这些数据已发送
             // 注意：不是删除数据，只是移动指针表示"这部分已发送"
-            output_buffer_.retrieve(bytes_written);
+            output_buffer_.retrieve(static_cast<size_t>(bytes_written));
 
             LOG_DEBUG(connection, "handle_write: wrote %zd bytes to fd=%d",
                       bytes_written, client_socket_.fd());
@@ -344,8 +339,8 @@ namespace cc_server {
         closed_ = true;
 
         // 避免 epoll 还监听已关闭的 fd
-        if (channel_ != nullptr) {
-            loop_->remove_channel(channel_);
+        if (channel_) {
+            loop_->remove_channel(channel_.get());
         }
 
         // client_socket_.close() 会：

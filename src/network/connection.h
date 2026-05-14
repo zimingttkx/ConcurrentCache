@@ -1,6 +1,7 @@
 #ifndef CONCURRENTCACHE_NETWORK_CONNECTION_H
 #define CONCURRENTCACHE_NETWORK_CONNECTION_H
 
+#include <memory>
 #include "socket.h"
 #include "base/log.h"
 #include "event_loop.h"
@@ -26,7 +27,7 @@ namespace cc_server {
     private:
         Socket client_socket_;
         EventLoop* loop_;
-        Channel* channel_;
+        std::unique_ptr<Channel> channel_;
         Buffer input_buffer_;
         Buffer output_buffer_;
         RespParser resp_parser_; // RESP 协议解析器
@@ -57,7 +58,7 @@ namespace cc_server {
         }
 
         [[nodiscard]]Channel* channel() const {
-            return channel_;
+            return channel_.get();
         }
 
         // 获取 fd

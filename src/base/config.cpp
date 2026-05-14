@@ -75,19 +75,39 @@ bool Config::load(const std::string& filename) {
 }
 
 void Config::reload() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<std::pair<std::string, std::string>> pending_notifications;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
 
-    // 重新加载配置
-    config_data_.clear();
-    loadInternal();
+        // 重新加载配置
+        config_data_.clear();
+        loadInternal();
 
-    // 通知所有观察者
-    for (auto& kv : observers_) {
-        const std::string& key = kv.first;
-        auto it = config_data_.find(key);
-        if (it != config_data_.end()) {
-            for (auto& observer : kv.second) {
-                observer->onConfigChange(key, it->second);
+        // 设置日志默认值
+        if (config_data_.find("log_level") == config_data_.end()) {
+            config_data_["log_level"] = "info";
+        }
+        if (config_data_.find("log_file") == config_data_.end()) {
+            config_data_["log_file"] = "./logs/concurrentcache.log";
+        }
+        if (config_data_.find("log_max_size") == config_data_.end()) {
+            config_data_["log_max_size"] = "104857600";
+        }
+        if (config_data_.find("log_max_files") == config_data_.end()) {
+            config_data_["log_max_files"] = "5";
+        }
+
+        // 收集通知数据
+        for (auto& kv : config_data_) {
+            pending_notifications.push_back({kv.first, kv.second});
+        }
+    }
+    // 在锁外调用观察者，避免死锁
+    for (auto& [key, val] : pending_notifications) {
+        auto it = observers_.find(key);
+        if (it != observers_.end()) {
+            for (auto* obs : it->second) {
+                obs->onConfigChange(key, val);
             }
         }
     }
@@ -178,6 +198,10 @@ int Config::clusterReplicaValidityFactor() const {
 
 bool Config::clusterRequireFullCoverage() const {
     return getBool("cluster_require_full_coverage", false);
+}
+
+std::string Config::clusterBindAddr() const {
+    return getString("cluster_bind_addr", "127.0.0.1");
 }
 
 // 工具函数
