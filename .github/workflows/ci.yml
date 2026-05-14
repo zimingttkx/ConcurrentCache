@@ -1,0 +1,178 @@
+name: C++ CI
+
+on:
+  push:
+    branches: [ main, master, version* ]
+  pull_request:
+    branches: [ main, master ]
+
+env:
+  BUILD_TYPE: Release
+  # CMake 选项
+  ENABLE_ASAN: OFF
+  ENABLE_TSAN: OFF
+  ENABLE_UBSAN: OFF
+
+jobs:
+  # ============================================================
+  # Job 1: 构建 (Linux)
+  # ============================================================
+  build-linux:
+    name: Build Linux (GCC)
+    runs-on: ubuntu-latest
+    container: gcc:14
+
+    steps:
+      - name: Install dependencies
+        run: |
+          apt-get update && apt-get install -y cmake ninja-build zlib1g-dev
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: |
+          mkdir -p build
+          cd build
+          cmake .. \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            -DENABLE_ASAN=${{ env.ENABLE_ASAN }} \
+            -DENABLE_TSAN=${{ env.ENABLE_TSAN }} \
+            -DENABLE_UBSAN=${{ env.ENABLE_UBSAN }}
+
+      - name: Build
+        run: cmake --build build --parallel $(nproc)
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-build
+          path: build/concurrentcache-server
+          retention-days: 7
+
+  # ============================================================
+  # Job 2: 构建 (macOS)
+  # ============================================================
+  build-macos:
+    name: Build macOS (Clang)
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install cmake zlib
+
+      - name: Configure CMake
+        run: |
+          mkdir -p build
+          cd build
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            -DENABLE_ASAN=${{ env.ENABLE_ASAN }} \
+            -DENABLE_TSAN=${{ env.ENABLE_TSAN }} \
+            -DENABLE_UBSAN=${{ env.ENABLE_UBSAN }}
+
+      - name: Build
+        run: cmake --build build --parallel $(sysctl -n hw.ncpu)
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-build
+          path: build/concurrentcache-server
+          retention-days: 7
+
+  # ============================================================
+  # Job 3: 测试 (Linux)
+  # ============================================================
+  test:
+    name: Test (Ubuntu)
+    runs-on: ubuntu-latest
+    container: gcc:14
+
+    steps:
+      - name: Install dependencies
+        run: |
+          apt-get update && apt-get install -y cmake ninja-build zlib1g-dev redis-tools
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: |
+          mkdir -p build
+          cd build
+          cmake .. \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DENABLE_ASAN=ON \
+            -DENABLE_TSAN=ON
+
+      - name: Build
+        run: cmake --build build --parallel $(nproc)
+
+      - name: Run tests
+        run: |
+          cd build
+          ctest --output-on-failure -j$(nproc)
+
+  # ============================================================
+  # Job 4: Sanitizers (AddressSanitizer)
+  # ============================================================
+  sanitizer-asan:
+    name: Sanitizer ASAN
+    runs-on: ubuntu-latest
+    container: gcc:14
+
+    steps:
+      - name: Install dependencies
+        run: apt-get update && apt-get install -y cmake ninja-build zlib1g-dev
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure with ASAN
+        run: |
+          mkdir -p build
+          cd build
+          cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Debug -DENABLE_ASAN=ON
+
+      - name: Build
+        run: cmake --build build --parallel $(nproc)
+
+      - name: Run tests with ASAN
+        run: |
+          cd build
+          ctest --output-on-failure -j$(nproc)
+
+  # ============================================================
+  # Job 5: Sanitizers (ThreadSanitizer)
+  # ============================================================
+  sanitizer-tsan:
+    name: Sanitizer TSAN
+    runs-on: ubuntu-latest
+    container: gcc:14
+
+    steps:
+      - name: Install dependencies
+        run: apt-get update && apt-get install -y cmake ninja-build zlib1g-dev
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure with TSAN
+        run: |
+          mkdir -p build
+          cd build
+          cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Debug -DENABLE_TSAN=ON
+
+      - name: Build
+        run: cmake --build build --parallel $(nproc)
+
+      - name: Run tests with TSAN
+        run: |
+          cd build
+          ctest --output-on-failure -j$(nproc)
