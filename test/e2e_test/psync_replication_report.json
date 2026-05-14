@@ -1,0 +1,103 @@
+{
+  "timestamp": "2026-05-14T22:26:23.462317",
+  "total": 19,
+  "passed": 19,
+  "failed": 0,
+  "results": [
+    {
+      "name": "Connect to Master",
+      "result": "PASS",
+      "detail": "port 27379"
+    },
+    {
+      "name": "Connect to Replica",
+      "result": "PASS",
+      "detail": "port 27380"
+    },
+    {
+      "name": "Master PING",
+      "result": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "Replica PING",
+      "result": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "CLUSTER MEET master→replica",
+      "result": "PASS",
+      "detail": "OK"
+    },
+    {
+      "name": "Master CLUSTER NODES shows replica",
+      "result": "PASS",
+      "detail": "127.0.0.1:27380 127.0.0.1:27380 master disconnected - -\n127.0.0.1:27379 127.0.0.1:27379 master disconnected - -\n"
+    },
+    {
+      "name": "Master has slots assigned",
+      "result": "PASS",
+      "detail": "cluster_enabled:yes\ncluster_state:ok\ncluster_known_nodes:2\ncluster_master_nodes:2\ncluster_replica_nodes:0\ncluster_handshake_nodes:0\ncluster_connected_"
+    },
+    {
+      "name": "CLUSTER REPLICATE replica→master",
+      "result": "PASS",
+      "detail": "OK"
+    },
+    {
+      "name": "Replica CLUSTER NODES shows master",
+      "result": "PASS",
+      "detail": "127.0.0.1:27379 127.0.0.1:27379 master disconnected - -\n127.0.0.1:27380 127.0.0.1:27380 slave disconnected - 127.0.0.1:27379\n"
+    },
+    {
+      "name": "Master SET k1",
+      "result": "PASS",
+      "detail": "OK"
+    },
+    {
+      "name": "Master SET k2",
+      "result": "PASS",
+      "detail": "OK"
+    },
+    {
+      "name": "Master SET k3",
+      "result": "PASS",
+      "detail": "OK"
+    },
+    {
+      "name": "Replica GET k1",
+      "result": "PASS",
+      "detail": "expected=v1, got=v1"
+    },
+    {
+      "name": "Replica GET k2",
+      "result": "PASS",
+      "detail": "expected=v2, got=v2"
+    },
+    {
+      "name": "Replica GET k3",
+      "result": "PASS",
+      "detail": "expected=long_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx, got=long_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    {
+      "name": "DEL k1 on master → replica null",
+      "result": "PASS",
+      "detail": "None"
+    },
+    {
+      "name": "Replica GET counter after 5 INCRs",
+      "result": "PASS",
+      "detail": "5"
+    },
+    {
+      "name": "Replica rejects write",
+      "result": "PASS",
+      "detail": "ERR:ERR READONLY You can't write against a read only replica."
+    },
+    {
+      "name": "Bulk replication: 50/50",
+      "result": "PASS",
+      "detail": "50/50"
+    }
+  ]
+}
