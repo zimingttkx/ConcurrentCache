@@ -12,6 +12,8 @@
 #include <shared_mutex>
 #include <functional>
 #include <chrono>
+#include <thread>
+#include <atomic>
 
 namespace cc_server {
 
@@ -29,6 +31,15 @@ public:
 
     // 设置 EventLoop（用于注册 ClusterLink 的 socket fd）
     void set_event_loop(EventLoop* loop) { event_loop_ = loop; }
+    [[nodiscard]] EventLoop* get_event_loop() const { return event_loop_; }
+
+    // 桥接方法（供 ClusterBus 调用，处理来自 cluster bus 端口的消息）
+    void handle_incoming_msg(ClusterMsg&& msg, ClusterLink* link) {
+        handle_link_msg(std::move(msg), link);
+    }
+    void handle_incoming_disconnect(const std::string& name, ClusterLink* link) {
+        on_node_disconnected(name, link);
+    }
 
     // 启动/停止心跳
     void start_heartbeat();
@@ -51,6 +62,9 @@ public:
 
     // 向节点发送 RESP 命令（用于 MIGRATE 等场景）
     bool send_command_to_node(const std::string& node_name, const std::vector<std::string>& args);
+
+    // 向节点发送原始字符串数据（用于复制命令推送）
+    bool send_raw_to_node(const std::string& node_name, const std::string& data);
 
     // 广播消息
     void broadcast_ping();
@@ -114,6 +128,8 @@ private:
     int64_t ping_timeout_ms_ = 5000;             // PING 超时时间（毫秒）
     int64_t last_heartbeat_time_ms_ = 0;        // 上次心跳时间
     bool heartbeat_running_ = false;             // 心跳是否运行中
+    std::thread heartbeat_thread_;                // 心跳定时器线程
+    std::atomic<bool> heartbeat_thread_stop_{false};  // 停止心跳线程标志
 };
 
 } // namespace cc_server

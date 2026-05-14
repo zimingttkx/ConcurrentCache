@@ -51,31 +51,32 @@ void ClusterNode::setMaster(const std::string& ip, int port) {
 void ClusterNode::setFailFlag(bool fail) {
     if (fail) {
         addFlags(static_cast<uint64_t>(NodeFlags::kFail));
-        fail_time_ = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
+        fail_time_.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count(), std::memory_order_relaxed);
         LOG_INFO(CLUSTER, "Node %s marked as FAIL (客观下线)", info_.name.c_str());
     } else {
         clearFlags(static_cast<uint64_t>(NodeFlags::kFail));
-        fail_time_ = 0;
+        fail_time_.store(0, std::memory_order_relaxed);
     }
 }
 
 void ClusterNode::setPfailFlag(bool pfail) {
     if (pfail) {
         addFlags(static_cast<uint64_t>(NodeFlags::kPfail));
-        if (first_pfail_time_ == 0) {
-            first_pfail_time_ = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (first_pfail_time_.load(std::memory_order_relaxed) == 0) {
+            first_pfail_time_.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count(), std::memory_order_relaxed);
         }
         LOG_INFO(CLUSTER, "Node %s marked as PFAIL (疑似下线)", info_.name.c_str());
     } else {
         clearFlags(static_cast<uint64_t>(NodeFlags::kPfail));
-        first_pfail_time_ = 0;
-        failure_count_ = 0;
+        first_pfail_time_.store(0, std::memory_order_relaxed);
+        failure_count_.store(0, std::memory_order_relaxed);
     }
 }
 
 void ClusterNode::addVote(const std::string& node_name, int64_t epoch, int64_t offset) {
+    std::lock_guard<std::mutex> lock(votes_mutex_);
     VoteInfo vote;
     vote.node_name = node_name;
     vote.epoch = epoch;
@@ -86,6 +87,7 @@ void ClusterNode::addVote(const std::string& node_name, int64_t epoch, int64_t o
 }
 
 int64_t ClusterNode::getMaxVotedOffset() const {
+    std::lock_guard<std::mutex> lock(votes_mutex_);
     int64_t max_offset = 0;
     for (const auto& vote : votes_) {
         if (vote.offset > max_offset) {

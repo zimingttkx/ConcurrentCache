@@ -2,6 +2,7 @@
 #include "cluster_connection.h"
 #include "cluster_server.h"
 #include "cluster_gossip.h"
+#include "replication_mgr.h"
 #include "base/log.h"
 #include "protocol/resp.h"
 #include <chrono>
@@ -40,7 +41,16 @@ void ClusterConnection::start_heartbeat() {
         return;
     }
     heartbeat_running_ = true;
+    heartbeat_thread_stop_ = false;
     last_heartbeat_time_ms_ = get_current_time_ms();
+    heartbeat_thread_ = std::thread([this]() {
+        while (!heartbeat_thread_stop_.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(heartbeat_interval_ms_));
+            if (!heartbeat_thread_stop_.load()) {
+                on_timer();
+            }
+        }
+    });
     LOG_INFO(CLUSTER, "Heartbeat started (interval=%ldms, timeout=%ldms)",
              heartbeat_interval_ms_, ping_timeout_ms_);
 }
@@ -50,11 +60,17 @@ void ClusterConnection::stop_heartbeat() {
         return;
     }
     heartbeat_running_ = false;
+    heartbeat_thread_stop_ = true;
+    if (heartbeat_thread_.joinable()) {
+        heartbeat_thread_.join();
+    }
     LOG_INFO(CLUSTER, "Heartbeat stopped");
 }
 
 bool ClusterConnection::connect_to_node(const std::string& node_name,
                                        const std::string& ip, int port) {
+    // 连接目标节点的集群总线端口（port + 10000），而非主端口
+    int bus_port = port + 10000;
     // 先检查是否已存在连接
     {
         std::shared_lock<std::shared_mutex> lock(links_mutex_);
@@ -64,17 +80,17 @@ bool ClusterConnection::connect_to_node(const std::string& node_name,
         }
     }
 
-    // 创建新连接
-    auto link = std::make_unique<ClusterLink>(node_name, ip, port);
+    // 创建新连接（连接目标节点的集群总线端口）
+    auto link = std::make_unique<ClusterLink>(node_name, ip, bus_port);
 
     // 设置消息回调 - 处理收到的消息
-    link->set_msg_callback([this](ClusterMsg&& msg, ClusterLink* link) {
-        handle_link_msg(std::move(msg), link);
+    link->set_msg_callback([this](ClusterMsg&& msg, ClusterLink* cluster_link) {
+        handle_link_msg(std::move(msg), cluster_link);
     });
 
     // 设置断开回调
-    link->set_disconnect_callback([this](const std::string& name, ClusterLink* link) {
-        on_node_disconnected(name, link);
+    link->set_disconnect_callback([this](const std::string& name, ClusterLink* cluster_link) {
+        on_node_disconnected(name, cluster_link);
     });
 
     // 建立连接
@@ -230,9 +246,25 @@ bool ClusterConnection::send_command_to_node(const std::string& node_name,
         return false;
     }
 
-    // 将命令编码为 RESP 格式
-    std::string resp_data = RespEncoder::encode_array(args);
-    return link->send_raw(resp_data);
+    // 将命令包装在 ClusterMsg 中（使用 kRepData 类型）
+    ClusterMsg msg;
+    msg.header.type = static_cast<uint16_t>(ClusterMsgType::kRepData);
+    msg.header.length = static_cast<uint16_t>(sizeof(msg.header));
+    for (const auto& arg : args) {
+        msg.header.length += static_cast<uint16_t>(arg.size() + 1);
+    }
+    msg.args = args;
+    return link->send_msg(msg);
+}
+
+bool ClusterConnection::send_raw_to_node(const std::string& node_name,
+                                         const std::string& data) {
+    auto* link = get_link(node_name);
+    if (!link) {
+        LOG_WARN(CLUSTER, "No link to node for raw data: %s", node_name.c_str());
+        return false;
+    }
+    return link->send_raw(data);
 }
 
 void ClusterConnection::broadcast_ping() {
@@ -424,6 +456,30 @@ void ClusterConnection::handle_link_msg(ClusterMsg&& msg, ClusterLink* link) {
             node_connected_callback_(sender_name_str);
         }
         LOG_DEBUG(CLUSTER, "Received PONG from %s", sender_name_str.c_str());
+    } else if (msg.header.type == static_cast<uint16_t>(ClusterMsgType::kRepData)) {
+        // 收到复制数据消息
+        LOG_INFO(CLUSTER, "kRepData received from %s: %s",
+                 sender_name_str.c_str(), msg.args.empty() ? "empty" : msg.args[0].c_str());
+        if (!msg.args.empty()) {
+            const std::string& cmd_line = msg.args[0];
+            if (cmd_line.rfind("REPLSYNC:", 0) == 0) {
+                // 这是复制同步请求: "REPLSYNC:<replica_name>"
+                std::string replica_name = cmd_line.substr(9);
+                LOG_INFO(CLUSTER, "Received replication sync request from %s (replica=%s)",
+                         sender_name_str.c_str(), replica_name.c_str());
+                auto& repl_mgr = ReplicationMgr::instance();
+                // 获取副本节点信息
+                auto node = state_->getNode(sender_name_str);
+                if (node) {
+                    auto& info = node->getInfo();
+                    repl_mgr.add_replica(replica_name, info.ip, info.port, node);
+                    repl_mgr.send_rdb_to_replica(replica_name);
+                }
+            } else {
+                // 这是复制数据命令，在副本端执行
+                ReplicationMgr::instance().handle_replication_command(cmd_line);
+            }
+        }
     }
 
     // 先处理 gossip 回调（不需要移动 msg）

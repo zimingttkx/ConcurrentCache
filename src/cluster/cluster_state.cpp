@@ -315,7 +315,7 @@ std::shared_ptr<ClusterNode> ClusterState::getMasterOfReplica(const std::string&
 void ClusterState::markNodeAsPfail(const std::string& node_name) {
     assert(!node_name.empty() && "markNodeAsPfail: node_name is empty");
 
-    std::shared_lock<std::shared_mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     auto it = nodes_.find(node_name);
     if (it != nodes_.end()) {
         it->second->setPfailFlag(true);
@@ -327,7 +327,7 @@ void ClusterState::markNodeAsPfail(const std::string& node_name) {
 void ClusterState::markNodeAsFail(const std::string& node_name) {
     assert(!node_name.empty() && "markNodeAsFail: node_name is empty");
 
-    std::shared_lock<std::shared_mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     auto it = nodes_.find(node_name);
     if (it != nodes_.end()) {
         it->second->setFailFlag(true);
@@ -338,7 +338,7 @@ void ClusterState::markNodeAsFail(const std::string& node_name) {
 void ClusterState::clearNodePfail(const std::string& node_name) {
     assert(!node_name.empty() && "clearNodePfail: node_name is empty");
 
-    std::shared_lock<std::shared_mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     auto it = nodes_.find(node_name);
     if (it != nodes_.end()) {
         it->second->setPfailFlag(false);
@@ -349,7 +349,7 @@ void ClusterState::clearNodePfail(const std::string& node_name) {
 void ClusterState::clearNodeFail(const std::string& node_name) {
     assert(!node_name.empty() && "clearNodeFail: node_name is empty");
 
-    std::shared_lock<std::shared_mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     auto it = nodes_.find(node_name);
     if (it != nodes_.end()) {
         it->second->setFailFlag(false);
@@ -377,6 +377,34 @@ std::vector<std::shared_ptr<ClusterNode>> ClusterState::getPfailedNodes() const 
         }
     }
     return result;
+}
+
+void ClusterState::addPfailReport(const std::string& node_name, const std::string& reporter_name) {
+    assert(!node_name.empty() && "addPfailReport: node_name is empty");
+    assert(!reporter_name.empty() && "addPfailReport: reporter_name is empty");
+
+    std::unique_lock<std::shared_mutex> lock(pfail_mutex_);
+    pfailing_reports_[node_name].insert(reporter_name);
+    LOG_DEBUG(CLUSTER, "PFAIL report: %s reported by %s (total=%zu)",
+              node_name.c_str(), reporter_name.c_str(), pfailing_reports_[node_name].size());
+}
+
+size_t ClusterState::getPfailReportCount(const std::string& node_name) const {
+    assert(!node_name.empty() && "getPfailReportCount: node_name is empty");
+
+    std::shared_lock<std::shared_mutex> lock(pfail_mutex_);
+    auto it = pfailing_reports_.find(node_name);
+    if (it != pfailing_reports_.end()) {
+        return it->second.size();
+    }
+    return 0;
+}
+
+void ClusterState::clearPfailReports(const std::string& node_name) {
+    assert(!node_name.empty() && "clearPfailReports: node_name is empty");
+
+    std::unique_lock<std::shared_mutex> lock(pfail_mutex_);
+    pfailing_reports_.erase(node_name);
 }
 
 } // namespace cc_server

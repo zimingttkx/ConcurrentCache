@@ -2,6 +2,7 @@
 #include "cluster/cluster_server.h"
 #include "cluster/cluster_node.h"
 #include "cluster/cluster_connection.h"
+#include "cluster/replication_mgr.h"
 #include "base/log.h"
 #include "protocol/resp.h"
 #include "cache/storage.h"
@@ -17,7 +18,11 @@ std::string ClusterCommand::execute(const std::vector<std::string>& args) {
         return RespEncoder::encode_error("ERR wrong number of arguments for 'cluster' command");
     }
 
-    const std::string& subcommand = args[1];
+    std::string subcommand = args[1];
+    // 转换为小写以兼容 Redis 协议（协议发送大写命令）
+    for (char& c : subcommand) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
 
     // 子命令分发
     if (subcommand == "meet") {
@@ -109,9 +114,8 @@ std::string ClusterCommand::handleMeet(const std::vector<std::string>& args) {
         return RespEncoder::encode_simple_string("OK");
     }
 
-    // 创建握手节点并添加到状态
-    auto node = std::make_shared<ClusterNode>(name, ip, port, NodeRole::kNodeUnknown);
-    node->addFlags(static_cast<uint64_t>(NodeFlags::kHandshake));
+    // 创建节点并添加到状态（默认为主节点）
+    auto node = std::make_shared<ClusterNode>(name, ip, port, NodeRole::kMaster);
 
     state->addNode(node);
 
@@ -244,7 +248,8 @@ std::string ClusterCommand::handleInfo(const std::vector<std::string>& args) {
     result += "cluster_connected_nodes:" + std::to_string(connected_count) + "\n";
     result += "cluster_slots_assigned:" + std::to_string(slot_owner_count) + "\n";
     result += "cluster_my_node:" + my_node->getName() + "\n";
-    result += "cluster_current_epoch:" + std::to_string(0) + "\n";
+    int64_t epoch = my_node->getInfo().config_epoch;
+    result += "cluster_current_epoch:" + std::to_string(epoch) + "\n";
     result += "cluster_stats_messages_received:" + std::to_string(0) + "\n";
 
     return RespEncoder::encode_bulk_string(result);
@@ -560,6 +565,13 @@ std::string ClusterCommand::handleReplicate(const std::vector<std::string>& args
     if (ClusterServer::instance().setReplicaOf(master_name)) {
         LOG_INFO(CLUSTER, "Node %s is now replica of %s",
                  my_node->getName().c_str(), master_name.c_str());
+
+        // 通过 cluster bus 向主节点发送复制同步请求
+        auto* conn = ClusterServer::instance().getConnection();
+        std::string repl_sync_msg = "REPLSYNC:" + my_node->getName();
+        std::vector<std::string> sync_args = {repl_sync_msg};
+        conn->send_command_to_node(master_name, sync_args);
+
         return RespEncoder::encode_simple_string("OK");
     }
 

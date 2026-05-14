@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <vector>
 
 namespace cc_server {
@@ -27,6 +28,7 @@ enum class ClusterMsgType : uint16_t {
     kFailoverAuthReq = 7,  // 故障转移请求
     kFailoverAuthAck = 8,  // 故障转移确认
     kUpdate = 9,     // 节点信息更新
+    kRepData = 10,   // 复制数据命令
 };
 
 // 集群消息头
@@ -72,6 +74,7 @@ public:
     // 连接管理
     bool connect();                      // 主动连接对端
     void disconnect();                   // 断开连接
+    void set_fd(int fd) { fd_ = fd; connected_.store(true); }  // 直接设置fd（入站连接用）
     [[nodiscard]] bool is_connected() const { return connected_.load(); }
 
     // 发送消息
@@ -117,6 +120,7 @@ private:
     std::atomic<int64_t> last_recv_time_{0};  // 最后接收时间
 
     Buffer send_buffer_;                 // 发送缓冲区
+    std::mutex send_mutex_;              // 保护 send_buffer_ 的多线程访问
     Buffer recv_buffer_;                  // 接收缓冲区
 
     MsgCallback msg_callback_;            // 消息回调

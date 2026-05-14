@@ -45,7 +45,7 @@ bool ClusterLink::connect() {
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(port_);
+    addr.sin_port = htons(static_cast<uint16_t>(port_));
 
     if (inet_pton(AF_INET, ip_.c_str(), &addr.sin_addr) <= 0) {
         LOG_ERROR(CLUSTER, "Invalid IP address: %s", ip_.c_str());
@@ -108,18 +108,32 @@ bool ClusterLink::send_msg(const ClusterMsg& msg) {
 
     // 计算参数总长度
     for (const auto& arg : msg.args) {
-        header.length += arg.size() + 1;  // +1 for separator
+        header.length += static_cast<uint16_t>(arg.size() + 1);  // +1 for separator
     }
 
-    // 添加到发送缓冲区
-    send_buffer_.append(reinterpret_cast<const char*>(&header), sizeof(header));
-
-    for (const auto& arg : msg.args) {
-        send_buffer_.append(arg.data(), arg.size());
-        send_buffer_.append("\xC0", 1);  // 参数分隔符
+    // 添加诊断日志（仅在非心跳消息时）
+    if (header.type != 1 && header.type != 2) {
+        LOG_INFO(CLUSTER, "SEND-MSG fd=%d node=%s type=%u args=%zu first_arg=%s",
+                 fd_, node_name_.c_str(), header.type, msg.args.size(),
+                 msg.args.empty() ? "-" : msg.args[0].c_str());
     }
 
-    handle_write();
+    // 添加到发送缓冲区（加锁保护，不在此线程调用 handle_write，
+    // 由 EventLoop 统一负责发送，避免多线程竞争 send_buffer_ 导致数据重复发送）
+    {
+        std::lock_guard<std::mutex> lock(send_mutex_);
+        send_buffer_.append(reinterpret_cast<const char*>(&header), sizeof(header));
+
+        for (const auto& arg : msg.args) {
+            send_buffer_.append(arg.data(), arg.size());
+            send_buffer_.append("\xC0", 1);  // 参数分隔符
+        }
+    }
+
+    // 注意：不在此处调用 handle_write()。EventLoop 已通过 enable_writing()
+    // 监听 EPOLLOUT 事件，会在 fd 可写时自动调用 handle_write() 发送数据。
+    // 如果在调用线程直接发送，会与 EventLoop 线程产生竞态条件，
+    // 导致同一份数据被 send() 两次，副本端收到重复命令。
     return true;
 }
 
@@ -210,9 +224,11 @@ bool ClusterLink::send_raw(const std::string& data) {
         return false;
     }
 
-    // 直接添加数据到发送缓冲区
-    send_buffer_.append(data.data(), data.size());
-    handle_write();
+    // 直接添加数据到发送缓冲区（由 EventLoop 统一发送）
+    {
+        std::lock_guard<std::mutex> lock(send_mutex_);
+        send_buffer_.append(data.data(), data.size());
+    }
     return true;
 }
 
@@ -225,7 +241,7 @@ void ClusterLink::handle_read() {
     ssize_t n = recv(fd_, buf, sizeof(buf), 0);
 
     if (n > 0) {
-        recv_buffer_.append(buf, n);
+        recv_buffer_.append(buf, static_cast<size_t>(n));
         update_last_recv_time();
 
         // 处理接收到的数据
@@ -256,11 +272,13 @@ void ClusterLink::handle_write() {
         return;
     }
 
+    std::lock_guard<std::mutex> lock(send_mutex_);
+
     while (send_buffer_.readable_bytes() != 0) {
         ssize_t n = send(fd_, send_buffer_.peek(), send_buffer_.readable_bytes(), 0);
 
         if (n > 0) {
-            send_buffer_.retrieve(n);
+            send_buffer_.retrieve(static_cast<size_t>(n));
         } else if (n == 0) {
             // 连接被关闭
             LOG_INFO(CLUSTER, "Connection closed by %s during write", node_name_.c_str());
@@ -296,7 +314,23 @@ bool ClusterLink::read_complete() {
     uint32_t magic;
     memcpy(&magic, data, sizeof(magic));
     if (magic != kMsgMagic) {
-        LOG_ERROR(CLUSTER, "Invalid message magic from %s: 0x%x", node_name_.c_str(), magic);
+        // RESP 协议数据（如 CLUSTER MEET 的握手数据）可能到达 cluster bus 端口
+        // 静默跳过非 cluster 协议数据，避免错误日志泛滥
+        size_t discard = 0;
+        for (size_t i = 0; i < len; i++) {
+            if (static_cast<uint8_t>(data[i]) == 0x43 && i + kHeaderSize <= len) {
+                uint32_t probe;
+                memcpy(&probe, data + i, sizeof(probe));
+                if (probe == kMsgMagic) {
+                    break; // 找到下一个有效的 cluster 消息
+                }
+            }
+            discard++;
+        }
+        if (discard > 0) {
+            LOG_DEBUG(CLUSTER, "Skipping %zu non-cluster bytes from %s", discard, node_name_.c_str());
+            recv_buffer_.retrieve(discard);
+        }
         return false;
     }
 
@@ -317,8 +351,33 @@ bool ClusterLink::decode_msg() {
     ClusterMsg msg;
     memcpy(&msg.header, data, kHeaderSize);
 
+    // 解析参数：header 之后的数据以 \xC0 分隔
+    size_t args_size = msg.header.length - kHeaderSize;
+    if (args_size > 0) {
+        const char* args_start = data + kHeaderSize;
+        const char* args_end = args_start + args_size;
+
+        std::string current_arg;
+        for (const char* p = args_start; p < args_end; ++p) {
+            if (*p == '\xC0') {
+                msg.args.push_back(current_arg);
+                current_arg.clear();
+            } else {
+                current_arg += *p;
+            }
+        }
+        // 如果末尾没有分隔符，添加最后一个参数
+        if (!current_arg.empty()) {
+            msg.args.push_back(current_arg);
+        }
+    }
+
     // 跳过已处理的数据
     recv_buffer_.retrieve(msg.header.length);
+
+    // 诊断：记录每个解码消息的来源 fd 和链接名
+    LOG_INFO(CLUSTER, "DECODE-MSG fd=%d node=%s type=%u args=%zu",
+             fd_, node_name_.c_str(), msg.header.type, msg.args.size());
 
     // 调用消息回调
     if (msg_callback_) {

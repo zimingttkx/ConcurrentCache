@@ -1,6 +1,7 @@
 // cluster_gossip.cpp
 #include "cluster_gossip.h"
 #include "cluster_state.h"
+#include "cluster_server.h"
 #include "base/log.h"
 #include <algorithm>
 #include <cassert>
@@ -37,8 +38,8 @@ GossipMsg ClusterGossip::build_ping_msg() {
     GossipNodeInfo info;
     info.name = my_node->getName();
     info.ip = my_node->getInfo().ip;
-    info.port = my_node->getInfo().port;
-    info.flags = my_node->getFlags();
+    info.port = static_cast<uint16_t>(my_node->getInfo().port);
+    info.flags = static_cast<uint16_t>(my_node->getFlags());
     info.role = my_node->isMaster() ? 0 : 1;
     info.epoch = msg.sender_epoch;
 
@@ -75,8 +76,8 @@ GossipMsg ClusterGossip::build_pong_msg() {
         GossipNodeInfo info;
         info.name = node->getName();
         info.ip = node->getInfo().ip;
-        info.port = node->getInfo().port;
-        info.flags = node->getFlags();
+        info.port = static_cast<uint16_t>(node->getInfo().port);
+        info.flags = static_cast<uint16_t>(node->getFlags());
         info.role = node->isMaster() ? 0 : 1;
 
         const auto& slots = node->getSlots();
@@ -113,8 +114,8 @@ GossipMsg ClusterGossip::build_meet_msg(const std::string& ip, int port) {
     GossipNodeInfo info;
     info.name = my_node->getName();
     info.ip = my_node->getInfo().ip;
-    info.port = my_node->getInfo().port;
-    info.flags = my_node->getFlags();
+    info.port = static_cast<uint16_t>(my_node->getInfo().port);
+    info.flags = static_cast<uint16_t>(my_node->getFlags());
     info.role = my_node->isMaster() ? 0 : 1;
 
     msg.nodes.push_back(info);
@@ -131,6 +132,11 @@ void ClusterGossip::handle_ping(const GossipMsg& msg) {
     for (const auto& info : msg.nodes) {
         // 更新已知节点信息
         known_nodes_[info.name] = info;
+
+        // 收集 PFAIL 报告：如果发送者报告某节点为 PFAIL，记录下来
+        if (info.flags & static_cast<uint16_t>(NodeFlags::kPfail)) {
+            state_->addPfailReport(info.name, msg.sender_name);
+        }
 
         // 如果是未知节点，触发 meet 回调
         auto existing = state_->getNode(info.name);
@@ -158,6 +164,11 @@ void ClusterGossip::handle_pong(const GossipMsg& msg) {
     // 也携带节点信息用于同步
     for (const auto& info : msg.nodes) {
         known_nodes_[info.name] = info;
+
+        // 收集 PFAIL 报告
+        if (info.flags & static_cast<uint16_t>(NodeFlags::kPfail)) {
+            state_->addPfailReport(info.name, msg.sender_name);
+        }
 
         auto existing = state_->getNode(info.name);
         if (existing && update_callback_) {
@@ -197,9 +208,11 @@ void ClusterGossip::handle_meet(const GossipMsg& msg) {
 }
 
 void ClusterGossip::send_gossip(const GossipMsg& msg) {
-    (void)msg;
-    // 实际发送由 ClusterConnection 处理
-    // 这里只是构建消息
+    // 通过 ClusterServer 的 ClusterConnection 广播消息到所有已连接节点
+    auto* conn = ClusterServer::instance().getConnection();
+    if (conn) {
+        conn->broadcast_gossip(msg);
+    }
 }
 
 std::vector<std::shared_ptr<ClusterNode>> ClusterGossip::get_random_nodes(size_t count) {
@@ -227,8 +240,8 @@ void ClusterGossip::push_node_info(const std::shared_ptr<ClusterNode>& node) {
     GossipNodeInfo info;
     info.name = node->getName();
     info.ip = node->getInfo().ip;
-    info.port = node->getInfo().port;
-    info.flags = node->getFlags();
+    info.port = static_cast<uint16_t>(node->getInfo().port);
+    info.flags = static_cast<uint16_t>(node->getFlags());
     info.role = node->isMaster() ? 0 : 1;
 
     const auto& slots = node->getSlots();
@@ -270,7 +283,7 @@ void ClusterGossip::broadcast_fail(const std::string& node_name) {
     GossipMsg msg;
     msg.type = GossipType::kFail;
     msg.sender_name = my_node->getName();
-    msg.sender_epoch = my_node->getInfo().config_epoch;
+    msg.sender_epoch = static_cast<uint64_t>(my_node->getInfo().config_epoch);
 
     // 添加要广播的故障节点信息
     auto failed_node = state_->getNode(node_name);
@@ -278,8 +291,8 @@ void ClusterGossip::broadcast_fail(const std::string& node_name) {
         GossipNodeInfo info;
         info.name = failed_node->getName();
         info.ip = failed_node->getInfo().ip;
-        info.port = failed_node->getInfo().port;
-        info.flags = failed_node->getFlags();
+        info.port = static_cast<uint16_t>(failed_node->getInfo().port);
+        info.flags = static_cast<uint16_t>(failed_node->getFlags());
         info.role = failed_node->isMaster() ? 0 : 1;
         msg.nodes.push_back(info);
 
@@ -334,12 +347,12 @@ void ClusterGossip::broadcast_failover_auth_req(const std::string& replica_name,
     GossipMsg msg;
     msg.type = GossipType::kFailoverAuthReq;
     msg.sender_name = my_node->getName();
-    msg.sender_epoch = epoch;
+    msg.sender_epoch = static_cast<uint64_t>(epoch);
 
     // 添加投票请求信息到nodes
     GossipNodeInfo info;
     info.name = replica_name;  // 投票目标（从节点名）
-    info.epoch = epoch;       // 投票epoch
+    info.epoch = static_cast<uint64_t>(epoch);       // 投票epoch
     info.failover_offset = offset;  // 复制偏移量
     msg.nodes.push_back(info);
 
@@ -357,7 +370,7 @@ void ClusterGossip::broadcast_failover_auth_ack(const std::string& replica_name,
     GossipMsg msg;
     msg.type = GossipType::kFailoverAuthAck;
     msg.sender_name = my_node->getName();
-    msg.sender_epoch = epoch;
+    msg.sender_epoch = static_cast<uint64_t>(epoch);
 
     // 添加投票确认信息到nodes
     GossipNodeInfo info;

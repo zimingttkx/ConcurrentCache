@@ -5,6 +5,7 @@
 #include "cluster_node.h"
 #include <cstddef>
 #include <unordered_map>
+#include <unordered_set>
 #include <memory>
 #include <shared_mutex>
 #include <vector>
@@ -57,6 +58,11 @@ public:
     [[nodiscard]] std::string getMyNodeName() const { return my_node_name_; }
     void setMyNodeName(const std::string& name) { my_node_name_ = name; }
 
+    // PFAIL 报告收集（用于故障转移法定人数检查）
+    void addPfailReport(const std::string& node_name, const std::string& reporter_name);
+    [[nodiscard]] size_t getPfailReportCount(const std::string& node_name) const;
+    void clearPfailReports(const std::string& node_name);
+
 private:
     std::string my_node_name_;                                               // 本节点名称
     std::unordered_map<std::string, std::shared_ptr<ClusterNode>> nodes_;    // 节点列表
@@ -64,10 +70,12 @@ private:
     std::unordered_map<int, SlotMigrationInfo> migrating_slots_;              // 正在迁出的槽 (slot -> info)
     std::unordered_map<int, SlotMigrationInfo> importing_slots_;               // 正在迁入的槽 (slot -> info)
     std::unordered_map<std::string, std::vector<std::shared_ptr<ClusterNode>>> replicas_;  // 主节点名称 -> 从节点列表
+    std::unordered_map<std::string, std::unordered_set<std::string>> pfailing_reports_;  // PFAIL 报告: 被报告节点 -> 报告者集合
     mutable std::shared_mutex mutex_;                                        // 保护 nodes_
     mutable std::shared_mutex slots_mutex_;                                  // 保护 slots_
     mutable std::shared_mutex migration_mutex_;                              // 保护迁移状态
     mutable std::shared_mutex replicas_mutex_;                               // 保护 replicas_
+    mutable std::shared_mutex pfail_mutex_;                                  // 保护 pfailing_reports_
 };
 
 } // namespace cc_server

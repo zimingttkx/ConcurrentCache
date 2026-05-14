@@ -5,6 +5,7 @@
 #include "cluster_state.h"
 #include "cluster_connection.h"
 #include "cluster_gossip.h"
+#include "cluster_bus.h"
 #include <atomic>
 #include <memory>
 #include <string>
@@ -22,6 +23,9 @@ public:
     // 启动/停止
     void start();
     void stop();
+
+    // 持久化集群节点配置
+    void saveNodesConf();
 
     // 集群是否启用
     [[nodiscard]] bool isEnabled() const { return enabled_; }
@@ -133,6 +137,7 @@ private:
     ClusterState state_;                            // 集群状态
     ClusterConnection connection_;                   // 连接管理器
     ClusterGossip gossip_;                          // Gossip 协议
+    ClusterBus cluster_bus_;                        // 集群总线（监听 port+10000）
     std::atomic<bool> running_{false};             // 运行状态
 };
 

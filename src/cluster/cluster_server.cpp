@@ -1,12 +1,14 @@
 // cluster_server.cpp
 #include "cluster_server.h"
 #include "cluster_link.h"
+#include "replication_mgr.h"
 #include "base/config.h"
 #include "base/log.h"
 #include "protocol/resp.h"
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <fstream>
 #include <sstream>
 namespace cc_server {
 
@@ -27,7 +29,7 @@ void ClusterServer::init() {
     LOG_INFO(CLUSTER, "Initializing cluster mode...");
 
     // 获取本节点配置
-    std::string my_ip = "127.0.0.1";  // TODO: 从配置获取
+    std::string my_ip = Config::instance().clusterBindAddr();
     int my_port = Config::instance().getInt("port", 6379);
 
     // 构建节点名称（使用 ip:port 作为唯一标识）
@@ -60,14 +62,18 @@ void ClusterServer::init() {
         std::string ip = node_name.substr(0, colon_pos);
         int port = std::stoi(node_name.substr(colon_pos + 1));
 
-        // 检查节点是否已存在
-        if (state_.getNode(node_name)) {
+        // 检查节点是否已存在，如果存在则将其升级为主节点
+        auto existing = state_.getNode(node_name);
+        if (existing) {
+            if (!existing->isMaster() && !existing->isReplica()) {
+                existing->setRole(NodeRole::kMaster);
+                LOG_INFO(CLUSTER, "Upgraded node to master via PONG: %s", node_name.c_str());
+            }
             return;
         }
 
-        // 创建节点并添加到状态
-        auto node = std::make_shared<ClusterNode>(node_name, ip, port, NodeRole::kNodeUnknown);
-        node->addFlags(static_cast<uint64_t>(NodeFlags::kHandshake));
+        // 创建节点并添加到状态（默认为主节点）
+        auto node = std::make_shared<ClusterNode>(node_name, ip, port, NodeRole::kMaster);
         state_.addNode(node);
         LOG_INFO(CLUSTER, "Added node via PONG: %s (%s:%d)", node_name.c_str(), ip.c_str(), port);
     });
@@ -82,14 +88,18 @@ void ClusterServer::init() {
     connection_.set_meet_callback([this](const std::string& ip, int port) {
         std::string name = ip + ":" + std::to_string(port);
 
-        // 检查节点是否已存在
-        if (state_.getNode(name)) {
+        // 检查节点是否已存在，如果存在则将其升级为主节点
+        auto existing = state_.getNode(name);
+        if (existing) {
+            if (!existing->isMaster() && !existing->isReplica()) {
+                existing->setRole(NodeRole::kMaster);
+                LOG_INFO(CLUSTER, "Upgraded node to master via MEET: %s", name.c_str());
+            }
             return;
         }
 
-        // 创建握手节点并添加到状态
-        auto node = std::make_shared<ClusterNode>(name, ip, port, NodeRole::kNodeUnknown);
-        node->addFlags(static_cast<uint64_t>(NodeFlags::kHandshake));
+        // 创建节点并添加到状态（默认为主节点）
+        auto node = std::make_shared<ClusterNode>(name, ip, port, NodeRole::kMaster);
         state_.addNode(node);
         LOG_INFO(CLUSTER, "Added node via MEET: %s (%s:%d)", name.c_str(), ip.c_str(), port);
     });
@@ -138,9 +148,9 @@ void ClusterServer::init() {
             gossip_.handle_failover_auth_req(gossip_msg);
             // 处理投票请求：如果本节点是主节点，发送投票确认
             for (const auto& info : gossip_msg.nodes) {
-                if (handleFailoverAuthRequest(info.name, info.epoch, info.failover_offset)) {
+                if (handleFailoverAuthRequest(info.name, static_cast<int64_t>(info.epoch), info.failover_offset)) {
                     // 发送投票确认
-                    gossip_.broadcast_failover_auth_ack(info.name, info.epoch);
+                    gossip_.broadcast_failover_auth_ack(info.name, static_cast<int64_t>(info.epoch));
                 }
             }
         } else if (msg.header.type == static_cast<uint16_t>(ClusterMsgType::kFailoverAuthAck)) {
@@ -154,6 +164,17 @@ void ClusterServer::init() {
         }
     });
 
+    // 初始化 ClusterBus（接收其他节点的集群连接）
+    cluster_bus_.init(connection_.get_event_loop());
+
+    // 设置 ClusterBus 回调 — 桥接到 ClusterConnection
+    cluster_bus_.set_msg_callback([this](ClusterMsg&& msg, ClusterLink* link) {
+        connection_.handle_incoming_msg(std::move(msg), link);
+    });
+    cluster_bus_.set_disconnect_callback([this](const std::string& name, ClusterLink* link) {
+        connection_.handle_incoming_disconnect(name, link);
+    });
+
     LOG_INFO(CLUSTER, "Cluster initialized: node_name=%s, enabled=%s",
              my_name.c_str(), enabled_ ? "yes" : "no");
 }
@@ -162,16 +183,79 @@ void ClusterServer::start() {
     if (!enabled_) return;
 
     running_ = true;
+
+    // 启动 ClusterBus（监听 port+10000 端口，接收其他节点的集群连接）
+    int server_port = Config::instance().getInt("port", 6379);
+    cluster_bus_.start(server_port);
+
     connection_.start_heartbeat();
-    LOG_INFO(CLUSTER, "Cluster server started");
+    LOG_INFO(CLUSTER, "Cluster server started (bus port: %d)", server_port + 10000);
 }
 
 void ClusterServer::stop() {
     if (!enabled_) return;
 
+    saveNodesConf();
     connection_.stop_heartbeat();
+    cluster_bus_.stop();
     running_ = false;
     LOG_INFO(CLUSTER, "Cluster server stopped");
+}
+
+void ClusterServer::saveNodesConf() {
+    // 保存集群节点配置到 nodes.conf，用于重启后恢复集群拓扑
+    std::string filename = Config::instance().clusterConfigFile();
+    if (filename.empty()) {
+        filename = "nodes.conf";
+    }
+
+    std::ofstream file(filename);
+    if (!file.is_open()) {
+        LOG_ERROR(CLUSTER, "Failed to open nodes.conf for writing: %s", filename.c_str());
+        return;
+    }
+
+    auto nodes = state_.getAllNodes();
+    for (const auto& node : nodes) {
+        const auto& info = node->getInfo();
+        // 格式: <name> <ip:port> <flags> <master> <ping_sent> <pong_recv> <epoch> <link_state> <slots...>
+        std::string flags;
+        if (node->isMaster()) flags += "master";
+        else if (node->isReplica()) flags += "slave";
+        else flags += "myself";
+
+        if (node->isFailed()) flags += ",fail";
+        if (node->isPfailed()) flags += ",fail?";
+
+        std::string master_name = "-";
+        auto master = node->getMasterNode();
+        if (master) {
+            master_name = master->getName();
+        }
+
+        file << node->getName() << " "
+             << info.ip << ":" << info.port << " "
+             << flags << " "
+             << master_name << " "
+             << "0 0 "  // ping_sent, pong_recv
+             << info.config_epoch << " "
+             << "connected";
+
+        // 输出该节点负责的槽
+        const auto& slots = node->getSlots();
+        if (!slots.empty()) {
+            file << " ";
+            for (size_t i = 0; i < slots.size(); ++i) {
+                if (i > 0) file << " ";
+                file << slots[i];
+            }
+        }
+
+        file << "\n";
+    }
+
+    file.close();
+    LOG_INFO(CLUSTER, "Saved nodes.conf: %zu nodes written to %s", nodes.size(), filename.c_str());
 }
 
 void ClusterServer::on_timer() {
@@ -229,7 +313,7 @@ static uint16_t crc16(const char* buf, int len) {
 
 int ClusterServer::keyToSlot(const std::string& key) const {
     // 防御性检查
-    assert(!key.empty() && "keyToSlot: key is empty");
+    if (key.empty()) return 0;
 
     // Redis 槽算法：查找 {tag}，只对 tag 进行哈希
     // 格式如：{tag}.anything
@@ -543,29 +627,26 @@ bool ClusterServer::checkFailQuorum(const std::string& node_name) {
     // 如果不是疑似下线，不检查客观下线
     if (!node->isPfailed()) return false;
 
-    // 获取集群中存活的主节点数量
+    // 获取集群中存活的主节点数量（用于计算法定人数）
     auto nodes = state_.getAllNodes();
     int live_master_count = 0;
     for (const auto& n : nodes) {
-        // 只计算主节点
         if (n->isMaster() && n->isConnected() && !n->isFailed()) {
             live_master_count++;
         }
     }
 
-    // 多数原则：超过一半的主节点认为该节点下线
+    // 法定人数 = (存活主节点数 / 2) + 1
     int quorum = (live_master_count / 2) + 1;
-    const int min_quorum = 2;  // 最小 quorum 值
+    if (quorum < 2) quorum = 2;  // 最小法定人数
 
-    // TODO: 实际上应该通过 Gossip 协议收集其他节点对同一节点的 pfailing 报告
-    // 这里简化处理：如果本节点认为节点疑似下线，且存活主节点数 >= 最小 quorum
-    if (live_master_count >= min_quorum) {
-        LOG_INFO(CLUSTER, "Node %s fail quorum reached: live_masters=%d, quorum=%d",
-                 node_name.c_str(), live_master_count, quorum);
-        return true;
-    }
+    // 通过 Gossip 收集的 PFAIL 报告数量判断是否达到法定人数
+    size_t pfail_reports = state_.getPfailReportCount(node_name);
 
-    return false;
+    LOG_INFO(CLUSTER, "Node %s fail quorum check: pfail_reports=%zu, live_masters=%d, quorum=%d",
+             node_name.c_str(), pfail_reports, live_master_count, quorum);
+
+    return pfail_reports >= static_cast<size_t>(quorum);
 }
 
 void ClusterServer::markNodeAsFail(const std::string& node_name) {
@@ -582,13 +663,13 @@ void ClusterServer::markNodeAsFail(const std::string& node_name) {
     GossipMsg gossip_msg;
     gossip_msg.type = GossipType::kFail;
     gossip_msg.sender_name = getMyNodeName();
-    gossip_msg.sender_epoch = my_node_->getInfo().config_epoch;
+    gossip_msg.sender_epoch = static_cast<uint64_t>(my_node_->getInfo().config_epoch);
 
     GossipNodeInfo info;
     info.name = node->getName();
     info.ip = node->getInfo().ip;
-    info.port = node->getInfo().port;
-    info.flags = node->getFlags();
+    info.port = static_cast<uint16_t>(node->getInfo().port);
+    info.flags = static_cast<uint16_t>(node->getFlags());
     info.role = node->isMaster() ? 0 : 1;
     gossip_msg.nodes.push_back(info);
 
@@ -670,16 +751,24 @@ bool ClusterServer::handleFailoverAuthRequest(const std::string& replica_name, i
         return false;
     }
 
-    // 检查 replica 的数据是否够新（复制偏移量接近本节点）
-    // 这里简化处理：直接批准投票
-    // TODO: 实际应该比较 offset 与 master_repl_offset_
+    // 验证复制偏移量：副本的数据必须足够新
+    int64_t master_offset = ReplicationMgr::instance().get_master_repl_offset();
+    int node_timeout = Config::instance().clusterNodeTimeout();
+    int validity_factor = Config::instance().clusterReplicaValidityFactor();
+    int64_t max_lag = static_cast<int64_t>(node_timeout) * validity_factor;
+
+    if (offset < master_offset - max_lag) {
+        LOG_WARN(CLUSTER, "Rejecting auth request from %s: offset %ld too far behind master %ld (max_lag=%ld)",
+                 replica_name.c_str(), offset, master_offset, max_lag);
+        return false;
+    }
 
     // 记录投票
     my_node_->addVote(replica_name, epoch, offset);
     my_node_->setFailoverEpoch(epoch);
 
-    LOG_INFO(CLUSTER, "Granted vote to %s for failover (epoch=%ld, offset=%ld)",
-             replica_name.c_str(), epoch, offset);
+    LOG_INFO(CLUSTER, "Granted vote to %s for failover (epoch=%ld, offset=%ld, master_offset=%ld)",
+             replica_name.c_str(), epoch, offset, master_offset);
     return true;
 }
 
@@ -825,15 +914,15 @@ void ClusterServer::broadcastFailoverUpdate() {
     GossipMsg msg;
     msg.type = GossipType::kPush;  // 使用 kPush 作为 UPDATE
     msg.sender_name = getMyNodeName();
-    msg.sender_epoch = my_node_->getInfo().config_epoch;
+    msg.sender_epoch = static_cast<uint64_t>(my_node_->getInfo().config_epoch);
 
     GossipNodeInfo info;
     info.name = my_node_->getName();
     info.ip = my_node_->getInfo().ip;
-    info.port = my_node_->getInfo().port;
-    info.flags = my_node_->getFlags();
+    info.port = static_cast<uint16_t>(my_node_->getInfo().port);
+    info.flags = static_cast<uint16_t>(my_node_->getFlags());
     info.role = my_node_->isMaster() ? 0 : 1;
-    info.epoch = my_node_->getInfo().config_epoch;
+    info.epoch = static_cast<uint64_t>(my_node_->getInfo().config_epoch);
 
     const auto& slots = my_node_->getSlots();
     info.slot_count = static_cast<uint16_t>(std::min(slots.size(), static_cast<size_t>(16384)));
