@@ -77,6 +77,12 @@ public:
     // 发送 RDB 文件给副本
     bool send_rdb_to_replica(const std::string& replica_name);
 
+    // 通过 cluster bus 发送复制命令给指定副本
+    bool send_replication_msg(const std::string& replica_name, const std::string& cmd_line);
+
+    // 处理收到的复制命令（副本端调用）
+    void handle_replication_command(const std::string& cmd_line);
+
     // 更新副本的确认偏移量
     void update_replica_ack_offset(const std::string& replica_name, int64_t offset);
 

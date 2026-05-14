@@ -48,7 +48,7 @@ namespace cc_server {
             instance.callbacks_[signal_num]();
         } else {
             // 没有注册回调，记录日志后忽略
-            LOG_ERROR(signal, "收到未处理的信号: %d", signal_num);
+            fprintf(stderr, "收到未处理的信号: %d\n", signal_num);
         }
     }
 
@@ -193,29 +193,20 @@ namespace cc_server {
      * - 使用 _exit(1) 直接终止进程
      */
     void SignalHandler::printStackTrace() {
-        // 1. 打印分隔线
-        LOG_ERROR(signal, "========================================");
-        LOG_ERROR(signal, "SIGSEGV 捕获！正在打印堆栈...");
-        LOG_ERROR(signal, "========================================");
+        fprintf(stderr, "\n");
+        fprintf(stderr, "========================================\n");
+        fprintf(stderr, "SIGSEGV caught! Printing stack trace...\n");
+        fprintf(stderr, "========================================\n");
 
-        // 2. 获取并打印堆栈
         auto stack = getStackTrace();
         for (const auto& frame : stack) {
-            LOG_ERROR(signal, "%s", frame.c_str());
+            fprintf(stderr, "%s\n", frame.c_str());
         }
 
-        // 3. 打印分隔线
-        LOG_ERROR(signal, "========================================");
-        LOG_ERROR(signal, "进程即将终止，请检查上方堆栈定位问题");
-        LOG_ERROR(signal, "========================================");
+        fprintf(stderr, "========================================\n");
+        fprintf(stderr, "Process terminating. Check the stack trace above.\n");
+        fprintf(stderr, "========================================\n");
 
-        // 4. 紧急退出
-        //
-        // 为什么用 _exit() 而不是 exit()？
-        // - exit() 会调用 atexit() 回调、刷新缓冲区、关闭文件描述符
-        //   这些操作在信号处理上下文中可能引发新的信号，导致死锁
-        // - _exit() 直接终止进程，不做任何清理
-        //   在这里我们是紧急情况，不需要优雅退出
         _exit(1);
     }
 
@@ -249,22 +240,7 @@ namespace cc_server {
 
         if (size > 0) {
             fprintf(stderr, "调用堆栈:\n");
-
-            // backtrace_symbols_fd 直接输出到 fd，不需要额外的字符串处理
-            // 但输出格式比较简陋，所以我们还是用 backtrace_symbols
-            char** symbols = backtrace_symbols(buffer, size);
-            if (symbols) {
-                // 从 index = 1 开始，跳过当前函数
-                for (int i = 1; i < size; i++) {
-                    fprintf(stderr, "  #%d  %s\n", i - 1, symbols[i]);
-                }
-                free(symbols);
-            } else {
-                // fallback：只用地址
-                for (int i = 1; i < size; i++) {
-                    fprintf(stderr, "  #%d  %p\n", i - 1, buffer[i]);
-                }
-            }
+            backtrace_symbols_fd(buffer, size, STDERR_FILENO);
         } else {
             fprintf(stderr, "  (无堆栈信息)\n");
         }

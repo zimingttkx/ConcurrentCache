@@ -230,8 +230,7 @@ void FileSink::cleanup() {
  * - defaultModule_ = "MAIN"：默认模块名
  */
 Logger::Logger()
-    : level_(LogLevel::INFO)
-    , maxFileSize_(100 * 1024 * 1024)
+    : maxFileSize_(100 * 1024 * 1024)
     , maxFiles_(5)
     , defaultModule_("MAIN")
 {
@@ -299,8 +298,7 @@ Logger& Logger::instance() {
  * - 加锁保证可见性
  */
 void Logger::setLevel(LogLevel level) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    level_ = level;
+    level_.store(level, std::memory_order_release);
 }
 
 /**
@@ -426,9 +424,8 @@ std::string Logger::formatMessage(const char* module, LogLevel level, const std:
  * 4. 通知后台线程
  */
 void Logger::log(const char* module, LogLevel level, const char* fmt, ...) {
-    // 级别过滤
-    // 如果 level < level_，说明级别太低，忽略
-    if (level < level_) return;
+    // 级别过滤 (原子读取，无锁)
+    if (level < level_.load(std::memory_order_acquire)) return;
 
     // 格式化
 
@@ -459,8 +456,8 @@ void Logger::log(const char* module, LogLevel level, const char* fmt, ...) {
  * @brief 主日志写入函数（兼容旧接口，无模块）
  */
 void Logger::log(LogLevel level, const char* fmt, ...) {
-    // 级别过滤
-    if (level < level_) return;
+    // 级别过滤 (原子读取，无锁)
+    if (level < level_.load(std::memory_order_acquire)) return;
 
     // 格式化
     char buffer[4096];
@@ -531,8 +528,15 @@ void Logger::writerThread() {
             continue;           // 否则继续等待
         }
 
-        // 遍历所有 Sink，批量写入
-        for (auto& sink : sinks_) {
+        // 在锁外复制 sinks_ 快照，避免数据竞争
+        std::vector<std::shared_ptr<Sink>> sinks_snapshot;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            sinks_snapshot = sinks_;
+        }
+
+        // 遍历 sink 快照，批量写入
+        for (auto& sink : sinks_snapshot) {
             for (const auto& msg : batch) {
                 sink->write(msg);
             }

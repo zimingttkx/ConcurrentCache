@@ -5,6 +5,16 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
+option(ENABLE_TSAN "Enable ThreadSanitizer" OFF)
+option(ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
+
+if(ENABLE_TSAN AND ENABLE_ASAN)
+    message(FATAL_ERROR "AddressSanitizer and ThreadSanitizer cannot be enabled simultaneously")
+endif()
+
+set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g")
+
 # 包含头文件目录
 include_directories(${PROJECT_SOURCE_DIR}/src)
 
@@ -80,6 +90,7 @@ set(CLUSTER_SOURCES
     src/cluster/cluster_connection.cpp
     src/cluster/cluster_gossip.cpp
     src/cluster/replication_mgr.cpp
+    src/cluster/cluster_bus.cpp
 )
 
 # ========== 主程序 ==========
@@ -106,7 +117,25 @@ endif()
 if(MSVC)
     target_compile_options(concurrentcache-server PRIVATE /W4 /WX)
 else()
-    target_compile_options(concurrentcache-server PRIVATE -Wall -Wextra -Werror -pedantic)
+    target_compile_options(concurrentcache-server PRIVATE
+        -Wall -Wextra -Werror
+        -Wconversion -Wshadow -Wsign-conversion -Wdouble-promotion)
+endif()
+
+# ========== Sanitizer 标志 ==========
+if(ENABLE_ASAN)
+    target_compile_options(concurrentcache-server PRIVATE -fsanitize=address -fno-omit-frame-pointer)
+    target_link_options(concurrentcache-server PRIVATE -fsanitize=address -fno-omit-frame-pointer)
+endif()
+
+if(ENABLE_TSAN)
+    target_compile_options(concurrentcache-server PRIVATE -fsanitize=thread -fno-omit-frame-pointer)
+    target_link_options(concurrentcache-server PRIVATE -fsanitize=thread -fno-omit-frame-pointer)
+endif()
+
+if(ENABLE_UBSAN)
+    target_compile_options(concurrentcache-server PRIVATE -fsanitize=undefined -fno-omit-frame-pointer)
+    target_link_options(concurrentcache-server PRIVATE -fsanitize=undefined -fno-omit-frame-pointer)
 endif()
 
 # ========== 测试子目录 ==========

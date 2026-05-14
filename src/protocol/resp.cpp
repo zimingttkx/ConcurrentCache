@@ -167,7 +167,7 @@ bool RespParser::has_complete_command(const Buffer* buffer) {
             // crlf 指向 \r\n 的 \r
             // 所以长度字符串是 [data+1, crlf)
 
-            std::string len_str(data + 1, crlf - (data + 1));
+            std::string len_str(data + 1, static_cast<size_t>(crlf - (data + 1)));
 
             // std::stoll() - "String TO Long Long"
             // 将字符串转换为 64 位整数
@@ -194,8 +194,8 @@ bool RespParser::has_complete_command(const Buffer* buffer) {
             // $<len>\r\n = (crlf - data) + 2 字节
             // <content>\r\n = bulk_len + 2 字节
 
-            size_t header_len = (crlf - data) + 2;  // "$<len>\r\n" 的长度
-            size_t total_len = header_len + bulk_len + 2;  // 完整命令长度
+            size_t header_len = static_cast<size_t>(crlf - data) + 2;  // "$<len>\r\n" 的长度
+            size_t total_len = header_len + static_cast<size_t>(bulk_len) + 2;  // 完整命令长度
 
             return len >= total_len;  // 比较数据长度是否足够
         }
@@ -210,7 +210,7 @@ bool RespParser::has_complete_command(const Buffer* buffer) {
             if (!crlf) return false;
 
             // 解析数组元素个数
-            std::string count_str(data + 1, crlf - (data + 1));
+            std::string count_str(data + 1, static_cast<size_t>(crlf - (data + 1)));
             int64_t count = std::stoll(count_str);
 
             // 空数组（count = 0）或 null 数组（count < 0）
@@ -223,7 +223,7 @@ bool RespParser::has_complete_command(const Buffer* buffer) {
             // 检查数组元素是否完整
             
             // 跳过 *<count>\r\n，开始检查每个元素
-            size_t pos = (crlf - data) + 2;
+            size_t pos = static_cast<size_t>(crlf - data) + 2;
 
             for (int64_t i = 0; i < count; ++i) {
                 // 如果已经到达数据末尾，说明最后一个元素不完整
@@ -239,21 +239,21 @@ bool RespParser::has_complete_command(const Buffer* buffer) {
                     // 跳过类型字符和内容（找到下一个 \r\n）
                     const char* elem_crlf = find_crlf(data + pos + 1, len - pos - 1);
                     if (!elem_crlf) return false;
-                    pos = (elem_crlf - data) + 2;
+                    pos = static_cast<size_t>(elem_crlf - data) + 2;
 
                 } else if (elem_type == '$') {
                     // 批量字符串: $<len>\r\n<content>\r\n
                     const char* elem_crlf = find_crlf(data + pos + 1, len - pos - 1);
                     if (!elem_crlf) return false;
 
-                    std::string elem_len_str(data + pos + 1, elem_crlf - (data + pos + 1));
+                    std::string elem_len_str(data + pos + 1, static_cast<size_t>(elem_crlf - (data + pos + 1)));
                     int64_t elem_len = std::stoll(elem_len_str);
 
                     if (elem_len < 0) {
                         // null bulk: $-1\r\n
-                        pos = (elem_crlf - data) + 2;
+                        pos = static_cast<size_t>(elem_crlf - data) + 2;
                     } else {
-                        size_t elem_total_len = (elem_crlf - data) + 2 + elem_len + 2;
+                        size_t elem_total_len = static_cast<size_t>(elem_crlf - data) + 2 + static_cast<size_t>(elem_len) + 2;
                         if (len < elem_total_len) return false;
                         pos = elem_total_len;
                     }
@@ -453,7 +453,7 @@ bool RespParser::parse_simple_string(Buffer* buffer, std::string& out) {
     // crlf - (data + 1) 是内容的长度
     // std::string(a, n) 构造一个字符串，从 a 开始 n 个字符
 
-    out = std::string(data + 1, crlf - (data + 1));
+    out = std::string(data + 1, static_cast<size_t>(crlf - (data + 1)));
 
     
     // 跳过已解析的数据
@@ -477,7 +477,7 @@ bool RespParser::parse_simple_string(Buffer* buffer, std::string& out) {
     //   crlf - data = 3
     //   (crlf - data) + 2 = 5，正好跳过全部 5 个字节
 
-    skip(buffer, (crlf - data) + 2);
+    skip(buffer, static_cast<size_t>(crlf - data) + 2);
     return true;
 }
 
@@ -500,8 +500,8 @@ bool RespParser::parse_error(Buffer* buffer, std::string& out) {
         return false;
     }
 
-    out = std::string(data + 1, crlf - (data + 1));
-    skip(buffer, (crlf - data) + 2);
+    out = std::string(data + 1, static_cast<size_t>(crlf - (data + 1)));
+    skip(buffer, static_cast<size_t>(crlf - data) + 2);
     return true;
 }
 
@@ -527,7 +527,7 @@ bool RespParser::parse_integer(Buffer* buffer, int64_t& out) {
     // std::string(a, n) 从 a 开始 n 个字符
     // std::stoll() 将字符串转换为 long long (64位整数)
 
-    std::string num_str(data + 1, crlf - (data + 1));
+    std::string num_str(data + 1, static_cast<size_t>(crlf - (data + 1)));
 
     try {
         
@@ -545,7 +545,7 @@ bool RespParser::parse_integer(Buffer* buffer, int64_t& out) {
         return false;
     }
 
-    skip(buffer, (crlf - data) + 2);
+    skip(buffer, static_cast<size_t>(crlf - data) + 2);
     return true;
 }
 
@@ -571,11 +571,11 @@ bool RespParser::parse_bulk_string(Buffer* buffer, std::string& out) {
     }
 
     // 提取长度字符串
-    std::string len_str(data + 1, crlf - (data + 1));
+    std::string len_str(data + 1, static_cast<size_t>(crlf - (data + 1)));
     int64_t bulk_len = std::stoll(len_str);
 
     // 计算头部长度（"$<len>\r\n"）
-    size_t header_len = (crlf - data) + 2;
+    size_t header_len = static_cast<size_t>(crlf - data) + 2;
 
     
     // 第2步：处理 null bulk string
@@ -594,7 +594,7 @@ bool RespParser::parse_bulk_string(Buffer* buffer, std::string& out) {
 
     // 完整长度 = 头部长度 + 内容长度 + \r\n (2字节)
 
-    size_t total_len = header_len + bulk_len + 2;
+    size_t total_len = header_len + static_cast<size_t>(bulk_len) + 2;
 
     if (len < total_len) {
         error_msg_ = "Bulk string incomplete";
@@ -606,7 +606,7 @@ bool RespParser::parse_bulk_string(Buffer* buffer, std::string& out) {
     
     // 内容从 header_len 位置开始，长度为 bulk_len
 
-    out = std::string(data + header_len, bulk_len);
+    out = std::string(data + header_len, static_cast<size_t>(bulk_len));
 
     
     // 第5步：跳过已解析的数据
@@ -638,11 +638,11 @@ bool RespParser::parse_array(Buffer* buffer, std::vector<RespValue>& out) {
         return false;
     }
 
-    std::string count_str(data + 1, crlf - (data + 1));
+    std::string count_str(data + 1, static_cast<size_t>(crlf - (data + 1)));
     int64_t count = std::stoll(count_str);
 
     // 跳过 *<count>\r\n
-    skip(buffer, (crlf - data) + 2);
+    skip(buffer, static_cast<size_t>(crlf - data) + 2);
 
     
     // 第2步：处理 null 数组

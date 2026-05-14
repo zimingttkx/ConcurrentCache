@@ -171,29 +171,18 @@ void Mutex::unlock() {
 SpinLock::SpinLock() = default;
 
 void SpinLock::lock() {
-    // 首先尝试一次获取锁（最常见情况）
-    if (try_lock()) {
-        return;
-    }
-
-    // 退避策略参数
+    if (try_lock()) return;
     int spin_count = 1;
-    constexpr int max_spins_before_yield = 1000;
-
-    // 指数退避循环
-    do {
-        for (int i = 0; i < spin_count; ++i) {
-            CPU_PAUSE();
+    constexpr int max_spins_before_yield = 64;
+    while (true) {
+        for (int i = 0; i < spin_count; ++i) CPU_PAUSE();
+        if (try_lock()) return;
+        spin_count = std::min(spin_count * 2, max_spins_before_yield);
+        if (spin_count >= max_spins_before_yield) {
+            std::this_thread::yield();
+            spin_count = 1;  // reset backoff after yielding
         }
-        if (try_lock()) {
-            return;
-        }
-        // 指数增加等待次数，上限64
-        spin_count = std::min(spin_count * 2, 64);
-    } while (spin_count < max_spins_before_yield);
-
-    // 超过最大自旋次数，让出CPU
-    std::this_thread::yield();
+    }
 }
 
 bool SpinLock::try_lock() {
@@ -355,14 +344,17 @@ bool RWLock2::try_write_lock() {
 }
 
 int RWLock2::num_readers() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     return readers_;
 }
 
 bool RWLock2::has_writer_active() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     return writer_active_;
 }
 
 int RWLock2::num_writers_waiting() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     return writers_waiting_;
 }
 
@@ -549,13 +541,17 @@ bool CountDownLatch::wait_for(const std::chrono::duration<Rep, Period>& duration
 }
 
 void CountDownLatch::count_down() {
+    bool should_notify = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (count_ > 0) {
             count_--;
         }
+        if (count_ == 0) {
+            should_notify = true;
+        }
     }
-    if (count_ == 0) {
+    if (should_notify) {
         cv_.notify_all();
     }
 }
@@ -670,8 +666,8 @@ template class WriteLockGuard<RWLock2>;
 
 // 显式实例化 Mutex 的 try_lock_for 和 try_lock_until
 template bool Mutex::try_lock_for<long, std::ratio<1l, 1000l>>(const std::chrono::duration<long, std::ratio<1l, 1000l>>&);
-template bool Mutex::try_lock_until<std::chrono::_V2::steady_clock, std::chrono::duration<long, std::ratio<1l, 1000000000l>>>(
-    const std::chrono::time_point<std::chrono::_V2::steady_clock, std::chrono::duration<long, std::ratio<1l, 1000000000l>>>&);
+template bool Mutex::try_lock_until<std::chrono::steady_clock, std::chrono::duration<long, std::ratio<1l, 1000000000l>>>(
+    const std::chrono::time_point<std::chrono::steady_clock, std::chrono::duration<long, std::ratio<1l, 1000000000l>>>&);
 
 // 显式实例化 RWLock 的 try_read_lock_for 和 try_write_lock_for
 template bool RWLock::try_read_lock_for<long, std::ratio<1l, 1000l>>(const std::chrono::duration<long, std::ratio<1l, 1000l>>&);

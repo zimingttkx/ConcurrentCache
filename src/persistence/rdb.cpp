@@ -725,7 +725,7 @@ uint32_t RdbPersistence::calculate_crc32_for_range(long end_pos) {
         clearerr(file_);
     }
 
-    uint32_t crc = crc32(0L, Z_NULL, 0);
+    uLong crc = crc32(0L, Z_NULL, 0);
     uint8_t buf[4096];
 
     size_t total_read = 0;
@@ -742,7 +742,7 @@ uint32_t RdbPersistence::calculate_crc32_for_range(long end_pos) {
             break;
         }
         crc = crc32(crc, buf, static_cast<uInt>(len));
-        crc_len -= len;
+        crc_len -= static_cast<long>(len);
         total_read += len;
     }
 
@@ -752,7 +752,7 @@ uint32_t RdbPersistence::calculate_crc32_for_range(long end_pos) {
     // 恢复文件指针位置
     fseek(file_, current_pos, SEEK_SET);
 
-    return crc;
+    return static_cast<uint32_t>(crc);
 }
 
 }  // namespace cc_server

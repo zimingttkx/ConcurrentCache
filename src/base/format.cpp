@@ -82,7 +82,8 @@ std::string Format::timestamp() {
 
     // std::put_time：类似 strftime，但线程安全
     // %Y-%m-%d %H:%M:%S 输出 "2026-04-24 15:30:00"
-    oss << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S");
+    struct tm tm_local;
+    oss << std::put_time(localtime_r(&time_t, &tm_local), "%Y-%m-%d %H:%M:%S");
 
     // 追加毫秒部分
     // setfill('0') 和 setw(3)：保证3位数字，123→".123" 而不是 ".23"

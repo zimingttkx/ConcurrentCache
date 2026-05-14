@@ -138,9 +138,9 @@ namespace cc_server {
 
         // 取前 n 个作为候选
         std::vector<std::string> candidates;
-        candidates.reserve(n);
+        candidates.reserve(static_cast<size_t>(n));
         int max_count = std::min(n, static_cast<int>(all_keys.size()));
-        for (int i = 0; i < max_count; ++i) {
+        for (size_t i = 0; i < static_cast<size_t>(max_count); ++i) {
             candidates.push_back(all_keys[i]);
         }
 

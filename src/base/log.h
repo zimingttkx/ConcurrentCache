@@ -354,7 +354,7 @@ private:
 
     // 成员变量
 
-    LogLevel level_;                    // 日志级别阈值
+    std::atomic<LogLevel> level_{LogLevel::INFO};  // 日志级别阈值 (atomic for lock-free reads)
     size_t maxFileSize_;                // 单文件最大字节数
     int maxFiles_;                      // 最大历史文件数
 

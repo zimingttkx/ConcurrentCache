@@ -10,6 +10,10 @@ namespace cc_server {
           wakeup_fd_(-1),         // 一开始没有pipe，初始化-1
           last_config_check_time_(time(nullptr)){          // 默认不退出
 
+        // 0. 初始化 wakeup_pipe_ 为无效值，确保析构函数中的 close 检查正确
+        wakeup_pipe_[0] = -1;
+        wakeup_pipe_[1] = -1;
+
         // 1. 创建 epoll 实例
         // epoll_create1(0) = 雇一个"前台"
         // 返回值：成功 = epoll的文件描述符（>=0），失败 = -1
@@ -41,7 +45,7 @@ namespace cc_server {
         }
 
         // 4. 预分配事件数组，避免每次 loop 都分配内存
-        events_.resize(1024);
+        events_.resize(65536);
 
         LOG_INFO(event_loop, "EventLoop created successfully");
     }
@@ -131,7 +135,7 @@ namespace cc_server {
             }
 
             // n > 0 : 有 n 个人来了，遍历处理
-            for (int i = 0; i < n; ++i) {
+            for (size_t i = 0; i < static_cast<size_t>(n); ++i) {
                 int fd = events_[i].data.fd;  // 看看是谁的 fd
 
                 // 如果是内部电话（wakeup pipe），说明被其他线程唤醒了
@@ -141,6 +145,14 @@ namespace cc_server {
                 }
 
                 // 找对应的 Channel（需要加锁保护）
+                //
+                // 设计说明：Channel 指针在释放锁后仍被使用。
+                // 这是安全的，因为：
+                // 1. EventLoop 本身只会被一个线程调用（注释见 event_loop.h），
+                //    channels_ 的插入和删除也在该线程完成（update_channel/
+                //    remove_channel 均由 EventLoop 线程调用）。
+                // 2. Channel 的生命周期由其所有者（Connection / listen_channel_）
+                //    保证，不会在 handle_event 执行期间被意外销毁。
                 Channel* channel = nullptr;
                 {
                     std::lock_guard<std::mutex> lock(channels_mutex_);

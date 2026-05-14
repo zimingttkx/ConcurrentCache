@@ -32,6 +32,7 @@ set(COMMON_SOURCES
     ${CMAKE_SOURCE_DIR}/src/cluster/cluster_connection.cpp
     ${CMAKE_SOURCE_DIR}/src/cluster/cluster_gossip.cpp
     ${CMAKE_SOURCE_DIR}/src/cluster/replication_mgr.cpp
+    ${CMAKE_SOURCE_DIR}/src/cluster/cluster_bus.cpp
     ${CMAKE_SOURCE_DIR}/src/command/cluster_cmd.cpp
     ${CMAKE_SOURCE_DIR}/src/command/restore_cmd.cpp
 )
@@ -151,7 +152,40 @@ else()
                       lock-deadlock-tests lock-race-tests lock-boundary-tests
                       sync-primitives-tests stress-test long-running-stress-test
                       load-limit-test network-stress-test cluster-tests)
-        target_compile_options(${test_target} PRIVATE -Wall -Wextra)
+        target_compile_options(${test_target} PRIVATE
+            -Wall -Wextra
+            -Wconversion -Wshadow -Wsign-conversion -Wdouble-promotion)
+    endforeach()
+endif()
+
+# ========== Sanitizer 标志 ==========
+if(ENABLE_ASAN)
+    foreach(test_target concurrentcache-v3-tests atomic-tests lock-correctness-tests
+                      lock-deadlock-tests lock-race-tests lock-boundary-tests
+                      sync-primitives-tests stress-test long-running-stress-test
+                      load-limit-test network-stress-test cluster-tests)
+        target_compile_options(${test_target} PRIVATE -fsanitize=address -fno-omit-frame-pointer)
+        target_link_options(${test_target} PRIVATE -fsanitize=address -fno-omit-frame-pointer)
+    endforeach()
+endif()
+
+if(ENABLE_TSAN)
+    foreach(test_target concurrentcache-v3-tests atomic-tests lock-correctness-tests
+                      lock-deadlock-tests lock-race-tests lock-boundary-tests
+                      sync-primitives-tests stress-test long-running-stress-test
+                      load-limit-test network-stress-test cluster-tests)
+        target_compile_options(${test_target} PRIVATE -fsanitize=thread -fno-omit-frame-pointer)
+        target_link_options(${test_target} PRIVATE -fsanitize=thread -fno-omit-frame-pointer)
+    endforeach()
+endif()
+
+if(ENABLE_UBSAN)
+    foreach(test_target concurrentcache-v3-tests atomic-tests lock-correctness-tests
+                      lock-deadlock-tests lock-race-tests lock-boundary-tests
+                      sync-primitives-tests stress-test long-running-stress-test
+                      load-limit-test network-stress-test cluster-tests)
+        target_compile_options(${test_target} PRIVATE -fsanitize=undefined -fno-omit-frame-pointer)
+        target_link_options(${test_target} PRIVATE -fsanitize=undefined -fno-omit-frame-pointer)
     endforeach()
 endif()
 
