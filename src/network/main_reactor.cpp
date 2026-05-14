@@ -42,18 +42,18 @@ bool MainReactor::init(int port) {
     // 步骤3：注册到EventLoop
     loop_->update_channel(listen_channel_.get());
 
-    initialized_ = true;
+    initialized_.store(true, std::memory_order_release);
     LOG_INFO(NETWORK, "MainReactor initialized, listening on port %d", port);
     return true;
 }
 
 void MainReactor::start() {
-    if (!initialized_) {
+    if (!initialized_.load(std::memory_order_acquire)) {
         LOG_ERROR(NETWORK, "MainReactor not initialized, cannot start");
         return;
     }
 
-    running_ = true;
+    running_.store(true, std::memory_order_release);
     LOG_INFO(NETWORK, "MainReactor starting...");
 
     // 启动事件循环（阻塞）
@@ -61,11 +61,11 @@ void MainReactor::start() {
 }
 
 void MainReactor::stop() {
-    if (!running_) {
+    if (!running_.load(std::memory_order_acquire)) {
         return;
     }
 
-    running_ = false;
+    running_.store(false, std::memory_order_release);
     loop_->quit();
 }
 

@@ -22,7 +22,7 @@ namespace cc_server {
 
     // 淘汰策略配置
     struct EvictionConfig {
-        static constexpr size_t kMaxEntries = 200000; // 最大键数量
+        static constexpr size_t kMaxEntries = 2000000; // 最大键数量
         static constexpr double kEvictThreshold = 0.9; // 淘汰触发阈值（占用率）
         static constexpr double kEvictTargetRatio = 0.6; // 淘汰目标占用率（留出 40% 空间）
     };

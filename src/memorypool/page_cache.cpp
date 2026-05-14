@@ -77,7 +77,7 @@ Span* PageCache::allocate_span(size_t num_pages) {
     }
 
     // 步骤3：真的没有，向系统申请
-    size_t page_size = getpagesize();  // 通常是4096字节（4KB）
+    size_t page_size = static_cast<size_t>(getpagesize());  // 通常是4096字节（4KB）
     size_t bytes = num_pages * page_size;
 
     void* ptr = mmap(nullptr,                    // nullptr：让系统选择地址

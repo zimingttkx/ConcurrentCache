@@ -3,6 +3,8 @@
 #include <thread>
 #include <chrono>
 #include <atomic>
+#include <unistd.h>
+#include <sys/resource.h>
 #include "src/base/log.h"
 #include "src/base/config.h"
 #include "src/base/signal.h"
@@ -24,26 +26,41 @@ std::atomic<bool> g_running{true};
 SubReactorPool* g_sub_reactor_pool = nullptr;
 MainReactor* g_main_reactor = nullptr;
 
-// 信号处理函数
+// 信号处理函数 — 必须是 async-signal-safe
+// 只能做: atomic flag 设置, write(), _exit()
 void signal_handler(int sig) {
+    (void)sig; // 参数仅在回调签名中需要，未使用
     if (!g_running.exchange(false)) {
         return; // 已经在处理退出了
     }
-    std::cout << "\n[信号处理] 收到信号 " << sig << "，开始优雅退出..." << std::endl;
+    // write() 到 STDERR_FILENO 是 async-signal-safe
+    const char* msg = "\n[信号处理] 收到信号，开始优雅退出...\n";
+    [[maybe_unused]] ssize_t _unused = write(STDERR_FILENO, msg, strlen(msg));
 
-    // 唤醒 MainReactor 让它退出
+    // EventLoop::quit() 只做 atomic store — 信号安全
     if (g_main_reactor) {
         g_main_reactor->event_loop()->quit();
     }
 }
 
 int main() {
+    // 0. 提升文件描述符上限（高并发必须）
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
+        rl.rlim_cur = rl.rlim_max > 65535 ? 65535 : rl.rlim_max;
+        if (setrlimit(RLIMIT_NOFILE, &rl) != 0) {
+            std::cerr << "[主线程] 警告: 无法提升 fd 上限" << std::endl;
+        }
+    }
     std::cout << "========================================" << std::endl;
     std::cout << "   ConcurrentCache 高并发内存缓存服务器   " << std::endl;
     std::cout << "           Version 3.0 (RDB Persist)       " << std::endl;
     std::cout << "========================================" << std::endl;
 
-    // 1. 初始化信号系统（最先初始化，处理 SIGINT/SIGTERM 实现优雅退出）
+    // 1. 注册信号处理器（必须在其他组件之前，防止初始化期间收到信号无法处理）
+    std::signal(SIGINT, signal_handler);
+    std::signal(SIGTERM, signal_handler);
+    // 初始化内部信号系统（SIGPIPE忽略, SIGSEGV堆栈捕获）
     SignalHandler::getInstance().init();
     std::cout << "[主线程] 信号系统初始化完成" << std::endl;
 
@@ -79,12 +96,12 @@ int main() {
 
     // 5. 初始化 SubReactorPool（多线程处理 I/O 事件）
     // 必须先于 ThreadPool 初始化，因为 MainReactor 会用到
-    SubReactorPool::instance().init(reactor_count);
+    SubReactorPool::instance().init(static_cast<size_t>(reactor_count));
     g_sub_reactor_pool = &SubReactorPool::instance();
     std::cout << "[主线程] SubReactorPool 初始化完成" << std::endl;
 
     // 6. 初始化通用线程池（用于异步任务处理）
-    static ThreadPool thread_pool(thread_pool_size);
+    ThreadPool thread_pool(static_cast<size_t>(thread_pool_size));
     std::cout << "[主线程] 通用线程池创建完成 (" << thread_pool_size << " 工作线程)" << std::endl;
 
     // 7. 启动 SubReactorPool
@@ -101,11 +118,7 @@ int main() {
         std::cout << "[主线程] MainReactor 初始化完成，监听端口 " << port << std::endl;
     }
 
-    // 9. 注册信号处理回调（使用自定义信号处理函数）
-    std::signal(SIGINT, signal_handler);
-    std::signal(SIGTERM, signal_handler);
-
-    // 10. 加载 RDB 持久化文件（必须在 ExpirationChecker 启动之前，避免并发访问）
+    // 9. 加载 RDB 持久化文件（必须在 ExpirationChecker 启动之前，避免并发访问）
     auto& rdb = RdbPersistence::instance();
     std::string rdb_path = Config::instance().getString("rdb_path", "./dump.rdb");
     if (rdb.load(rdb_path, GlobalStorage::instance())) {
@@ -114,12 +127,12 @@ int main() {
         std::cout << "[主线程] 无 RDB 文件或加载失败，将从空存储开始" << std::endl;
     }
 
-    // 10.1 设置集群的 EventLoop（在集群初始化之前）
+    // 9.1 设置集群的 EventLoop（在集群初始化之前）
     if (g_main_reactor) {
         ClusterServer::instance().set_event_loop(g_main_reactor->event_loop());
     }
 
-    // 11. 初始化集群（如果启用）
+    // 10. 初始化集群（如果启用）
     ClusterServer::instance().init();
     if (ClusterServer::instance().isEnabled()) {
         std::cout << "[主线程] 集群模块初始化完成" << std::endl;
@@ -164,7 +177,7 @@ int main() {
         main_reactor.start();
     }
 
-    // 14. 优雅退出流程
+    // 15. 优雅退出流程
     std::cout << "\n[主线程] 开始关闭服务器..." << std::endl;
 
     // 停止 RDB 自动保存调度器
@@ -179,10 +192,6 @@ int main() {
     main_reactor.stop();
     std::cout << "[主线程] MainReactor 已停止" << std::endl;
 
-    // 停止线程池
-    thread_pool.stop();
-    std::cout << "[主线程] 线程池已停止" << std::endl;
-
     // 停止过期键检查器
     expiration_checker.stop();
     std::cout << "[主线程] 过期键检查器已停止" << std::endl;
@@ -190,6 +199,10 @@ int main() {
     // 停止集群
     ClusterServer::instance().stop();
     std::cout << "[主线程] 集群已停止" << std::endl;
+
+    // 停止线程池（必须最后停止，其他组件可能有任务在队列中）
+    thread_pool.stop();
+    std::cout << "[主线程] 线程池已停止" << std::endl;
 
     // 15. 保存 RDB 持久化文件（优雅退出时自动保存）
     if (rdb.save(rdb_path, GlobalStorage::instance())) {

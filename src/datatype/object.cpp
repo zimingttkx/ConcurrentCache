@@ -54,7 +54,12 @@ bool CacheObject::list_push(const std::string& val, bool front) {
         LOG_WARN(kModule, "list_push - object is not LIST");
         return false;
     }
-    type_ = ObjectType::LIST;
+    if (type_ == ObjectType::STRING) {
+        std::string old_val = std::move(string_val_);
+        type_ = ObjectType::LIST;
+        list_val_.clear();
+        list_val_.push_back(std::move(old_val));
+    }
     if (front) {
         list_val_.insert(list_val_.begin(), val);
     } else {
@@ -113,7 +118,7 @@ std::optional<std::string> CacheObject::list_get(long long index) const {
         LOG_WARN(kModule, "list_get - index %lld out of range %zu", actual_index, size);
         return std::nullopt;
     }
-    return list_val_[actual_index];
+    return list_val_[static_cast<size_t>(actual_index)];
 }
 
 std::vector<std::string> CacheObject::list_range(long long start, long long stop) const {
@@ -388,12 +393,15 @@ std::string CacheObject::serialize() const {
     switch (type_) {
         case ObjectType::STRING: {
             // 格式：STRING\n<value>
-            result = "STRING\n" + string_val_;
+            result += "STRING\n";
+            result += string_val_;
             break;
         }
         case ObjectType::LIST: {
             // 格式：LIST\n<size>\n<element1>\n<element2>\n...
-            result = "LIST\n" + std::to_string(list_val_.size()) + "\n";
+            result += "LIST\n";
+            result += std::to_string(list_val_.size());
+            result += "\n";
             for (const auto& elem : list_val_) {
                 result += elem + "\n";
             }
@@ -401,7 +409,9 @@ std::string CacheObject::serialize() const {
         }
         case ObjectType::HASH: {
             // 格式：HASH\n<size>\n<field1>\n<value1>\n<field2>\n<value2>\n...
-            result = "HASH\n" + std::to_string(hash_val_.size()) + "\n";
+            result += "HASH\n";
+            result += std::to_string(hash_val_.size());
+            result += "\n";
             for (const auto& [k, v] : hash_val_) {
                 result += k + "\n" + v + "\n";
             }
@@ -409,7 +419,9 @@ std::string CacheObject::serialize() const {
         }
         case ObjectType::SET: {
             // 格式：SET\n<size>\n<member1>\n<member2>\n...
-            result = "SET\n" + std::to_string(set_val_.size()) + "\n";
+            result += "SET\n";
+            result += std::to_string(set_val_.size());
+            result += "\n";
             for (const auto& m : set_val_) {
                 result += m + "\n";
             }
@@ -417,7 +429,9 @@ std::string CacheObject::serialize() const {
         }
         case ObjectType::ZSET: {
             // 格式：ZSET\n<size>\n<member1>\n<score1>\n<member2>\n<score2>\n...
-            result = "ZSET\n" + std::to_string(zset_val_.size()) + "\n";
+            result += "ZSET\n";
+            result += std::to_string(zset_val_.size());
+            result += "\n";
             for (const auto& z : zset_val_) {
                 result += z.member + "\n" + std::to_string(z.score) + "\n";
             }

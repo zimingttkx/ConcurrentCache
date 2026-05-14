@@ -33,6 +33,11 @@ namespace cc_server {
     // - bind() 绑定端口
     // - listen() 开始监听
     bool Socket::bind_and_listen(int port, bool reuse) {
+        // 避免 fd 泄漏：如果已经持有一个有效 fd，先关闭
+        if (fd_ >= 0) {
+            ::close(fd_);
+            fd_ = -1;
+        }
         fd_ = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
         if (fd_ < 0) {
             LOG_ERROR(socket, "Socket() create failed: %s", strerror(errno));
@@ -42,12 +47,15 @@ namespace cc_server {
         if (reuse) {
             int opt = 1;
             setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+#ifdef SO_REUSEPORT
+            setsockopt(fd_, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+#endif
         }
 
         sockaddr_in server_addr{};
         server_addr.sin_family = AF_INET;
         server_addr.sin_addr.s_addr = INADDR_ANY;
-        server_addr.sin_port = htons(port);
+        server_addr.sin_port = htons(static_cast<uint16_t>(port));
 
         if (bind(fd_, reinterpret_cast<sockaddr*>(&server_addr), sizeof(server_addr)) < 0) {
             LOG_ERROR(socket, "Bind() port %d failed: %s", port, strerror(errno));
@@ -55,7 +63,9 @@ namespace cc_server {
             return false;
         }
 
-        if (listen(fd_, 1024) < 0) {
+        // 使用较大的 backlog 以支持高并发连接
+        int backlog = SOMAXCONN > 4096 ? SOMAXCONN : 4096;
+        if (listen(fd_, backlog) < 0) {
             LOG_ERROR(socket, "Listen() port %d failed: %s", port, strerror(errno));
             close();
             return false;

@@ -116,6 +116,88 @@ namespace cc_server {
     };
 
     /**
+     * @brief IncrCommand - INCR 命令实现
+     *
+     * INCR 命令：对指定 key 的值进行原子加 1
+     * 语法：INCR key
+     * 返回：递增后的整数值
+     */
+    class IncrCommand : public Command {
+    public:
+        std::string execute(const std::vector<std::string>& args) override {
+            if (args.size() != 2) {
+                return RespEncoder::encode_error("ERR wrong number of arguments for 'incr' command");
+            }
+
+            const std::string& key = args[1];
+            auto& storage = GlobalStorage::instance();
+            auto opt = storage.get(key);
+
+            int64_t val = 0;
+            if (opt.has_value()) {
+                auto str_val = opt.value().get_string();
+                if (!str_val.has_value()) {
+                    return RespEncoder::encode_error("ERR value is not an integer");
+                }
+                try {
+                    val = std::stoll(str_val.value());
+                } catch (...) {
+                    return RespEncoder::encode_error("ERR value is not an integer");
+                }
+            }
+
+            val++;
+            storage.set(key, CacheObject(std::to_string(val)));
+            return RespEncoder::encode_integer(val);
+        }
+
+        [[nodiscard]] std::unique_ptr<Command> clone() const override {
+            return std::make_unique<IncrCommand>(*this);
+        }
+    };
+
+    /**
+     * @brief DecrCommand - DECR 命令实现
+     *
+     * DECR 命令：对指定 key 的值进行原子减 1
+     * 语法：DECR key
+     * 返回：递减后的整数值
+     */
+    class DecrCommand : public Command {
+    public:
+        std::string execute(const std::vector<std::string>& args) override {
+            if (args.size() != 2) {
+                return RespEncoder::encode_error("ERR wrong number of arguments for 'decr' command");
+            }
+
+            const std::string& key = args[1];
+            auto& storage = GlobalStorage::instance();
+            auto opt = storage.get(key);
+
+            int64_t val = 0;
+            if (opt.has_value()) {
+                auto str_val = opt.value().get_string();
+                if (!str_val.has_value()) {
+                    return RespEncoder::encode_error("ERR value is not an integer");
+                }
+                try {
+                    val = std::stoll(str_val.value());
+                } catch (...) {
+                    return RespEncoder::encode_error("ERR value is not an integer");
+                }
+            }
+
+            val--;
+            storage.set(key, CacheObject(std::to_string(val)));
+            return RespEncoder::encode_integer(val);
+        }
+
+        [[nodiscard]] std::unique_ptr<Command> clone() const override {
+            return std::make_unique<DecrCommand>(*this);
+        }
+    };
+
+    /**
      * @brief DelCommand - DEL 命令实现
      *
      * DEL 命令：删除指定 key

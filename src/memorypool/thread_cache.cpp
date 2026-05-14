@@ -68,17 +68,19 @@ void ThreadCache::deallocate(void* obj, size_t size) {
 void ThreadCache::fetch_from_central(size_t class_index) {
     // 一次获取多个对象
     void* objs[256];
+    int count = 0;
 
     // 从CentralCache获取
-    for (auto & obj : objs) {
-        obj = CentralCache::get_instance().allocate(class_index);
-        if (obj == nullptr) {
+    for (int i = 0; i < 256; ++i) {
+        objs[i] = CentralCache::get_instance().allocate(class_index);
+        if (objs[i] == nullptr) {
             break;  // 获取失败
         }
+        count++;
     }
 
-    // 把获取的对象放入FreeList
-    for (int i = 1; i < 256; ++i) {  // 第一个返回给调用者
+    // 把获取的对象放入FreeList（包括objs[0]，调用者通过pop()获取）
+    for (int i = 0; i < count; ++i) {
         free_lists_[class_index].push(objs[i]);
     }
 }

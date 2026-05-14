@@ -235,7 +235,7 @@ namespace cc_server {
     void GlobalStorage::evict_if_needed(const std::string& hint_key) {
         (void)hint_key; // unused
         // 防御性检查：阈值必须有效
-        size_t threshold = static_cast<size_t>(max_entries_ * EvictionConfig::kEvictThreshold);
+        size_t threshold = static_cast<size_t>(static_cast<double>(max_entries_) * EvictionConfig::kEvictThreshold);
         assert(threshold <= max_entries_ && "GlobalStorage::evict_if_needed - threshold exceeds max");
 
         size_t current_size = size();
@@ -249,7 +249,7 @@ namespace cc_server {
                 current_size, max_entries_, threshold);
 
         // 淘汰到安全线（留出 40% 空间）
-        size_t target_size = static_cast<size_t>(max_entries_ * EvictionConfig::kEvictTargetRatio);
+        size_t target_size = static_cast<size_t>(static_cast<double>(max_entries_) * EvictionConfig::kEvictTargetRatio);
 
         // 防御性检查：目标大小必须有效
         assert(target_size < max_entries_ && "GlobalStorage::evict_if_needed - target_size invalid");

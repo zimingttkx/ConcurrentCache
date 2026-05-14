@@ -15,25 +15,10 @@ namespace cc_server {
 
 std::string PsyncCommand::execute(const std::vector<std::string>& args) {
     // PSYNC <runid> <offset>
-    // 或 PSYNC ? -1 (full sync)
+    // PSYNC ? -1 (full sync request)
 
-    // 检查是否启用集群模式
     if (!ClusterServer::instance().isEnabled()) {
         return RespEncoder::encode_error("ERR REPLICAOF is not supported in standalone mode");
-    }
-
-    // 检查本节点是否是从节点
-    if (!ClusterServer::instance().isReplica()) {
-        // 主节点收到 PSYNC：作为副本的复制请求处理
-        // TODO: 支持主节点处理 PSYNC 请求
-        LOG_WARN(CLUSTER, "PSYNC received but node is not a replica");
-        return RespEncoder::encode_error("ERR PSYNC only valid for replica nodes");
-    }
-
-    // 获取主节点信息
-    auto master = ClusterServer::instance().getMyMaster();
-    if (!master) {
-        return RespEncoder::encode_error("ERR no master defined");
     }
 
     // 解析参数
@@ -53,65 +38,49 @@ std::string PsyncCommand::execute(const std::vector<std::string>& args) {
 
     LOG_INFO(CLUSTER, "PSYNC received: runid=%s, offset=%ld", runid.c_str(), offset);
 
-    // 获取复制管理器
     auto& repl_mgr = ReplicationMgr::instance();
 
-    // 检查是否需要全量同步
-    if (runid == "?" || offset == -1) {
-        // 全量同步请求
-        LOG_INFO(CLUSTER, "Full sync requested");
+    // 分支1: 本节点是主节点 — 收到副本发来的 PSYNC 同步请求
+    if (!ClusterServer::instance().isReplica()) {
+        std::string my_runid = repl_mgr.get_master_runid();
+        int64_t my_offset = repl_mgr.get_master_repl_offset();
 
-        // 设置同步状态为等待
-        repl_mgr.set_sync_state(SyncState::kWaiting);
-
-        // 发送 RDB 数据
-        // 格式：+FULLRESYNC <runid> <offset>\r\n
-        // 然后发送 RDB 文件内容
-        std::string runid_str = repl_mgr.get_master_runid();
-        int64_t repl_offset = repl_mgr.get_master_repl_offset();
-
-        std::string response = "+FULLRESYNC " + runid_str + " " + std::to_string(repl_offset) + "\r\n";
-        LOG_INFO(CLUSTER, "Sending FULLRESYNC: runid=%s, offset=%ld", runid_str.c_str(), repl_offset);
-
-        // TODO: 实际发送 RDB 文件内容
-        // 暂时返回 CONTINUE，让复制继续进行
-        return RespEncoder::encode_simple_string("CONTINUE");
-    } else {
-        // 增量同步请求
-        LOG_INFO(CLUSTER, "Partial sync requested: runid=%s, offset=%ld", runid.c_str(), offset);
-
-        // 检查 runid 是否匹配
-        if (runid != repl_mgr.get_master_runid()) {
-            // runid 不匹配，需要全量同步
-            LOG_WARN(CLUSTER, "Runid mismatch: expected=%s, got=%s",
-                     repl_mgr.get_master_runid().c_str(), runid.c_str());
-            return RespEncoder::encode_simple_string("CONTINUE");
+        // 全量同步: runid 为 "?" 或 offset 为 -1，或 runid 不匹配
+        if (runid == "?" || offset == -1 || runid != my_runid) {
+            std::string response = "+FULLRESYNC " + my_runid + " " + std::to_string(my_offset) + "\r\n";
+            LOG_INFO(CLUSTER, "Sending FULLRESYNC to replica: runid=%s, offset=%ld",
+                     my_runid.c_str(), my_offset);
+            // RESP 简单字符串格式: +FULLRESYNC <runid> <offset>\r\n
+            // 使用 bulk string 编码以便客户端正确解析
+            return RespEncoder::encode_simple_string("FULLRESYNC " + my_runid + " " + std::to_string(my_offset));
         }
 
-        // 返回增量同步的确认
+        // 增量同步: runid 匹配
+        LOG_INFO(CLUSTER, "Partial sync: runid matches, offset=%ld, my_offset=%ld",
+                 offset, my_offset);
         return RespEncoder::encode_simple_string("CONTINUE");
     }
+
+    // 分支2: 本节点是从节点 — 收到来自主节点的 PSYNC 响应 (不常见，主节点不会主动发 PSYNC)
+    LOG_WARN(CLUSTER, "PSYNC received on replica node, ignoring");
+    return RespEncoder::encode_error("ERR PSYNC not expected on replica node");
 }
 
 std::string SyncCommand::execute(const std::vector<std::string>& args) {
     // SYNC 命令（兼容旧版 Redis，等同于 PSYNC ? -1）
-    // 简化实现：直接转发给 PSYNC 处理
-    (void)args;  // 未使用参数
+    // 直接委托给 PSYNC 全量同步逻辑
+    (void)args;
 
-    LOG_INFO(CLUSTER, "SYNC command received (legacy)");
+    LOG_INFO(CLUSTER, "SYNC command received (legacy, delegating to PSYNC)");
 
-    // 检查集群模式
     if (!ClusterServer::instance().isEnabled()) {
         return RespEncoder::encode_error("ERR SYNC not supported in standalone mode");
     }
 
-    // 如果是从节点，返回错误
-    if (ClusterServer::instance().isReplica()) {
-        return RespEncoder::encode_error("ERR SYNC invalid for replica");
-    }
-
-    // SYNC 用于从节点主动触发同步，这里简单返回
-    return RespEncoder::encode_simple_string("OK");
+    // 构建 PSYNC ? -1 参数列表，委托给 PsyncCommand
+    std::vector<std::string> psync_args = {"PSYNC", "?", "-1"};
+    PsyncCommand psync_cmd;
+    return psync_cmd.execute(psync_args);
 }
 
 std::string ReplconfCommand::execute(const std::vector<std::string>& args) {

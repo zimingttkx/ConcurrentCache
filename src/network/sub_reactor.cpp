@@ -7,6 +7,7 @@
 #include "command/command_factory.h"
 #include "protocol/resp.h"
 #include "cluster/cluster_server.h"
+#include "cluster/replication_mgr.h"
 #include <algorithm>
 #include <cctype>
 
@@ -27,14 +28,14 @@ SubReactor::~SubReactor() {
 }
 
 void SubReactor::start() {
-    if (thread_ != nullptr) {
+    if (thread_.load(std::memory_order_acquire) != nullptr) {
         return;  // 已经启动
     }
 
     // 创建独立线程运行事件循环
-    thread_ = new std::thread([this]() {
+    thread_.store(new std::thread([this]() {
         loop_->loop();
-    });
+    }), std::memory_order_release);
 }
 
 void SubReactor::stop() {
@@ -44,12 +45,13 @@ void SubReactor::stop() {
     }
 
     // 等待线程结束
-    if (thread_ != nullptr) {
-        if (thread_->joinable()) {
-            thread_->join();
+    std::thread* t = thread_.load(std::memory_order_acquire);
+    if (t != nullptr) {
+        if (t->joinable()) {
+            t->join();
         }
-        delete thread_;
-        thread_ = nullptr;
+        delete t;
+        thread_.store(nullptr, std::memory_order_release);
     }
 }
 
@@ -62,17 +64,18 @@ void SubReactor::stop_without_join() {
 
 void SubReactor::join_thread() {
     std::cout << "[SubReactor] join_thread() 被调用" << std::endl;
-    if (thread_ != nullptr) {
+    std::thread* t = thread_.load(std::memory_order_acquire);
+    if (t != nullptr) {
         std::cout << "[SubReactor] thread_ 不为 nullptr，检查 joinable" << std::endl;
-        if (thread_->joinable()) {
+        if (t->joinable()) {
             std::cout << "[SubReactor] 线程可 join，开始等待..." << std::endl;
-            thread_->join();
+            t->join();
             std::cout << "[SubReactor] 线程已 join 完成" << std::endl;
         } else {
             std::cout << "[SubReactor] 线程不可 join" << std::endl;
         }
-        delete thread_;
-        thread_ = nullptr;
+        delete t;
+        thread_.store(nullptr, std::memory_order_release);
     } else {
         std::cout << "[SubReactor] thread_ 是 nullptr" << std::endl;
     }
@@ -94,7 +97,7 @@ void SubReactor::join_thread() {
     });
 
     // 步骤3：设置命令处理回调
-    conn->set_command_callback([](const RespValue& cmd, Connection* conn) {
+    conn->set_command_callback([](const RespValue& cmd, Connection* client_conn) {
         const auto& arr = cmd.as_array();
         if (arr.empty()) return;
 
@@ -111,6 +114,8 @@ void SubReactor::join_thread() {
 
         // 检查是否是写命令
         bool is_write_command = (cmd_name == "set" || cmd_name == "del" ||
+                                  cmd_name == "incr" || cmd_name == "decr" ||
+                                  cmd_name == "incrby" || cmd_name == "decrby" ||
                                   cmd_name == "lpush" || cmd_name == "rpush" ||
                                   cmd_name == "lpop" || cmd_name == "rpop" ||
                                   cmd_name == "hset" || cmd_name == "hdel" ||
@@ -123,7 +128,7 @@ void SubReactor::join_thread() {
         if (ClusterServer::instance().isEnabled() &&
             ClusterServer::instance().isReplica() &&
             is_write_command) {
-            conn->send_response(RespEncoder::encode_error("READONLY You can't write against a read only replica."));
+            client_conn->send_response(RespEncoder::encode_error("READONLY You can't write against a read only replica."));
             return;
         }
 
@@ -159,7 +164,7 @@ void SubReactor::join_thread() {
                 std::string redirect = ClusterServer::instance().checkRedirect(key);
                 if (!redirect.empty()) {
                     // 需要重定向
-                    conn->send_response(redirect);
+                    client_conn->send_response(redirect);
                     return;
                 }
             }
@@ -168,10 +173,23 @@ void SubReactor::join_thread() {
         auto command = CommandFactory::instance().create(cmd_name);
         if (command) {
             auto response = command->execute(args);
-            conn->send_response(response);
+            client_conn->send_response(response);
+
+            // 集群模式下，主节点将写命令推送到复制缓冲区
+            if (is_write_command &&
+                ClusterServer::instance().isEnabled() &&
+                !ClusterServer::instance().isReplica()) {
+                // 构建完整的 RESP 命令字符串用于复制
+                std::string cmd_line;
+                for (size_t i = 0; i < args.size(); ++i) {
+                    if (i > 0) cmd_line += " ";
+                    cmd_line += args[i];
+                }
+                ReplicationMgr::instance().replicate_command(cmd_line);
+            }
         } else {
             // 命令不存在，返回错误响应
-            conn->send_response(RespEncoder::encode_error("unknown command '" + args[0] + "'"));
+            client_conn->send_response(RespEncoder::encode_error("unknown command '" + args[0] + "'"));
         }
     });
 
@@ -207,8 +225,7 @@ void SubReactor::handle_close(Connection* conn) {
 void SubReactor::remove_connection(Connection* conn) {
     int fd = conn->fd();
 
-    // 从EventLoop移除Channel
-    loop_->remove_channel(conn->channel());
+    // Connection::close() 已调用过 remove_channel，这里不重复调用
 
     // 从connections_中移除
     {
