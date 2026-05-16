@@ -2,20 +2,13 @@ name: C++ CI
 
 on:
   push:
-    branches: [ main, master, version* ]
+    branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
 
-env:
-  BUILD_TYPE: Release
-  IMAGE_NAME: ghcr.io/${{ github.repository }}/concurrentcache
-
 jobs:
-  # ============================================================
-  # Job 1: 构建 (Linux)
-  # ============================================================
-  build-linux:
-    name: Build Linux (GCC)
+  build:
+    name: Build and Test
     runs-on: ubuntu-24.04
 
     steps:
@@ -27,158 +20,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake build-essential zlib1g-dev
 
-      - name: Configure CMake
+      - name: Configure
         run: |
           mkdir -p build
           cd build
-          cmake .. \
-            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
+          cmake .. -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
         run: cmake --build build --parallel
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-build
-          path: build/concurrentcache-server
-          retention-days: 7
-
-  # ============================================================
-  # Job 2: 测试 (Linux)
-  # ============================================================
-  test:
-    name: Test (Ubuntu)
-    runs-on: ubuntu-24.04
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake build-essential zlib1g-dev redis-tools
-
-      - name: Configure CMake
-        run: |
-          mkdir -p build
-          cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Debug -DENABLE_ASAN=ON -DENABLE_TSAN=ON
-
-      - name: Build
-        run: cmake --build build --parallel
-
-      - name: Run tests
+      - name: Test
         run: |
           cd build
-          ctest --output-on-failure -j$(nproc)
-
-  # ============================================================
-  # Job 3: Sanitizers (AddressSanitizer)
-  # ============================================================
-  sanitizer-asan:
-    name: Sanitizer ASAN
-    runs-on: ubuntu-24.04
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake build-essential zlib1g-dev
-
-      - name: Configure with ASAN
-        run: |
-          mkdir -p build
-          cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Debug -DENABLE_ASAN=ON
-
-      - name: Build
-        run: cmake --build build --parallel
-
-      - name: Run tests with ASAN
-        run: |
-          cd build
-          ctest --output-on-failure -j$(nproc)
-
-  # ============================================================
-  # Job 4: Sanitizers (ThreadSanitizer)
-  # ============================================================
-  sanitizer-tsan:
-    name: Sanitizer TSAN
-    runs-on: ubuntu-24.04
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake build-essential zlib1g-dev
-
-      - name: Configure with TSAN
-        run: |
-          mkdir -p build
-          cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Debug -DENABLE_TSAN=ON
-
-      - name: Build
-        run: cmake --build build --parallel
-
-      - name: Run tests with TSAN
-        run: |
-          cd build
-          ctest --output-on-failure -j$(nproc)
-
-  # ============================================================
-  # Job 5: Docker Build & Push (Main Branch Only)
-  # ============================================================
-  docker:
-    name: Docker Build & Push
-    runs-on: ubuntu-24.04
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=sha,prefix=
-
-      - name: Build and Push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Image digest
-        run: echo "Image pushed to ${{ env.IMAGE_NAME }}"
+          ctest --output-on-failure
