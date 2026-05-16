@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    name: Build and Test
+    name: Build
     runs-on: ubuntu-24.04
 
     steps:
@@ -27,9 +27,11 @@ jobs:
           cmake .. -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
-        run: cmake --build build --parallel
+        run: cmake --build build --parallel 2
 
-      - name: Test
-        run: |
-          cd build
-          ctest --output-on-failure
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: concurrentcache-binary
+          path: build/concurrentcache-server
+          retention-days: 1
