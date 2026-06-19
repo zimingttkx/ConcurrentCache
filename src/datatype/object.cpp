@@ -58,7 +58,10 @@ bool CacheObject::list_push(const std::string& val, bool front) {
         std::string old_val = std::move(string_val_);
         type_ = ObjectType::LIST;
         list_val_.clear();
-        list_val_.push_back(std::move(old_val));
+        // 只有非空字符串才保留为列表首元素（避免默认构造的空字符串污染列表）
+        if (!old_val.empty()) {
+            list_val_.push_back(std::move(old_val));
+        }
     }
     if (front) {
         list_val_.insert(list_val_.begin(), val);
@@ -370,6 +373,48 @@ std::vector<std::pair<std::string, double>> CacheObject::zset_range_by_score(dou
             result.emplace_back(zmember.member, zmember.score);
         }
     }
+    (void)with_scores;  // 保留参数兼容性
+    return result;
+}
+
+std::vector<std::pair<std::string, double>> CacheObject::zset_range_by_index(long long start, long long stop, bool with_scores) const {
+    if (type_ != ObjectType::ZSET) [[unlikely]] {
+        return {};
+    }
+
+    size_t size = zset_val_.size();
+    if (size == 0) {
+        return {};
+    }
+
+    // 处理负索引（Redis 语义：-1 表示最后一个元素）
+    long long actual_start = start;
+    long long actual_stop = stop;
+
+    if (actual_start < 0) {
+        actual_start = static_cast<long long>(size) + actual_start;
+    }
+    if (actual_stop < 0) {
+        actual_stop = static_cast<long long>(size) + actual_stop;
+    }
+
+    // 边界裁剪
+    if (actual_start < 0) actual_start = 0;
+    if (actual_stop < 0) return {};
+    if (static_cast<size_t>(actual_start) >= size) return {};
+    if (static_cast<size_t>(actual_stop) >= size) actual_stop = static_cast<long long>(size) - 1;
+    if (actual_start > actual_stop) return {};
+
+    std::vector<std::pair<std::string, double>> result;
+    result.reserve(static_cast<size_t>(actual_stop - actual_start + 1));
+
+    // std::set 按 score 排序，直接按位置迭代
+    auto it = zset_val_.begin();
+    std::advance(it, actual_start);
+    for (long long i = actual_start; i <= actual_stop && it != zset_val_.end(); ++i, ++it) {
+        result.emplace_back(it->member, it->score);
+    }
+
     (void)with_scores;  // 保留参数兼容性
     return result;
 }

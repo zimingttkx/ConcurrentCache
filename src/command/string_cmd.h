@@ -71,7 +71,8 @@ namespace cc_server {
             // 从 CacheObject 提取字符串
             auto str = result.value().get_string();
             if (!str) {
-                return RespEncoder::encode_error("ERR not a string");
+                return RespEncoder::encode_error(
+                    "WRONGTYPE Operation against a key holding the wrong kind of value");
             }
 
             return RespEncoder::encode_bulk_string(str.value());
@@ -212,15 +213,19 @@ namespace cc_server {
     class DelCommand : public Command {
     public:
         std::string execute(const std::vector<std::string> &args) override {
-            // 参数验证：DEL 命令需要 2 个参数 [命令名, key]
-            if (args.size() != 2) {
+            // 参数验证：DEL 命令需要至少 2 个参数 [命令名, key...]
+            if (args.size() < 2) {
                 return RespEncoder::encode_error("ERR wrong number of arguments for 'del' command");
             }
 
-            const std::string& key = args[1];
-            bool deleted = GlobalStorage::instance().del(key);
+            size_t deleted = 0;
+            for (size_t i = 1; i < args.size(); ++i) {
+                if (GlobalStorage::instance().del(args[i])) {
+                    deleted++;
+                }
+            }
 
-            return RespEncoder::encode_integer(deleted ? 1 : 0);
+            return RespEncoder::encode_integer(static_cast<int64_t>(deleted));
         }
 
         [[nodiscard]] std::unique_ptr<Command> clone() const override {
@@ -280,6 +285,10 @@ namespace cc_server {
 
             CacheObject obj;
             if (result.has_value()) {
+                if (result.value().type() != ObjectType::LIST && result.value().type() != ObjectType::STRING) {
+                    return RespEncoder::encode_error(
+                        "WRONGTYPE Operation against a key holding the wrong kind of value");
+                }
                 obj = std::move(result.value());
             }
 
@@ -315,6 +324,10 @@ namespace cc_server {
 
             CacheObject obj;
             if (result.has_value()) {
+                if (result.value().type() != ObjectType::LIST && result.value().type() != ObjectType::STRING) {
+                    return RespEncoder::encode_error(
+                        "WRONGTYPE Operation against a key holding the wrong kind of value");
+                }
                 obj = std::move(result.value());
             }
 
@@ -350,6 +363,11 @@ namespace cc_server {
 
             if (!result.has_value()) {
                 return RespEncoder::encode_nil();
+            }
+
+            if (result.value().type() != ObjectType::LIST) {
+                return RespEncoder::encode_error(
+                    "WRONGTYPE Operation against a key holding the wrong kind of value");
             }
 
             auto obj = std::move(result.value());
@@ -389,6 +407,11 @@ namespace cc_server {
                 return RespEncoder::encode_nil();
             }
 
+            if (result.value().type() != ObjectType::LIST) {
+                return RespEncoder::encode_error(
+                    "WRONGTYPE Operation against a key holding the wrong kind of value");
+            }
+
             auto obj = std::move(result.value());
             auto val = obj.list_pop(false);
 
@@ -424,6 +447,11 @@ namespace cc_server {
 
             if (!result.has_value()) {
                 return RespEncoder::encode_integer(0);
+            }
+
+            if (result.value().type() != ObjectType::LIST) {
+                return RespEncoder::encode_error(
+                    "WRONGTYPE Operation against a key holding the wrong kind of value");
             }
 
             return RespEncoder::encode_integer(static_cast<int64_t>(result.value().list_size()));
@@ -464,6 +492,11 @@ namespace cc_server {
                 return RespEncoder::encode_array({});
             }
 
+            if (result.value().type() != ObjectType::LIST) {
+                return RespEncoder::encode_error(
+                    "WRONGTYPE Operation against a key holding the wrong kind of value");
+            }
+
             auto values = result.value().list_range(start, stop);
             return RespEncoder::encode_array(values);
         }
@@ -497,6 +530,10 @@ namespace cc_server {
 
             CacheObject obj;
             if (result.has_value()) {
+                if (result.value().type() != ObjectType::HASH && result.value().type() != ObjectType::STRING) {
+                    return RespEncoder::encode_error(
+                        "WRONGTYPE Operation against a key holding the wrong kind of value");
+                }
                 obj = std::move(result.value());
             }
 
@@ -535,6 +572,11 @@ namespace cc_server {
                 return RespEncoder::encode_nil();
             }
 
+            if (result.value().type() != ObjectType::HASH) {
+                return RespEncoder::encode_error(
+                    "WRONGTYPE Operation against a key holding the wrong kind of value");
+            }
+
             auto val = result.value().hash_get(field);
             if (!val) {
                 return RespEncoder::encode_nil();
@@ -567,6 +609,11 @@ namespace cc_server {
 
             if (!result.has_value()) {
                 return RespEncoder::encode_integer(0);
+            }
+
+            if (result.value().type() != ObjectType::HASH) {
+                return RespEncoder::encode_error(
+                    "WRONGTYPE Operation against a key holding the wrong kind of value");
             }
 
             auto obj = std::move(result.value());
@@ -608,6 +655,11 @@ namespace cc_server {
                 return RespEncoder::encode_integer(0);
             }
 
+            if (result.value().type() != ObjectType::HASH) {
+                return RespEncoder::encode_error(
+                    "WRONGTYPE Operation against a key holding the wrong kind of value");
+            }
+
             return RespEncoder::encode_integer(static_cast<int64_t>(result.value().hash_size()));
         }
 
@@ -635,6 +687,11 @@ namespace cc_server {
 
             if (!result.has_value()) {
                 return RespEncoder::encode_array({});
+            }
+
+            if (result.value().type() != ObjectType::HASH) {
+                return RespEncoder::encode_error(
+                    "WRONGTYPE Operation against a key holding the wrong kind of value");
             }
 
             auto items = result.value().hash_items();
@@ -673,6 +730,10 @@ namespace cc_server {
 
             CacheObject obj;
             if (result.has_value()) {
+                if (result.value().type() != ObjectType::SET && result.value().type() != ObjectType::STRING) {
+                    return RespEncoder::encode_error(
+                        "WRONGTYPE Operation against a key holding the wrong kind of value");
+                }
                 obj = std::move(result.value());
             }
 
@@ -711,6 +772,11 @@ namespace cc_server {
 
             if (!result.has_value()) {
                 return RespEncoder::encode_nil();
+            }
+
+            if (result.value().type() != ObjectType::SET) {
+                return RespEncoder::encode_error(
+                    "WRONGTYPE Operation against a key holding the wrong kind of value");
             }
 
             auto members = result.value().set_members();
@@ -757,6 +823,11 @@ namespace cc_server {
                 return RespEncoder::encode_integer(0);
             }
 
+            if (result.value().type() != ObjectType::SET) {
+                return RespEncoder::encode_error(
+                    "WRONGTYPE Operation against a key holding the wrong kind of value");
+            }
+
             return RespEncoder::encode_integer(static_cast<int64_t>(result.value().set_size()));
         }
 
@@ -788,6 +859,11 @@ namespace cc_server {
                 return RespEncoder::encode_integer(0);
             }
 
+            if (result.value().type() != ObjectType::SET) {
+                return RespEncoder::encode_error(
+                    "WRONGTYPE Operation against a key holding the wrong kind of value");
+            }
+
             return RespEncoder::encode_integer(result.value().set_contains(member) ? 1 : 0);
         }
 
@@ -817,6 +893,11 @@ namespace cc_server {
                 return RespEncoder::encode_array({});
             }
 
+            if (result.value().type() != ObjectType::SET) {
+                return RespEncoder::encode_error(
+                    "WRONGTYPE Operation against a key holding the wrong kind of value");
+            }
+
             auto members = result.value().set_members();
             return RespEncoder::encode_array(members);
         }
@@ -838,30 +919,40 @@ namespace cc_server {
     class ZaddCommand : public Command {
     public:
         std::string execute(const std::vector<std::string> &args) override {
-            if (args.size() != 4) {
+            // ZADD key score member [score member ...]
+            if (args.size() < 4 || (args.size() - 2) % 2 != 0) {
                 return RespEncoder::encode_error("ERR wrong number of arguments for 'zadd' command");
             }
 
             const std::string& key = args[1];
-            double score;
-            try {
-                score = std::stod(args[2]);
-            } catch (...) {
-                return RespEncoder::encode_error("ERR invalid score");
-            }
-            const std::string& member = args[3];
 
             auto result = GlobalStorage::instance().get(key);
 
             CacheObject obj;
             if (result.has_value()) {
+                if (result.value().type() != ObjectType::ZSET && result.value().type() != ObjectType::STRING) {
+                    return RespEncoder::encode_error(
+                        "WRONGTYPE Operation against a key holding the wrong kind of value");
+                }
                 obj = std::move(result.value());
             }
 
-            bool is_new = obj.zset_add(member, score);
+            size_t added = 0;
+            for (size_t i = 2; i < args.size(); i += 2) {
+                double score;
+                try {
+                    score = std::stod(args[i]);
+                } catch (...) {
+                    return RespEncoder::encode_error("ERR invalid score");
+                }
+                const std::string& member = args[i + 1];
+                if (obj.zset_add(member, score)) {
+                    added++;
+                }
+            }
 
             GlobalStorage::instance().set(key, obj);
-            return RespEncoder::encode_integer(is_new ? 1 : 0);
+            return RespEncoder::encode_integer(static_cast<int64_t>(added));
         }
 
         [[nodiscard]] std::unique_ptr<Command> clone() const override {
@@ -890,6 +981,11 @@ namespace cc_server {
 
             if (!result.has_value()) {
                 return RespEncoder::encode_nil();
+            }
+
+            if (result.value().type() != ObjectType::ZSET) {
+                return RespEncoder::encode_error(
+                    "WRONGTYPE Operation against a key holding the wrong kind of value");
             }
 
             auto score = result.value().zset_score(member);
@@ -926,6 +1022,11 @@ namespace cc_server {
                 return RespEncoder::encode_integer(0);
             }
 
+            if (result.value().type() != ObjectType::ZSET) {
+                return RespEncoder::encode_error(
+                    "WRONGTYPE Operation against a key holding the wrong kind of value");
+            }
+
             return RespEncoder::encode_integer(static_cast<int64_t>(result.value().zset_size()));
         }
 
@@ -937,8 +1038,8 @@ namespace cc_server {
     /**
      * @brief ZrangeCommand - ZRANGE 命令实现
      *
-     * ZRANGE 命令：按分数范围获取成员
-     * 语法：ZRANGE key min max
+     * ZRANGE 命令：按索引范围获取成员（Redis 语义：start/stop 是排名索引）
+     * 语法：ZRANGE key start stop [WITHSCORES]
      * 返回：成员列表
      */
     class ZrangeCommand : public Command {
@@ -949,12 +1050,12 @@ namespace cc_server {
             }
 
             const std::string& key = args[1];
-            double min, max;
+            long long start, stop;
             try {
-                min = std::stod(args[2]);
-                max = std::stod(args[3]);
+                start = std::stoll(args[2]);
+                stop = std::stoll(args[3]);
             } catch (...) {
-                return RespEncoder::encode_error("ERR invalid score");
+                return RespEncoder::encode_error("ERR invalid integer");
             }
 
             bool with_scores = (args.size() == 5 && args[4] == "WITHSCORES");
@@ -965,7 +1066,12 @@ namespace cc_server {
                 return RespEncoder::encode_array({});
             }
 
-            auto members = result.value().zset_range_by_score(min, max, with_scores);
+            if (result.value().type() != ObjectType::ZSET) {
+                return RespEncoder::encode_error(
+                    "WRONGTYPE Operation against a key holding the wrong kind of value");
+            }
+
+            auto members = result.value().zset_range_by_index(start, stop, with_scores);
             std::vector<std::string> response;
             for (const auto& [member, score] : members) {
                 response.push_back(member);

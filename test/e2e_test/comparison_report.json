@@ -1,0 +1,649 @@
+{
+  "timestamp": "2026-06-19T17:22:46.835368",
+  "cc_version": "3.0",
+  "redis_version": "7.0.15",
+  "functional": {
+    "cc_pass": 38,
+    "cc_total": 39,
+    "cc_rate": 97.4,
+    "redis_pass": 38,
+    "redis_total": 39,
+    "redis_rate": 97.4,
+    "details": [
+      {
+        "name": "SET/GET 基本读写",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "SET=OK, GET=hello",
+        "redis_result": "SET=OK, GET=hello"
+      },
+      {
+        "name": "SET 覆盖已有 key",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "GET=v2",
+        "redis_result": "GET=v2"
+      },
+      {
+        "name": "DEL 删除 key",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "DEL=1, GET=None",
+        "redis_result": "DEL=1, GET=None"
+      },
+      {
+        "name": "DEL 多 key 批量删除",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "DEL=3",
+        "redis_result": "DEL=3"
+      },
+      {
+        "name": "EXISTS 存在性检查",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "EXISTS(exist)=1, EXISTS(none)=0",
+        "redis_result": "EXISTS(exist)=1, EXISTS(none)=0"
+      },
+      {
+        "name": "INCR 递增",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "INCRx2=11,12, GET=12",
+        "redis_result": "INCRx2=11,12, GET=12"
+      },
+      {
+        "name": "DECR 递减",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "DECRx2=9,8",
+        "redis_result": "DECRx2=9,8"
+      },
+      {
+        "name": "INCR/DECR 非整数 key",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "INCR on string=ERR:ERR value is not an integer",
+        "redis_result": "INCR on string=ERR:ERR value is not an integer or out of range"
+      },
+      {
+        "name": "SETEX 带过期设置",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "SETEX=OK, GET=val, TTL=10",
+        "redis_result": "SETEX=OK, GET=val, TTL=10"
+      },
+      {
+        "name": "GET 不存在的 key",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "GET=None",
+        "redis_result": "GET=None"
+      },
+      {
+        "name": "LPUSH/RPUSH 推入",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "LPUSH=3, RPUSH=5, LRANGE=c|b|a|x|y",
+        "redis_result": "LPUSH=3, RPUSH=5, LRANGE=c|b|a|x|y"
+      },
+      {
+        "name": "LPOP/RPOP 弹出",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "LPOP=1, RPOP=3, LRANGE=2",
+        "redis_result": "LPOP=1, RPOP=3, LRANGE=2"
+      },
+      {
+        "name": "LLEN 长度",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "LLEN=5",
+        "redis_result": "LLEN=5"
+      },
+      {
+        "name": "LRANGE 范围查询",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "LRANGE 1-3=1|2|3",
+        "redis_result": "LRANGE 1-3=1|2|3"
+      },
+      {
+        "name": "LRANGE 负索引",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "LRANGE -3~-1=c|d|e",
+        "redis_result": "LRANGE -3~-1=c|d|e"
+      },
+      {
+        "name": "LPOP 空列表",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "LPOP empty=None",
+        "redis_result": "LPOP empty=None"
+      },
+      {
+        "name": "HSET/HGET 基本操作",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "HSET=1,1, HGET=v1,v2",
+        "redis_result": "HSET=1,1, HGET=v1,v2"
+      },
+      {
+        "name": "HDEL 删除字段",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "HDEL=1, HGET f1=None, HGET f2=v2",
+        "redis_result": "HDEL=1, HGET f1=None, HGET f2=v2"
+      },
+      {
+        "name": "HLEN 字段数",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "HLEN=3",
+        "redis_result": "HLEN=3"
+      },
+      {
+        "name": "HGETALL 全部字段",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "HGETALL=y|200|x|100",
+        "redis_result": "HGETALL=x|100|y|200"
+      },
+      {
+        "name": "HGET 不存在字段",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "HGET nonexist=None",
+        "redis_result": "HGET nonexist=None"
+      },
+      {
+        "name": "SADD/SMEMBERS 基本操作",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "SADD=3,0, SMEMBERS=c|b|a",
+        "redis_result": "SADD=3,0, SMEMBERS=c|b|a"
+      },
+      {
+        "name": "SISMEMBER 成员检查",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "SISMEMBER(yes)=1, SISMEMBER(no)=0",
+        "redis_result": "SISMEMBER(yes)=1, SISMEMBER(no)=0"
+      },
+      {
+        "name": "SCARD 基数",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "SCARD=3",
+        "redis_result": "SCARD=3"
+      },
+      {
+        "name": "SPOP 随机弹出",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "SPOP=1, SCARD=2",
+        "redis_result": "SPOP=2, SCARD=2"
+      },
+      {
+        "name": "ZADD/ZSCORE 基本操作",
+        "cc_pass": false,
+        "redis_pass": false,
+        "cc_result": "ZADD=3, ZSCORE(b)=2.000000",
+        "redis_result": "ZADD=3, ZSCORE(b)=2"
+      },
+      {
+        "name": "ZCARD 基数",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "ZCARD=2",
+        "redis_result": "ZCARD=2"
+      },
+      {
+        "name": "ZRANGE 正序范围",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "ZRANGE 0-1=a|b",
+        "redis_result": "ZRANGE 0-1=a|b"
+      },
+      {
+        "name": "ZRANGE WITHSCORES",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "ZRANGE WITHSCORES=x|10.000000|y|20.000000",
+        "redis_result": "ZRANGE WITHSCORES=x|10|y|20"
+      },
+      {
+        "name": "EXPIRE 设置过期",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "EXPIRE=1, TTL=100",
+        "redis_result": "EXPIRE=1, TTL=100"
+      },
+      {
+        "name": "TTL 查询剩余时间",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "TTL(noexp)=-1, TTL(exp)=50",
+        "redis_result": "TTL(noexp)=-1, TTL(exp)=50"
+      },
+      {
+        "name": "PERSIST 移除过期",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "PERSIST=1, TTL=-1",
+        "redis_result": "PERSIST=1, TTL=-1"
+      },
+      {
+        "name": "过期后 key 自动删除",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "GET after expire=None",
+        "redis_result": "GET after expire=None"
+      },
+      {
+        "name": "PING",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "PING=PONG",
+        "redis_result": "PING=PONG"
+      },
+      {
+        "name": "DBSIZE",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "DBSIZE=2",
+        "redis_result": "DBSIZE=2"
+      },
+      {
+        "name": "FLUSHDB",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "FLUSHDB=OK, DBSIZE=0",
+        "redis_result": "FLUSHDB=OK, DBSIZE=0"
+      },
+      {
+        "name": "INFO 命令",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "INFO length=65",
+        "redis_result": "INFO length=5003"
+      },
+      {
+        "name": "STRING→LIST 自动转换",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "LPUSH on string=2",
+        "redis_result": "LPUSH on string=ERR:WRONGTYPE Operation against a key holding the wrong kind of value"
+      },
+      {
+        "name": "WRONGTYPE 错误",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "HGET on Set=ERR:WRONGTYPE Operation against a key holding the wrong kind of value",
+        "redis_result": "HGET on Set=ERR:WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    ]
+  },
+  "stress": {
+    "cc_pass": 3,
+    "cc_total": 4,
+    "redis_pass": 3,
+    "redis_total": 4,
+    "details": [
+      {
+        "name": "连接风暴 2000",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "2000/2000 (100.0%)",
+        "redis_result": "2000/2000 (100.0%)"
+      },
+      {
+        "name": "快速连接/断开 500",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "500/500 (5294 conn/s)",
+        "redis_result": "500/500 (11961 conn/s)"
+      },
+      {
+        "name": "大量 key 写入 50000",
+        "cc_pass": false,
+        "redis_pass": false,
+        "cc_result": "255/50000 (535 keys/s)",
+        "redis_result": "251/50000 (581 keys/s)"
+      },
+      {
+        "name": "并发写入一致性 100",
+        "cc_pass": true,
+        "redis_pass": true,
+        "cc_result": "0/100 不一致",
+        "redis_result": "0/100 不一致"
+      }
+    ]
+  },
+  "performance": {
+    "avg_qps_ratio": 90.4,
+    "cc_peak_qps": 91412.0,
+    "redis_peak_qps": 104284.0,
+    "tiers": [
+      {
+        "label": "纯 GET (单连接)",
+        "cc_qps": 32863.13352444268,
+        "cc_p50_ms": 0.02471699917805381,
+        "cc_p99_ms": 0.09539799975755159,
+        "cc_p999_ms": 0.198513999748684,
+        "cc_max_ms": 1.3626159998239018,
+        "cc_err_rate": 95.0011598678131,
+        "cc_total_ops": 262961,
+        "redis_qps": 55224.3127396707,
+        "redis_p50_ms": 0.014166000255499966,
+        "redis_p99_ms": 0.0538889999006642,
+        "redis_p999_ms": 0.18753000040305778,
+        "redis_max_ms": 3.4228869999424205,
+        "redis_err_rate": 95.0004637578867,
+        "redis_total_ops": 442041
+      },
+      {
+        "label": "纯 SET (单连接)",
+        "cc_qps": 42317.89902700671,
+        "cc_p50_ms": 0.01971200072148349,
+        "cc_p99_ms": 0.061327999901550356,
+        "cc_p999_ms": 0.16915500054892618,
+        "cc_max_ms": 0.5612810000457102,
+        "cc_err_rate": 0.0,
+        "cc_total_ops": 338664,
+        "redis_qps": 55099.015652531176,
+        "redis_p50_ms": 0.014381999790202826,
+        "redis_p99_ms": 0.0516399995831307,
+        "redis_p999_ms": 0.18172900036006467,
+        "redis_max_ms": 3.38164599997981,
+        "redis_err_rate": 0.0,
+        "redis_total_ops": 441253
+      },
+      {
+        "label": "混合负载 (单连接)",
+        "cc_qps": 42640.377721451,
+        "cc_p50_ms": 0.01982400044653332,
+        "cc_p99_ms": 0.06135500007076189,
+        "cc_p999_ms": 0.16692799999873387,
+        "cc_max_ms": 2.2362019999491167,
+        "cc_err_rate": 70.00096714349772,
+        "cc_total_ops": 341211,
+        "redis_qps": 58728.21428144,
+        "redis_p50_ms": 0.01415899987478042,
+        "redis_p99_ms": 0.04852600068261381,
+        "redis_p999_ms": 0.15204400006041396,
+        "redis_max_ms": 1.2212400006319513,
+        "redis_err_rate": 60.00272365344064,
+        "redis_total_ops": 469957
+      },
+      {
+        "label": "并发=10",
+        "cc_qps": 89076.77317734213,
+        "cc_p50_ms": 0.10807800026668701,
+        "cc_p99_ms": 0.15630699999746867,
+        "cc_p999_ms": 0.25447299958614167,
+        "cc_max_ms": 1.519659000223328,
+        "cc_err_rate": 69.00403142153867,
+        "cc_total_ops": 891745,
+        "redis_qps": 82396.94626536293,
+        "redis_p50_ms": 0.12067999978171429,
+        "redis_p99_ms": 0.1357060000373167,
+        "redis_p999_ms": 0.18528300006437348,
+        "redis_max_ms": 0.6106900000304449,
+        "redis_err_rate": 69.02220373696011,
+        "redis_total_ops": 824681
+      },
+      {
+        "label": "并发=50",
+        "cc_qps": 81399.96495921495,
+        "cc_p50_ms": 0.6080910006858176,
+        "cc_p99_ms": 0.7029879998299293,
+        "cc_p999_ms": 1.2354010004855809,
+        "cc_max_ms": 17.69693799997185,
+        "cc_err_rate": 70.08369407660973,
+        "cc_total_ops": 814753,
+        "redis_qps": 87347.09486430495,
+        "redis_p50_ms": 0.571698999920045,
+        "redis_p99_ms": 0.6160520006233128,
+        "redis_p999_ms": 0.7155009998314199,
+        "redis_max_ms": 0.9459889997742721,
+        "redis_err_rate": 69.83208285406552,
+        "redis_total_ops": 874598
+      },
+      {
+        "label": "并发=100",
+        "cc_qps": 85429.70162873788,
+        "cc_p50_ms": 1.1701189996529138,
+        "cc_p99_ms": 1.2506190005296958,
+        "cc_p999_ms": 1.336887000434217,
+        "cc_max_ms": 7.3551430004954454,
+        "cc_err_rate": 70.18070915450382,
+        "cc_total_ops": 855131,
+        "redis_qps": 87734.14242047886,
+        "redis_p50_ms": 1.1358089996065246,
+        "redis_p99_ms": 1.2231700002303114,
+        "redis_p999_ms": 1.5606970000590081,
+        "redis_max_ms": 7.170703999690886,
+        "redis_err_rate": 70.03545493670713,
+        "redis_total_ops": 878298
+      },
+      {
+        "label": "并发=200",
+        "cc_qps": 84044.06855143953,
+        "cc_p50_ms": 2.365720000852889,
+        "cc_p99_ms": 2.517937999982678,
+        "cc_p999_ms": 2.7789799996753572,
+        "cc_max_ms": 4.623900999831676,
+        "cc_err_rate": 70.01119105096086,
+        "cc_total_ops": 841744,
+        "redis_qps": 86898.11874133209,
+        "redis_p50_ms": 2.301376999639615,
+        "redis_p99_ms": 2.438038000036613,
+        "redis_p999_ms": 2.7720500002033077,
+        "redis_max_ms": 8.937470000091707,
+        "redis_err_rate": 70.30056826996558,
+        "redis_total_ops": 870185
+      },
+      {
+        "label": "并发=500",
+        "cc_qps": 79281.22678918234,
+        "cc_p50_ms": 6.2331319995792,
+        "cc_p99_ms": 7.048104999739735,
+        "cc_p999_ms": 17.194897000081255,
+        "cc_max_ms": 18.99440799934382,
+        "cc_err_rate": 70.42349194049527,
+        "cc_total_ops": 794962,
+        "redis_qps": 84761.09692704854,
+        "redis_p50_ms": 5.8313709996582475,
+        "redis_p99_ms": 6.377383999279118,
+        "redis_p999_ms": 18.271678000019165,
+        "redis_max_ms": 19.85558399974252,
+        "redis_err_rate": 70.02118893466745,
+        "redis_total_ops": 849500
+      },
+      {
+        "label": "并发=1000",
+        "cc_qps": 75424.62030331873,
+        "cc_p50_ms": 13.045429000158038,
+        "cc_p99_ms": 20.43124000010721,
+        "cc_p999_ms": 26.610275999701116,
+        "cc_max_ms": 28.310106999924756,
+        "cc_err_rate": 72.28419256997886,
+        "cc_total_ops": 757979,
+        "redis_qps": 75437.86843076405,
+        "redis_p50_ms": 12.799944999642321,
+        "redis_p99_ms": 21.526176999941526,
+        "redis_p999_ms": 30.50896999957331,
+        "redis_max_ms": 31.472681000195735,
+        "redis_err_rate": 72.2839366097956,
+        "redis_total_ops": 757972
+      },
+      {
+        "label": "并发=2000",
+        "cc_qps": 67014.08969540408,
+        "cc_p50_ms": 28.34985699973913,
+        "cc_p99_ms": 46.26904399992782,
+        "cc_p999_ms": 50.921560000460886,
+        "cc_max_ms": 55.09594399973139,
+        "cc_err_rate": 73.36686390532545,
+        "cc_total_ops": 676000,
+        "redis_qps": 76181.26565329701,
+        "redis_p50_ms": 25.236709000637347,
+        "redis_p99_ms": 43.07069800051977,
+        "redis_p999_ms": 48.806490000060876,
+        "redis_max_ms": 49.22654799975135,
+        "redis_err_rate": 72.26554618785983,
+        "redis_total_ops": 768243
+      },
+      {
+        "label": "并发=3000",
+        "cc_qps": 57806.94712333041,
+        "cc_p50_ms": 50.39799399946787,
+        "cc_p99_ms": 71.18492700010393,
+        "cc_p999_ms": 79.52161799948954,
+        "cc_max_ms": 79.86204799999541,
+        "cc_err_rate": 71.7948717948718,
+        "cc_total_ops": 585000,
+        "redis_qps": 62536.64585701235,
+        "redis_p50_ms": 46.59576399990328,
+        "redis_p99_ms": 62.37568500000634,
+        "redis_p999_ms": 64.51787900005002,
+        "redis_max_ms": 64.87065800047276,
+        "redis_err_rate": 71.55924170616113,
+        "redis_total_ops": 633000
+      },
+      {
+        "label": "并发=5000",
+        "cc_qps": 57073.14650694198,
+        "cc_p50_ms": 82.52852399982658,
+        "cc_p99_ms": 112.7901899999415,
+        "cc_p999_ms": 117.53779599985137,
+        "cc_max_ms": 133.0026680006995,
+        "cc_err_rate": 74.35489798883732,
+        "cc_total_ops": 584985,
+        "redis_qps": 62300.620652676196,
+        "redis_p50_ms": 75.68100899970887,
+        "redis_p99_ms": 107.03077600010147,
+        "redis_p999_ms": 109.10713500015845,
+        "redis_max_ms": 114.48711600041861,
+        "redis_err_rate": 76.35581333039134,
+        "redis_total_ops": 634490
+      },
+      {
+        "label": "SET 1KB value",
+        "cc_qps": 91411.98164002007,
+        "cc_p50_ms": 1.0418279998702928,
+        "cc_p99_ms": 1.2944600002811057,
+        "cc_p999_ms": 2.4621499997010687,
+        "cc_max_ms": 3.1073139998625265,
+        "cc_err_rate": 0.0,
+        "cc_total_ops": 731981,
+        "redis_qps": 88057.88992493013,
+        "redis_p50_ms": 1.1470409999674303,
+        "redis_p99_ms": 1.2551110003187205,
+        "redis_p999_ms": 2.452943000207597,
+        "redis_max_ms": 3.4768979994623805,
+        "redis_err_rate": 0.0,
+        "redis_total_ops": 705150
+      },
+      {
+        "label": "GET 1KB value",
+        "cc_qps": 85287.50171891204,
+        "cc_p50_ms": 1.1706919995049248,
+        "cc_p99_ms": 1.2914079998154193,
+        "cc_p999_ms": 2.4287000005642767,
+        "cc_max_ms": 3.3629689996814705,
+        "cc_err_rate": 85.05034709257802,
+        "cc_total_ops": 682959,
+        "redis_qps": 88322.72668138194,
+        "redis_p50_ms": 1.1261479994573165,
+        "redis_p99_ms": 1.2278570002308697,
+        "redis_p999_ms": 1.2725710002996493,
+        "redis_max_ms": 3.0583520001528086,
+        "redis_err_rate": 85.01247781917412,
+        "redis_total_ops": 707255
+      },
+      {
+        "label": "SET 10KB value",
+        "cc_qps": 84359.8281838481,
+        "cc_p50_ms": 1.1735830003090086,
+        "cc_p99_ms": 1.3853820000804262,
+        "cc_p999_ms": 1.49213199983933,
+        "cc_max_ms": 3.0707719997735694,
+        "cc_err_rate": 0.0,
+        "cc_total_ops": 675520,
+        "redis_qps": 88545.14299480867,
+        "redis_p50_ms": 1.1118759994133143,
+        "redis_p99_ms": 1.3439300000754884,
+        "redis_p999_ms": 1.470193999921321,
+        "redis_max_ms": 1.9201599998268648,
+        "redis_err_rate": 0.0,
+        "redis_total_ops": 709086
+      },
+      {
+        "label": "GET 10KB value",
+        "cc_qps": 84425.09899566106,
+        "cc_p50_ms": 1.1684379996950156,
+        "cc_p99_ms": 1.4008870002726326,
+        "cc_p999_ms": 2.56859099954454,
+        "cc_max_ms": 3.3442670001022634,
+        "cc_err_rate": 85.05614853031666,
+        "cc_total_ops": 676064,
+        "redis_qps": 104283.7229988501,
+        "redis_p50_ms": 0.9259970001949114,
+        "redis_p99_ms": 1.2150210004620021,
+        "redis_p999_ms": 1.4687640004922287,
+        "redis_max_ms": 3.040792000319925,
+        "redis_err_rate": 84.97286734454401,
+        "redis_total_ops": 835156
+      },
+      {
+        "label": "SET 100KB value",
+        "cc_qps": 80829.76034528065,
+        "cc_p50_ms": 1.0788059998958488,
+        "cc_p99_ms": 2.9078930001560366,
+        "cc_p999_ms": 3.447414999754983,
+        "cc_max_ms": 5.28594399929716,
+        "cc_err_rate": 0.0,
+        "cc_total_ops": 647312,
+        "redis_qps": 91584.97906322106,
+        "redis_p50_ms": 0.9482880004725303,
+        "redis_p99_ms": 2.4946940002337215,
+        "redis_p999_ms": 4.302716999518452,
+        "redis_max_ms": 7.135386000300059,
+        "redis_err_rate": 0.0,
+        "redis_total_ops": 733551
+      },
+      {
+        "label": "GET 100KB value",
+        "cc_qps": 80310.25085228826,
+        "cc_p50_ms": 1.1092040003859438,
+        "cc_p99_ms": 3.0963330000304268,
+        "cc_p999_ms": 5.006474999390775,
+        "cc_max_ms": 10.111517000041204,
+        "cc_err_rate": 90.41653773128675,
+        "cc_total_ops": 643087,
+        "redis_qps": 87518.50679557455,
+        "redis_p50_ms": 0.9323269996457384,
+        "redis_p99_ms": 4.0487129999746685,
+        "redis_p999_ms": 5.315693999364157,
+        "redis_max_ms": 13.185472000259324,
+        "redis_err_rate": 95.0123941363897,
+        "redis_total_ops": 701138
+      }
+    ]
+  },
+  "memory": {
+    "cc_empty_rss_mb": 0.0,
+    "redis_empty_rss_mb": 17.78,
+    "cc_full_rss_mb": 0.0,
+    "redis_full_rss_mb": 34.53,
+    "cc_delta_mb": 0.0,
+    "redis_delta_mb": 16.75,
+    "cc_per_key_b": 0.0,
+    "redis_per_key_b": 351.0,
+    "num_keys": 50000,
+    "value_size": 256
+  }
+}

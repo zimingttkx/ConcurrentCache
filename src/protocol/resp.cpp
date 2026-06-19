@@ -695,10 +695,12 @@ std::string RespEncoder::encode_simple_string(const std::string& s) {
     return "+" + s + "\r\n";
 }
 
-// 编码错误: -ERR message\r\n
+// 编码错误: -ERR message\r\n 或 -WRONGTYPE message\r\n
 std::string RespEncoder::encode_error(const std::string& err) {
-    // Redis 错误格式是 "-ERR <message>\r\n"
-    // 所以错误消息会自动加上 "ERR " 前缀
+    // 如果消息已经以 "WRONGTYPE" 或 "ERR " 开头，不再添加 "ERR " 前缀
+    if (err.rfind("WRONGTYPE", 0) == 0 || err.rfind("ERR ", 0) == 0) {
+        return "-" + err + "\r\n";
+    }
     return "-ERR " + err + "\r\n";
 }
 

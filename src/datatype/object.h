@@ -115,6 +115,9 @@ namespace cc_server {
 
         std::vector<std::pair<std::string, double>> zset_range_by_score(double min, double max, bool with_scores = false) const;
 
+        // 按索引范围获取 ZSET 成员（Redis ZRANGE 语义：start/stop 是排名索引）
+        std::vector<std::pair<std::string, double>> zset_range_by_index(long long start, long long stop, bool with_scores = false) const;
+
         // 获取所有 ZSET 成员（用于 RDB 序列化）
         std::vector<std::pair<std::string, double>> zset_all() const;
 
