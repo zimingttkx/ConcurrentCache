@@ -100,7 +100,7 @@ struct ZSetMember {
 };
 ```
 
-> ZSet 用 `std::set` 维护有序性；`zset_range_by_score(min, max)` 用 `lower_bound/upper_bound` 范围查询。
+> ZSet 用 `std::set` 维护有序性（按 score 而非 member 排序）。按 score 范围查询时全量遍历（O(n)），按索引范围查询时用 `std::advance` 定位（O(n)），未来可考虑建立 member→score 的辅助索引。
 
 ## 3. 并发模型：64 分片读写
 
@@ -266,7 +266,7 @@ void GlobalStorage::set_expire(const std::string& key, int64_t ttl_ms);
 | 过期键不会返回 | GET 时检查 `expire_dict_.is_expired()` → 删除后再读 |
 | `dirty_counter` 单调递增直至 `reset_dirty_count()` | `fetch_add(1, memory_order_relaxed)` |
 | 写操作后 `dirty_counter++` | 命令层 `set`/`del`/`expire` 等每次都 `storage.increment_dirty()` |
-| `CacheObject` 类型不可变 | 同一 key 第一次 set 决定类型；后续 `set` 必须保持类型一致（通过 `obj.type()` 校验） |
+| WRONGTYPE 类型保护 | 所有类型敏感命令执行前检查 `CacheObject::type()` |
 | `last_access_time_ms` 更新时机 | `evict_one` 扫描时记录；目前**未在 GET 时更新**（ARU 简化） |
 
 ## 8. 性能与调优

@@ -1,7 +1,7 @@
 # 部署与运维
 
 > **目标平台**：Linux x86_64（推荐 Ubuntu 24.04 / Debian 12）
-> **部署方式**：源码编译 / Docker / Docker Compose / GitHub Actions
+> **部署方式**：源码编译 / Docker / Docker Compose
 > **默认端口**：`16379`（客户端）+ `26379`（集群总线，`port + 10000`）
 > **前置依赖**：仅 ZLIB（系统库）
 
@@ -37,7 +37,7 @@
 | Linux Kernel | ≥ 3.10（`epoll_wait`） |
 | 体系结构 | x86_64（项目用 `<sys/epoll.h>` 等 POSIX API） |
 
-> ⚠️ **Windows 不可直接运行**——源码使用 POSIX API（`sys/epoll.h`、`unistd.h`、`fcntl.h`）。CI / Docker / 集群部署都在 Linux。
+> **Windows 不可直接运行**——源码使用 POSIX API（`sys/epoll.h`、`unistd.h`、`fcntl.h`）。CI / Docker / 集群部署都在 Linux。
 
 ### 2.2 安装依赖
 
@@ -60,7 +60,7 @@ cmake .. -DCMAKE_BUILD_TYPE=Release
 cmake --build . --parallel
 ```
 
-**产物**：`build/concurrentcache-server`
+**产物**：`build/concurrentcache-server`（约 4MB Release 二进制）
 
 ### 2.4 启用 Sanitizer
 
@@ -93,17 +93,19 @@ nohup ./concurrentcache-server > server.log 2>&1 &
 sudo systemctl start concurrentcache
 ```
 
+> 当前启动方式固定读取 `conf/concurrentcache.conf`，不支持 `--port` 或 `--config` 命令行参数。如需修改端口，编辑配置文件后重启。
+
 ### 3.2 启动顺序（main.cpp 实现）
 
 1. 提升 `RLIMIT_NOFILE` 至 `min(65535, rlim_max)`
 2. 注册 `SIGINT` / `SIGTERM` 信号处理器
 3. 加载 `conf/concurrentcache.conf`
 4. 初始化日志
-5. 启动 `SubReactorPool`
+5. 启动 `SubReactorPool`（N 个 I/O 线程）
 6. 启动 `MainReactor`（绑定端口）
 7. **加载 RDB**（`RdbPersistence::load`）
 8. 初始化 `ClusterServer`
-9. 启动 `ExpirationChecker`（100ms 周期）
+9. 启动 `ExpirationChecker`（100ms 周期清理过期键）
 10. 启动 `RdbScheduler`（按 interval/threshold 触发）
 11. 启动 `ClusterServer`（如启用）
 12. `MainReactor::start()`（阻塞 `epoll_wait` 循环）
@@ -163,6 +165,7 @@ docker run -d \
   --name concurrentcache \
   -p 16379:16379 \
   -v $(pwd)/data:/app/data \
+  -v $(pwd)/conf/concurrentcache.conf:/app/conf/concurrentcache.conf:ro \
   --restart unless-stopped \
   ghcr.io/dingziming/concurrentcache:latest
 
@@ -176,7 +179,6 @@ docker exec concurrentcache redis-cli -p 16379 PING
 - 内置 `redis-tools`（用于健康检查）
 - 健康检查：`redis-cli -p 16379 PING` 每 30s
 - 默认 ENTRYPOINT：`/app/concurrentcache-server`
-- 默认 CMD：`--config /app/conf/concurrentcache.conf`
 
 ### 5.2 本地构建镜像
 
@@ -217,23 +219,20 @@ docker-compose up -d
 
 ### 6.1 启动多节点
 
-每个节点使用不同 `port`，分别启动：
+每个节点使用独立配置文件，分别启动：
 
 ```bash
-# 节点 A
-./concurrentcache-server --port 16379
+# 节点 A（默认配置，端口 16379）
+./concurrentcache-server &
 
-# 节点 B
-./concurrentcache-server --port 16380
-
-# 节点 C
-./concurrentcache-server --port 16381
+# 节点 B（准备 conf/node_b.conf，port=16380）
+cp conf/concurrentcache.conf conf/node_b.conf
+# 修改 conf/node_b.conf 中 port = 16380
+# 修改 conf/node_b.conf 中 cluster_enabled = true
+./concurrentcache-server &
 ```
 
-> ⚠️ 当前项目启动方式硬编码 `conf/concurrentcache.conf`（`main.cpp` 固定读这个文件）。多节点部署需要：
->
-> - 为每个节点准备独立配置文件
-> - 修改 `main.cpp` 支持 `--config` 参数（参考 `Dockerfile` 中的 `CMD ["--config", ...]` 意图）
+> **注意**：当前不支持 `--port` 命令行参数，多节点部署需准备独立配置文件。
 
 ### 6.2 加入集群
 
@@ -319,16 +318,16 @@ redis-cli -p 16379 INFO all
 
 ### 8.2 关键指标
 
-| 指标 | 来源 |
-|------|------|
-| `total_bgsave_calls` | `INFO stats` |
-| `total_rdb_saved_keys` | `INFO stats` |
-| `rdb_last_bgsave_status` | `INFO persistence` |
-| `rdb_last_bgsave_time_sec` | `INFO persistence` |
-| `rdb_dirty_count` | `INFO persistence`（自上次保存起的写操作数） |
-| `db0:keys=N` | `INFO keyspace` |
+| 指标 | 来源 | 说明 |
+|------|------|------|
+| `total_bgsave_calls` | `INFO stats` | BGSAVE 总调用次数 |
+| `total_rdb_saved_keys` | `INFO stats` | 累计持久化的 key 数 |
+| `rdb_last_bgsave_status` | `INFO persistence` | 上次 BGSAVE 状态（ok/err） |
+| `rdb_last_bgsave_time_sec` | `INFO persistence` | 上次 BGSAVE 时间戳 |
+| `rdb_dirty_count` | `INFO persistence` | 自上次保存起的写操作数 |
+| `db0:keys=N` | `INFO keyspace` | 当前 key 总数 |
 
-### 8.3 慢查询 / 调试
+### 8.3 调试命令
 
 ```bash
 redis-cli -p 16379 DEBUG SLEEP 5     # 模拟慢请求
@@ -341,7 +340,7 @@ redis-cli -p 16379 DEBUG OBJECT key   # 查看对象类型
 
 | 症状 | 排查 |
 |------|------|
-| 端口占用 | `lsof -i :16379` / `ss -tlnp | grep 16379` |
+| 端口占用 | `lsof -i :16379` / `ss -tlnp \| grep 16379` |
 | 配置文件语法错 | 检查 `conf/concurrentcache.conf` 每行 `key = value` 格式 |
 | ZLIB 未找到 | `apt install zlib1g-dev`（构建时）/ `zlib1g`（运行时） |
 | C++20 报错 | `g++ --version`（需 ≥ 12） |
@@ -350,7 +349,7 @@ redis-cli -p 16379 DEBUG OBJECT key   # 查看对象类型
 
 | 症状 | 排查 |
 |------|------|
-| 连接被拒 | 检查 `port` / 防火墙 / `bind` |
+| 连接被拒 | 检查 `port` / 防火墙 / 是否启动 |
 | 大量 timeout | 检查 `reactor_count` 是否小于 CPU 核数；查 `dirty_count` 是否持续高位 |
 | 内存持续上涨 | 检查 `max_entries` 配置；触发 `BGSAVE` |
 | RDB 加载失败 | 删除 `dump.rdb` 重启（数据无法恢复时） |
@@ -384,12 +383,12 @@ gdb -p <pid>
 ### 9.4 数据恢复
 
 ```bash
-# 手动从 RDB 恢复
-./concurrentcache-server   # 启动时会自动从 rdb_path 加载
+# 手动从 RDB 恢复——启动时自动加载
+./concurrentcache-server
 
-# 强制重新生成
-./concurrentcache-server SAVE  # 同步保存
-./concurrentcache-server BGSAVE # 异步保存
+# 强制保存
+redis-cli -p 16379 SAVE    # 同步保存
+redis-cli -p 16379 BGSAVE  # 异步保存
 ```
 
 ## 10. 升级与回滚
@@ -423,10 +422,27 @@ cp /backup/dump.20260601.rdb /var/lib/concurrentcache/dump.rdb
 sudo systemctl start concurrentcache
 ```
 
-## 11. 另见
+## 11. 性能基准
+
+以下数据基于 **8 核 Linux x86_64、Release 构建、64 分片、对比 Redis 7.0.15** 实测：
+
+| 场景 | ConcurrentCache | Redis | CC/Redis |
+|------|----------------|-------|----------|
+| 纯 GET（单连接） | 32,863 QPS | 55,224 QPS | 60% |
+| 纯 SET（单连接） | 42,318 QPS | 55,099 QPS | 77% |
+| 混合负载（单连接） | 42,640 QPS | 58,728 QPS | 73% |
+| 并发=10 混合 | 89,077 QPS | 82,397 QPS | **108%** |
+| 并发=100 混合 | 85,430 QPS | 87,734 QPS | 97% |
+| 并发=1000 混合 | 75,425 QPS | 75,438 QPS | 100% |
+| 并发=5000 混合 | 57,073 QPS | 62,301 QPS | 92% |
+| SET 1KB（并发=100） | 91,412 QPS | 88,058 QPS | **104%** |
+
+> 平均 QPS 比率：**90.4%**。单连接场景偏弱（60-77%），高并发场景与 Redis 持平（92-108%）。
+
+## 12. 另见
 
 - [架构总览](./architecture/overview.md) — 系统组成
 - [持久化架构](./architecture/persistence.md) — RDB 机制
 - [集群架构](./architecture/cluster.md) — 集群协议
-- [测试文档 § 9 CI 集成](./testing.md) — GitHub Actions
-- [测试文档 § 8 Sanitizer](./testing.md) — Debug 选项
+- [测试文档 § CI 集成](./testing.md)
+- [测试文档 § Sanitizer](./testing.md)

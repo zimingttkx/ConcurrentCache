@@ -2,7 +2,7 @@
 
 > **协议**：Redis RESP 2.0（兼容任意 Redis 客户端：`redis-cli`、`jedis`、`redis-py`、`go-redis`）
 > **默认端口**：`16379`（`conf/concurrentcache.conf` 中 `port` 项可改）
-> **命令总数**：45 个（注册于 `src/command/command_factory.cpp`）
+> **命令总数**：44 个（注册于 `src/command/command_factory.cpp`）
 > **文档维护**：与命令注册表严格同步，修改注册表必须同步本文档
 
 ## 1. 快速开始
@@ -31,8 +31,8 @@ print(r.get('greeting'))   # Hello, ConcurrentCache
 | [§ 7 哈希](#7-哈希-hash) | 5 | HSET / HGET / HDEL / HLEN / HGETALL |
 | [§ 8 集合](#8-集合-set) | 5 | SADD / SPOP / SCARD / SISMEMBER / SMEMBERS |
 | [§ 9 有序集合](#9-有序集合-zset) | 4 | ZADD / ZSCORE / ZCARD / ZRANGE |
-| [§ 10 持久化](#10-持久化) | 3 | SAVE / BGSAVE / LASTSAVE |
-| [§ 11 服务器](#11-服务器) | 4 | DBSIZE / FLUSHDB / INFO / DEBUG |
+| [§ 10 持久化](#10-持久化) | 5 | SAVE / BGSAVE / LASTSAVE / DBSIZE / FLUSHDB |
+| [§ 11 服务器](#11-服务器) | 2 | INFO / DEBUG |
 | [§ 12 集群](#12-集群) | 1 | CLUSTER（含 10 个子命令） |
 | [§ 13 复制](#13-复制) | 3 | PSYNC / SYNC / REPLCONF |
 | [§ 14 迁移](#14-迁移) | 1 | RESTORE |
@@ -54,33 +54,38 @@ PING [message]
 |------|------|------|--------|
 | `GET` | `GET key` | `$N\r\nvalue\r\n` 或 `$-1\r\n` | O(1) |
 | `SET` | `SET key value` | `+OK\r\n` | O(1) |
-| `DEL` | `DEL key` | `:1\r\n` 或 `:0\r\n` | O(1) |
+| `DEL` | `DEL key [key ...]` | `:N\r\n`（删除成功的 key 数） | O(N) |
 | `EXISTS` | `EXISTS key` | `:1\r\n` 或 `:0\r\n` | O(1) |
 | `INCR` | `INCR key` | 递增后整数值 | O(1) |
 | `DECR` | `DECR key` | 递减后整数值 | O(1) |
 
-> **INCR/DECR 行为**：若 key 不存在视为 0；若值非整数返回 `-ERR value is not an integer`。
+> **DEL** 支持批量删除多个 key，返回实际删除成功的数量。
+> **INCR/DECR** 行为：若 key 不存在视为 0；若值非整数返回 `-ERR value is not an integer`；若 key 持有非 STRING 类型返回 `-WRONGTYPE Operation against a key holding the wrong kind of value`。
 
 ## 5. 过期 TTL
 
 | 命令 | 语法 | 返回 |
 |------|------|------|
-| `EXPIRE` | `EXPIRE key seconds` | `:1\r\n`（成功）/`:0\r\n`（key 不存在或 seconds≤0） |
+| `EXPIRE` | `EXPIRE key seconds` | `:1\r\n`（成功）/ `:0\r\n`（key 不存在或 seconds≤0） |
 | `TTL` | `TTL key` | 剩余秒数；`-1`=永不过期；`-2`=不存在 |
 | `PTTL` | `PTTL key` | 剩余毫秒数；语义同上 |
-| `PERSIST` | `PERSIST key` | `:1\r\n`/`:0\r\n`（成功/无过期或不存在） |
+| `PERSIST` | `PERSIST key` | `:1\r\n` / `:0\r\n`（成功/无过期或不存在） |
 | `SETEX` | `SETEX key seconds value` | `+OK\r\n`（原子设置值+TTL） |
 
 ## 6. 列表 List
 
 | 命令 | 语法 | 返回 |
 |------|------|------|
-| `LPUSH` | `LPUSH key value [value ...]` | 列表长度 |
-| `RPUSH` | `RPUSH key value [value ...]` | 列表长度 |
+| `LPUSH` | `LPUSH key value [value ...]` | 操作后列表长度 |
+| `RPUSH` | `RPUSH key value [value ...]` | 操作后列表长度 |
 | `LPOP` | `LPOP key` | 弹出的元素或 nil |
 | `RPOP` | `RPOP key` | 弹出的元素或 nil |
 | `LLEN` | `LLEN key` | 列表长度（不存在返回 0） |
 | `LRANGE` | `LRANGE key start stop` | 元素数组（支持负索引） |
+
+> **LPUSH/RPUSH** 支持一次推入多个值。若 key 当前为 STRING 类型，会自动转换为 LIST（空字符串不保留）。
+> **LRANGE** 的 start/stop 支持负索引（-1 表示最后一个元素）。
+> 对非 LIST 类型的 key 执行列表命令返回 `-WRONGTYPE` 错误。
 
 ## 7. 哈希 Hash
 
@@ -88,9 +93,13 @@ PING [message]
 |------|------|------|
 | `HSET` | `HSET key field value` | `:1\r\n` 新增 / `:0\r\n` 更新 |
 | `HGET` | `HGET key field` | 值或 nil |
-| `HDEL` | `HDEL key field [field ...]` | 删除字段数 |
+| `HDEL` | `HDEL key field [field ...]` | 删除成功的字段数 |
 | `HLEN` | `HLEN key` | 字段数 |
 | `HGETALL` | `HGETALL key` | field/value 交替数组 |
+
+> **HSET** 当前仅支持单个 field/value 对（与 Redis 4.0+ 的多对支持不同）。
+> **HDEL** 支持一次删除多个字段。
+> 对非 HASH 类型的 key 执行哈希命令返回 `-WRONGTYPE` 错误。
 
 ## 8. 集合 Set
 
@@ -99,38 +108,42 @@ PING [message]
 | `SADD` | `SADD key member [member ...]` | 新增成员数 |
 | `SPOP` | `SPOP key` | 随机弹出的成员或 nil |
 | `SCARD` | `SCARD key` | 成员数（不存在返回 0） |
-| `SISMEMBER` | `SISMEMBER key member` | `:1\r\n`/`:0\r\n` |
+| `SISMEMBER` | `SISMEMBER key member` | `:1\r\n` / `:0\r\n` |
 | `SMEMBERS` | `SMEMBERS key` | 成员数组 |
 
+> **SADD** 支持一次添加多个成员。
 > **SPOP** 使用 `std::mt19937` 线程局部随机数生成器。
+> 对非 SET 类型的 key 执行集合命令返回 `-WRONGTYPE` 错误。
 
 ## 9. 有序集合 ZSet
 
 | 命令 | 语法 | 返回 |
 |------|------|------|
-| `ZADD` | `ZADD key score member` | `:1\r\n` 新增 / `:0\r\n` 已存在 |
+| `ZADD` | `ZADD key score member [score member ...]` | 新增成员数 |
 | `ZSCORE` | `ZSCORE key member` | 分数（Bulk String）或 nil |
 | `ZCARD` | `ZCARD key` | 成员数 |
-| `ZRANGE` | `ZRANGE key min max [WITHSCORES]` | 按分数范围返回（min ≤ score ≤ max） |
+| `ZRANGE` | `ZRANGE key start stop [WITHSCORES]` | 按排名索引返回成员 |
 
-> **ZRANGE 注意**：当前实现按分数区间查询，**不支持按索引范围**。
+> **ZADD** 支持一次添加多个 score/member 对。若 member 已存在且 score 不同，会更新分数。
+> **ZRANGE** 按排名索引（index）范围查询，start/stop 支持负索引（-1 表示最后一个）。可选 `WITHSCORES` 参数同时返回分数。**不支持 Redis 6.2+ 的 BYSCORE/BYLEX/REV/LIMIT 选项**。
+> 对非 ZSET 类型的 key 执行有序集合命令返回 `-WRONGTYPE` 错误。
 
 ## 10. 持久化
 
 | 命令 | 语法 | 返回 |
 |------|------|------|
 | `SAVE` | `SAVE` | `+OK\r\n` / `-ERR failed to save RDB` |
-| `BGSAVE` | `BGSAVE` | `Background saving started` / `-ERR bgsave failed` |
-| `LASTSAVE` | `LASTSAVE` | 上次成功保存的 Unix 时间戳 |
+| `BGSAVE` | `BGSAVE` | `+Background saving started\r\n` / `-ERR bgsave failed` |
+| `LASTSAVE` | `LASTSAVE` | 上次成功保存的 Unix 时间戳（整数） |
+| `DBSIZE` | `DBSIZE` | 当前 key 数量（整数） |
+| `FLUSHDB` | `FLUSHDB` | `+OK\r\n`（清空全部数据） |
 
-> BGSAVE 进行中再次触发 → `-ERR BGSAVE already in progress`
+> **BGSAVE** 进行中再次触发 → `-ERR BGSAVE already in progress`
 
 ## 11. 服务器
 
 | 命令 | 语法 | 返回 |
 |------|------|------|
-| `DBSIZE` | `DBSIZE` | 当前 key 数量 |
-| `FLUSHDB` | `FLUSHDB` | `+OK\r\n`（清空全部数据） |
 | `INFO` | `INFO [section]` | Bulk String（server/stats/persistence/keyspace/all） |
 | `DEBUG` | `DEBUG SLEEP <sec>` / `DEBUG OBJECT <key>` | `+OK\r\n` / 类型信息 |
 
@@ -206,10 +219,9 @@ RESTORE <key> <ttl> <serialized-value>
 | `-ERR value is not an integer` | 需整数参数但传入非数字 |
 | `-ERR invalid key` | key 为空字符串 |
 | `-ERR invalid score` | ZADD/ZRANGE 的 score 无法解析 |
+| `-ERR invalid integer` | ZRANGE 的 start/stop 无法解析为整数 |
 | `-ERR BGSAVE already in progress` | BGSAVE 重入 |
-| `-ERR not a string` | 对非 STRING 类型执行 GET |
-| `-MOVED <slot> <ip:port>` | 槽不在本节点 |
-| `-ASK <slot> <ip:port>` | 槽正在迁入 |
+| `-WRONGTYPE Operation against a key holding the wrong kind of value` | 对非预期类型的 key 执行类型敏感命令 |
 
 ## 16. 不支持的 Redis 特性
 
@@ -217,21 +229,28 @@ RESTORE <key> <ttl> <serialized-value>
 
 - 鉴权（`AUTH` / `ACL`）
 - TLS 加密连接
-- 事务（`MULTI` / `EXEC`）
+- 事务（`MULTI` / `EXEC` / `WATCH`）
 - 脚本（`EVAL` / Lua）
-- 发布订阅（`PUB` / `SUB`）
+- 发布订阅（`PUBLISH` / `SUBSCRIBE`）
 - Stream 数据类型
+- Bitmap / HyperLogLog / Geo 数据类型
 - 模块系统（`MODULE LOAD`）
+- 慢日志（`SLOWLOG`）
+- 客户端列表（`CLIENT LIST`）
+- 键扫描（`SCAN` / `KEYS`）
+- HSET 多 field/value 对（仅支持单对）
+- ZRANGE 的 BYSCORE/BYLEX/REV/LIMIT 选项
 
 ## 17. 协议格式（RESP 2.0）
 
 ```text
-+OK\r\n                     简单字符串
--ERR ...\r\n                错误
-:123\r\n                    整数
-$5\r\nhello\r\n             批量字符串
-$-1\r\n                     Nil
-*2\r\n$3\r\nGET\r\n$3\r\nfoo\r\n   数组（命令）
++OK\r\n                      简单字符串
+-ERR ...\r\n                 错误
+-WRONGTYPE ...\r\n           类型错误
+:123\r\n                     整数
+$5\r\nhello\r\n              批量字符串
+$-1\r\n                      Nil
+*2\r\n$3\r\nGET\r\n$3\r\nfoo\r\n  数组（命令）
 ```
 
 编码/解码实现位于 `src/protocol/resp.h`（`RespParser` / `RespEncoder`）。
@@ -245,15 +264,22 @@ redis-cli -p 16379
 
 > SET user:1 "Alice"
 OK
-> HSET user:1 age 25 city Beijing
+> DEL key1 key2 key3
 (integer) 2
+> HSET user:1 age 25
+(integer) 1
 > HGETALL user:1
 1) "age"
 2) "25"
-3) "city"
-4) "Beijing"
-> ZADD leaderboard 100 Alice 200 Bob
-(integer) 2
+> ZADD leaderboard 100 Alice 200 Bob 300 Charlie
+(integer) 3
+> ZRANGE leaderboard 0 -1 WITHSCORES
+1) "Alice"
+2) "100"
+3) "Bob"
+4) "200"
+5) "Charlie"
+6) "300"
 ```
 
 ### redis-py
@@ -266,9 +292,12 @@ r = redis.Redis(host='127.0.0.1', port=16379, decode_responses=True)
 r.set('counter', 0)
 r.incr('counter')   # 1
 
+# 批量删除
+r.delete('key1', 'key2', 'key3')  # 返回删除数
+
 # 哈希
-r.hset('user:1', mapping={'name': 'Alice', 'age': 25})
-r.hgetall('user:1') # {'name': 'Alice', 'age': '25'}
+r.hset('user:1', 'name', 'Alice')
+r.hgetall('user:1')  # {'name': 'Alice'}
 
 # ZSet
 r.zadd('lb', {'Alice': 100, 'Bob': 200})
@@ -284,4 +313,4 @@ r.setex('session:abc', 60, 'token-xyz')
 - [架构总览 § 1.1 核心特性](architecture/overview.md)
 - [架构总览 § 5 请求处理时序](architecture/overview.md)
 - [集群架构 § 8 客户端重定向](architecture/cluster.md)
-- [部署 § 端口与连接](../deployment.md)
+- [部署文档 § 端口与连接](../deployment.md)
