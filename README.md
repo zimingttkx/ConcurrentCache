@@ -207,13 +207,13 @@ OK
 本项目经过严格的压力测试，展现了卓越的高并发处理能力和极低的延迟。以下是性能表现：
 
 ### 吞吐量与性能基准
-![Benchmark Dashboard](docs/benchmark_dashboard.png)
+![Benchmark Dashboard](assets/benchmark/benchmark_dashboard.png)
 
 ### 延迟分析
-![Latency Analysis](docs/latency_analysis.png)
+![Latency Analysis](assets/benchmark/latency_analysis.png)
 
 ### 线性扩展性
-![Scalability](docs/scalability.png)
+![Scalability](assets/benchmark/scalability.png)
 
 ## Docker
 
@@ -392,6 +392,22 @@ cmake .. -DENABLE_ASAN=ON
 cmake .. -DENABLE_TSAN=ON
 cmake .. -DENABLE_UBSAN=ON
 ```
+
+## 文档
+
+完整文档位于 [`docs/`](docs/README.md)：
+
+| 主题 | 链接 |
+|------|------|
+| 架构总览 | [docs/architecture/overview.md](docs/architecture/overview.md) |
+| 网络层 | [docs/architecture/network.md](docs/architecture/network.md) |
+| 存储层 | [docs/architecture/storage.md](docs/architecture/storage.md) |
+| 内存池 | [docs/architecture/memory-pool.md](docs/architecture/memory-pool.md) |
+| 持久化 | [docs/architecture/persistence.md](docs/architecture/persistence.md) |
+| 集群 | [docs/architecture/cluster.md](docs/architecture/cluster.md) |
+| API 命令 | [docs/api.md](docs/api.md) |
+| 测试 | [docs/testing.md](docs/testing.md) |
+| 部署运维 | [docs/deployment.md](docs/deployment.md) |
 
 ## 设计决策
 

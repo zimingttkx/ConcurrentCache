@@ -49,7 +49,7 @@ COLORS = {
 
 def load_stress_report():
     """Load from test/e2e_test/stress_limit_report.json"""
-    p = Path(__file__).parent.parent / 'test' / 'e2e_test' / 'stress_limit_report.json'
+    p = Path(__file__).parent.parent.parent / 'test' / 'e2e_test' / 'stress_limit_report.json'
     if not p.exists():
         return None
     with open(p) as f:
@@ -58,7 +58,7 @@ def load_stress_report():
 
 def load_psync_report():
     """Load from test/e2e_test/psync_replication_report.json"""
-    p = Path(__file__).parent.parent / 'test' / 'e2e_test' / 'psync_replication_report.json'
+    p = Path(__file__).parent.parent.parent / 'test' / 'e2e_test' / 'psync_replication_report.json'
     if not p.exists():
         return None
     with open(p) as f:
