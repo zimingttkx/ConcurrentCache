@@ -5,6 +5,23 @@
 
 namespace cc_server {
 
+// 安全的字符串转整数：避免 std::stoll 在非法/超长输入时抛出未捕获异常
+// （未捕获异常会经 EventLoop::loop 一路传播导致 std::terminate，使整个服务器崩溃）。
+// 成功返回 true 并将结果写入 out；失败返回 false。
+static bool parse_int64_safe(const std::string& s, int64_t& out) {
+    if (s.empty()) return false;
+    try {
+        size_t idx = 0;
+        long long v = std::stoll(s, &idx);
+        // 拒绝带尾随垃圾的字符串（如 "12abc"）
+        if (idx != s.size()) return false;
+        out = static_cast<int64_t>(v);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 // RespParser 构造函数
 RespParser::RespParser() {
     // 调用 reset() 初始化解析器状态
@@ -169,31 +186,31 @@ bool RespParser::has_complete_command(const Buffer* buffer) {
 
             std::string len_str(data + 1, static_cast<size_t>(crlf - (data + 1)));
 
-            // std::stoll() - "String TO Long Long"
-            // 将字符串转换为 64 位整数
-            // 例如: "5" -> 5, "100" -> 100
-
-            int64_t bulk_len = std::stoll(len_str);
-
-            
-            // 处理 null bulk string
-            
-            // $-1\r\n 表示 null，长度为 -1
-            // 这种情况下命令已经完整（只需要长度行 + \r\n）
-
-            if (bulk_len < 0) {
-                // 检查是否有足够的字节容纳 $-1\r\n
-                // 即: 当前位置 + 4 字节 (\r\n + $-1\r\n)
-                // 实际上 len >= 5 已经足够
-                return len >= 5 && crlf[1] == '\n';
+            int64_t bulk_len = 0;
+            // 解析失败（非数字/超长）直接判定为协议错误：命令不完整
+            if (!parse_int64_safe(len_str, bulk_len)) {
+                return false;
             }
 
-            
+            // 处理 null bulk string
+            // $-1\r\n 表示 null，长度为 -1
+            // 这种情况下命令已经完整（只需要长度行 + \r\n）
+            // 注意：仅 -1 合法，其他负数视为协议错误（返回 false）
+            if (bulk_len == -1) {
+                return len >= 5 && crlf[1] == '\n';
+            }
+            if (bulk_len < -1) {
+                return false;
+            }
+
+            // 防止后续整数运算溢出（bulk_len 上限限制，避免 OOM/越界）
+            if (bulk_len > static_cast<int64_t>(512 * 1024 * 1024)) {
+                return false;
+            }
+
             // 计算完整批量字符串的总长度
-            
             // $<len>\r\n = (crlf - data) + 2 字节
             // <content>\r\n = bulk_len + 2 字节
-
             size_t header_len = static_cast<size_t>(crlf - data) + 2;  // "$<len>\r\n" 的长度
             size_t total_len = header_len + static_cast<size_t>(bulk_len) + 2;  // 完整命令长度
 
@@ -211,12 +228,23 @@ bool RespParser::has_complete_command(const Buffer* buffer) {
 
             // 解析数组元素个数
             std::string count_str(data + 1, static_cast<size_t>(crlf - (data + 1)));
-            int64_t count = std::stoll(count_str);
+            int64_t count = 0;
+            if (!parse_int64_safe(count_str, count)) {
+                return false;  // 协议错误：非数字数组长度
+            }
 
             // 空数组（count = 0）或 null 数组（count < 0）
             // 只需要 *<count>\r\n 就是完整的
-            if (count <= 0) {
+            // 注意：仅 -1 视为 null 数组，其余负数视为协议错误
+            if (count == 0) {
                 return true;
+            }
+            if (count < 0) {
+                return false;
+            }
+            // 限制数组元素上限，避免后续循环 OOM/越界
+            if (count > static_cast<int64_t>(1024 * 1024)) {
+                return false;
             }
 
             
@@ -247,11 +275,16 @@ bool RespParser::has_complete_command(const Buffer* buffer) {
                     if (!elem_crlf) return false;
 
                     std::string elem_len_str(data + pos + 1, static_cast<size_t>(elem_crlf - (data + pos + 1)));
-                    int64_t elem_len = std::stoll(elem_len_str);
+                    int64_t elem_len = 0;
+                    if (!parse_int64_safe(elem_len_str, elem_len)) {
+                        return false;  // 协议错误
+                    }
 
-                    if (elem_len < 0) {
+                    if (elem_len == -1) {
                         // null bulk: $-1\r\n
                         pos = static_cast<size_t>(elem_crlf - data) + 2;
+                    } else if (elem_len < -1) {
+                        return false;  // 非法负数长度
                     } else {
                         size_t elem_total_len = static_cast<size_t>(elem_crlf - data) + 2 + static_cast<size_t>(elem_len) + 2;
                         if (len < elem_total_len) return false;
@@ -572,21 +605,28 @@ bool RespParser::parse_bulk_string(Buffer* buffer, std::string& out) {
 
     // 提取长度字符串
     std::string len_str(data + 1, static_cast<size_t>(crlf - (data + 1)));
-    int64_t bulk_len = std::stoll(len_str);
+    int64_t bulk_len = 0;
+    if (!parse_int64_safe(len_str, bulk_len)) {
+        error_msg_ = "Invalid bulk string length";
+        return false;
+    }
 
     // 计算头部长度（"$<len>\r\n"）
     size_t header_len = static_cast<size_t>(crlf - data) + 2;
 
-    
     // 第2步：处理 null bulk string
-    
+
     // $-1\r\n 表示 null（空值）
     // 这种情况下，命令已经完整，不需要内容部分
 
-    if (bulk_len < 0) {
+    if (bulk_len == -1) {
         skip(buffer, header_len);  // 只跳过 $-1\r\n
         out = "";  // 返回空字符串，表示 null
         return true;
+    }
+    if (bulk_len < -1) {
+        error_msg_ = "Invalid bulk string length";
+        return false;
     }
 
     
@@ -639,18 +679,25 @@ bool RespParser::parse_array(Buffer* buffer, std::vector<RespValue>& out) {
     }
 
     std::string count_str(data + 1, static_cast<size_t>(crlf - (data + 1)));
-    int64_t count = std::stoll(count_str);
+    int64_t count = 0;
+    if (!parse_int64_safe(count_str, count)) {
+        error_msg_ = "Invalid array count";
+        return false;
+    }
 
     // 跳过 *<count>\r\n
     skip(buffer, static_cast<size_t>(crlf - data) + 2);
 
-    
     // 第2步：处理 null 数组
-    
     // *-1\r\n 表示 null 数组
+    // 其他负数视为协议错误
 
-    if (count < 0) {
+    if (count == -1) {
         return true;
+    }
+    if (count < -1) {
+        error_msg_ = "Invalid array count";
+        return false;
     }
 
     

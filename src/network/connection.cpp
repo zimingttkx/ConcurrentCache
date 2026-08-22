@@ -137,20 +137,22 @@ namespace cc_server {
             // ---- 成功读到数据 ----
 
             // 追加到输入缓冲区
-            // input_buffer_ 现在缓存了所有收到的数据
-            // 业务层可以从这里按"消息"为单位读取
             input_buffer_.append(temp_buffer, static_cast<size_t>(bytes_read));
+
             // 协议解析 调用RespParaser解析命令
+            // 注意：解析错误时不再 drain（消耗）坏字节是 P2-4 的遗留行为；
+            // 这里我们保持原有协议稳健性：逐条消费完整命令，畸形命令单独回错误，
+            // 不把坏字节永久滞留（parse() 内部已按完整命令推进 reader index）。
             std::vector<RespValue> commands = resp_parser_.parse(input_buffer());
-            for (auto & cmd : commands) {
-                if (command_callback_) {
-                    command_callback_(cmd, this);
-                }
-            }
             if (!resp_parser_.error().empty()) {
                 LOG_ERROR(connection, "RESP parse error: %s", resp_parser_.error().c_str());
                 send_response(RespEncoder::encode_error(resp_parser_.error()));
                 resp_parser_.reset();  // 重置解析器状态，准备下一次解析
+            }
+            for (auto & cmd : commands) {
+                if (command_callback_) {
+                    command_callback_(cmd, this);
+                }
             }
 
             LOG_DEBUG(connection, "handle_read: read %zd bytes from fd=%d",

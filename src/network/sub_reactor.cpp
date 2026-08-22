@@ -172,7 +172,17 @@ void SubReactor::join_thread() {
 
         auto command = CommandFactory::instance().create(cmd_name);
         if (command) {
-            auto response = command->execute(args);
+            std::string response;
+            try {
+                response = command->execute(args);
+            } catch (const std::exception& e) {
+                // 命令执行抛异常（如 RESTORE 解析畸形数据）不应拖垮整个 reactor 线程
+                LOG_ERROR(NETWORK, "Command '%s' threw: %s", cmd_name.c_str(), e.what());
+                response = RespEncoder::encode_error(std::string("ERR ") + e.what());
+            } catch (...) {
+                LOG_ERROR(NETWORK, "Command '%s' threw unknown exception", cmd_name.c_str());
+                response = RespEncoder::encode_error("ERR unknown error during command execution");
+            }
             client_conn->send_response(response);
 
             // 集群模式下，主节点将写命令推送到复制缓冲区

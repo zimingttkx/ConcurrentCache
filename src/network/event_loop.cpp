@@ -79,12 +79,15 @@ namespace cc_server {
             return false;
         }
 
-        // 设置写端为非阻塞
-        // 为什么写端要非阻塞？
-        // 如果 pipe 缓冲区满了（很少见），write 会阻塞
-        // 设置 O_NONBLOCK 后，写不进去就立即返回，不会卡住
-        int flags = fcntl(wakeup_pipe_[1], F_GETFL, 0);          // 获取当前设置
-        fcntl(wakeup_pipe_[1], F_SETFL, flags | O_NONBLOCK);    // 添加非阻塞标志
+        // 写端和读端都设为非阻塞：
+        // 写端非阻塞：pipe 缓冲区满时 write 立即返回不卡住。
+        // 读端非阻塞（关键修复）：handle_wakeup() 读完唤醒字节后，
+        // 空管道上的 read() 应返回 EAGAIN 而非阻塞，否则 reactor 线程会卡在
+        // read() 不再回到 epoll_wait，导致 quit() 后 join() 永久阻塞。
+        int wflags = fcntl(wakeup_pipe_[1], F_GETFL, 0);          // 获取当前设置
+        fcntl(wakeup_pipe_[1], F_SETFL, wflags | O_NONBLOCK);    // 添加非阻塞标志
+        int rflags = fcntl(wakeup_pipe_[0], F_GETFL, 0);
+        fcntl(wakeup_pipe_[0], F_SETFL, rflags | O_NONBLOCK);
 
         wakeup_fd_ = wakeup_pipe_[0];  // 读端交给 EventLoop 监听
 

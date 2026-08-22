@@ -49,11 +49,16 @@ namespace cc_server {
         uint32_t revents = triggered_events_;
         triggered_events_ = 0;
 
+        // EPOLLERR / EPOLLHUP / EPOLLRDHUP 都表示连接已不可用，应触发关闭。
+        // 注意：EPOLLHUP 常与 EPOLLIN 同时上报（对端关闭），若只绑 error_cb 而
+        // close_cb 为空，HUP 会被静默忽略 → 连接泄漏（修复 P2-3）。
         if (revents & EPOLLERR) {
             if (error_cb) error_cb();
+            return;  // 错误后不再处理读/写，交由 close 路径统一清理
         }
         if (revents & (EPOLLHUP | EPOLLRDHUP)) {
             if (close_cb) close_cb();
+            return;  // HUP 同样终结该连接的处理，避免对已半关的 fd 继续读写
         }
         if (revents & EPOLLIN) {
             if (read_cb) read_cb();

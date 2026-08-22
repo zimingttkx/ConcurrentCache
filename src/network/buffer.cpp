@@ -65,10 +65,12 @@ namespace cc_server {
     // 压缩空间：把未读数据移到缓冲区开头，释放前端空闲
     void Buffer::compact() {
         if (reader_idx_ == 0) return;
-        std::copy(
+        // 源区间 [reader_idx_, writer_idx_) 与目的区间 [0, ...) 重叠，
+        // 必须用 copy_backward（或 memmove）而非 std::copy，否则是 UB。
+        std::copy_backward(
             buffer_.begin() + static_cast<long>(reader_idx_),
             buffer_.begin() + static_cast<long>(writer_idx_),
-            buffer_.begin()
+            buffer_.begin() + static_cast<long>(writer_idx_ - reader_idx_)
         );
         writer_idx_ -= reader_idx_;
         reader_idx_ = 0;
