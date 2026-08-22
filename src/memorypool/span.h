@@ -24,12 +24,13 @@ struct Span {
 
     void* free_list_;       // 空闲小块链表
     size_t free_count_;     // 空闲小块的数量
+    size_t total_objects_;  // 实际切分出的对象总数（用于归还判定，避免泄漏）
 
     Span* next_;            // 链表指针
     Span* prev_;
 
     Span() : page_id_(0), num_pages_(0), size_class_(0),
-             free_list_(nullptr), free_count_(0),
+             free_list_(nullptr), free_count_(0), total_objects_(0),
              next_(nullptr), prev_(nullptr) {}
 };
 

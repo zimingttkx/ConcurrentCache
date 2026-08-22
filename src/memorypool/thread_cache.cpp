@@ -5,16 +5,26 @@
 
 #include "thread_cache.h"
 
+#include <algorithm>
 #include <cstdlib>
 
 #include "central_cache.h"
 
 namespace cc_server {
 
-ThreadCache* ThreadCache::get_instance() {
-    // C++11 thread_local 保证每个线程有独立实例
-    static thread_local ThreadCache instance;
-    return &instance;
+ThreadCache::ThreadCache() {
+    // 初始化每个SizeClass对应的FreeList
+    free_lists_.resize(SizeClass::kNumClasses);
+}
+
+ThreadCache::~ThreadCache() {
+    // 线程退出时，把每个 SizeClass 缓存的空闲对象全部归还 CentralCache，
+    // 确保内存池可回收（修复 P1-3：此前缺少析构，线程死亡时缓存对象泄漏）。
+    for (size_t i = 0; i < free_lists_.size(); ++i) {
+        FreeList& free_list = free_lists_[i];
+        if (free_list.empty()) continue;
+        return_to_central(i);
+    }
 }
 
 void* ThreadCache::allocate(const size_t size) {
@@ -88,16 +98,22 @@ void ThreadCache::fetch_from_central(size_t class_index) {
 void ThreadCache::return_to_central(size_t class_index) {
     FreeList& free_list = free_lists_[class_index];
 
-    // 归还一半
+    // 归还一半（析构场景下 free_list 全部对象也会被一次性归还：见 ~ThreadCache）
     size_t return_count = free_list.size() / 2;
     if (return_count == 0) return_count = 1;
 
-    void* objs[256];
-    size_t actual_count = free_list.pop_batch(objs, return_count);
+    // pop_batch 单次最多 256 个，循环归还避免一次 pop 超限
+    while (free_list.size() > 0) {
+        size_t batch = std::min<size_t>(free_list.size(), 256);
+        void* objs[256];
+        size_t actual_count = free_list.pop_batch(objs, batch);
 
-    // 逐个归还给CentralCache
-    for (size_t i = 0; i < actual_count; ++i) {
-        CentralCache::get_instance().deallocate(objs[i], class_index);
+        for (size_t i = 0; i < actual_count; ++i) {
+            CentralCache::get_instance().deallocate(objs[i], class_index);
+        }
+
+        // 若实际归还数量小于请求数量，说明已无更多对象，避免死循环
+        if (actual_count < batch) break;
     }
 }
 

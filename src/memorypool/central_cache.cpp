@@ -98,17 +98,18 @@ void CentralCache::deallocate(void* obj, size_t class_index) {
     span->free_count_++;
 
     // 如果Span全部空闲，归还给PageCache
-    // 判断条件：Span的页数 * 每页大小 == 这个SizeClass的大小 * 空闲对象数
-    size_t class_size = SizeClass::get_size(class_index);
-    size_t span_total_objects = (span->num_pages_ * page_size) / class_size;
-
-    if (span->free_count_ == span_total_objects) {
+    // 判断条件：free_count_ 达到实际切分出的对象总数（total_objects_）
+    // 修复 P1/Critical：此前用 num_pages*page_size/class_size 重算阈值，
+    // 对不能整除的 size class（384B/8B 等）阈值永远达不到，Span 永不留还 → 泄漏。
+    // 现在在切分时把实际 carved 数存入 span->total_objects_，直接比较即可。
+    if (span->free_count_ == span->total_objects_) {
         // 全部空闲，从SpanList移除
         span_lists_[class_index].remove(span);
 
         // 归还给PageCache
         span->free_list_ = nullptr;
         span->free_count_ = 0;
+        span->total_objects_ = 0;
         PageCache::get_instance().free_span(span);
     }
 }
@@ -147,6 +148,9 @@ Span* CentralCache::fetch_from_page_cache(size_t class_index) {
         span->free_count_++;
         offset += class_size;
     }
+    // 记录实际切分出的对象总数，归还判定以它为准（修复 P1-1：此前用
+    // num_pages*page_size/class_size 重算，对不能整除的 size class 永不达标导致泄漏）
+    span->total_objects_ = span->free_count_;
 
     return span;
 }

@@ -55,10 +55,12 @@ public:
     void deallocate(void* obj, size_t size);
 
 private:
-    ThreadCache() {
-        // 初始化每个SizeClass对应的FreeList
-        free_lists_.resize(SizeClass::kNumClasses);
-    }
+    // 构造函数（private：仅由 get_instance 的 thread_local 使用）
+    ThreadCache();
+
+    // 析构函数：线程退出时把缓存的对象全部归还 CentralCache，
+    // 避免线程本地缓存永久泄漏（修复 P1-3：此前无析构，≤32 个/类的对象随线程死亡而泄漏）
+    ~ThreadCache();
 
     //
     // 从CentralCache获取一批对象
