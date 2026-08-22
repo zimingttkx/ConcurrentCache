@@ -81,6 +81,7 @@ public:
     void set_msg_callback(ClusterLink::MsgCallback cb) { msg_callback_ = std::move(cb); }
     void set_gossip_callback(MsgCallback cb) { gossip_callback_ = std::move(cb); }
     void set_meet_callback(std::function<void(const std::string& ip, int port)> cb) { meet_callback_ = std::move(cb); }
+    void set_ping_timeout_callback(NodeCallback cb) { ping_timeout_callback_ = std::move(cb); }
 
     // 设置 ClusterState 引用（用于获取本节点信息）
     void set_state(ClusterState* state) { state_ = state; }

@@ -29,6 +29,7 @@ enum class ClusterMsgType : uint16_t {
     kFailoverAuthAck = 8,  // 故障转移确认
     kUpdate = 9,     // 节点信息更新
     kRepData = 10,   // 复制数据命令
+    kPush = 11,      // 推送节点信息（与 GossipType::kPush 对应，用于 UPDATE 广播）
 };
 
 // 集群消息头

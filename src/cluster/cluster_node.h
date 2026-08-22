@@ -9,6 +9,8 @@
 #include <atomic>
 
 namespace cc_server {
+// 前向声明：GossipNodeInfo 定义在 cluster_gossip.h，避免循环包含
+struct GossipNodeInfo;
 
 class ClusterNode {
 public:
@@ -16,8 +18,14 @@ public:
     ClusterNode(const std::string& name, const std::string& ip, int port, NodeRole role);
 
     // 获取节点信息（[[nodiscard]] 防止忽略返回值）
+    // 注意：info_ 中的 flags / config_epoch 是原子成员，可安全并发读写；
+    // 其余字段（ip/port/role 等）由调用方在已建立同步的上下文中访问。
     [[nodiscard]] const NodeInfo& getInfo() const { return info_; }
     [[nodiscard]] NodeInfo& getInfo() { return info_; }
+
+    // 原子访问 config_epoch（避免多线程并发读写的数据竞争；P0-4/High）
+    [[nodiscard]] int64_t getConfigEpoch() const { return info_.config_epoch.load(std::memory_order_acquire); }
+    void setConfigEpoch(int64_t epoch) { info_.config_epoch.store(epoch, std::memory_order_release); }
 
     // 节点名称
     [[nodiscard]] const std::string& getName() const { return info_.name; }
@@ -48,6 +56,7 @@ public:
     // 槽相关
     void addSlot(int slot);
     void delSlot(int slot);
+    void updateNodeInfo(const GossipNodeInfo& info);  // 从 gossip 同步 flags/role/slots/epoch
     [[nodiscard]] bool hasSlot(int slot) const;
     [[nodiscard]] std::vector<int> getSlots() const {
         std::lock_guard<std::mutex> lock(mutex_);

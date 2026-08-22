@@ -70,6 +70,7 @@ public:
     void handle_pong(const GossipMsg& msg);
     void handle_meet(const GossipMsg& msg);
     void handle_fail(const GossipMsg& msg);
+    void handle_update(const GossipMsg& msg);
     void handle_failover_auth_req(const GossipMsg& msg);
     void handle_failover_auth_ack(const GossipMsg& msg);
 
@@ -93,6 +94,14 @@ public:
     using UpdateCallback = std::function<void(const std::shared_ptr<ClusterNode>& node)>;
     void set_meet_callback(MeetCallback cb) { meet_callback_ = std::move(cb); }
     void set_update_callback(UpdateCallback cb) { update_callback_ = std::move(cb); }
+
+    // 查询已知节点（供 ClusterServer 的 update_callback 同步）
+    std::unordered_map<std::string, GossipNodeInfo>::const_iterator get_known_node(const std::string& name) const {
+        return known_nodes_.find(name);
+    }
+    std::unordered_map<std::string, GossipNodeInfo>::const_iterator unknown_end() const {
+        return known_nodes_.end();
+    }
 
 private:
     ClusterState* state_ = nullptr;

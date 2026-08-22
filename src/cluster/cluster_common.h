@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <string>
+#include <atomic>
 
 namespace cc_server {
 
@@ -54,11 +55,11 @@ struct NodeInfo {
     std::string replicaof_ip;       // 主节点IP（副本用）
     int replicaof_port = 0;         // 主节点端口（副本用）
     NodeRole role = NodeRole::kNodeUnknown;  // 角色
-    uint64_t flags = 0;            // 标志
+    std::atomic<uint64_t> flags{0};          // 标志（原子，避免多线程并发读写的数据竞争；P0-4/High）
     int64_t ping_sent = 0;         // 发送ping的时间
     int64_t pong_received = 0;     // 收到pong的时间
     int64_t link_disconnect_time = 0;  // 连接断开时间
-    int64_t config_epoch = 0;     // 配置轮次（用于故障转移）
+    std::atomic<int64_t> config_epoch{0};  // 配置轮次（原子，用于故障转移；P0-4/High）
 };
 
 // 节点故障检测信息

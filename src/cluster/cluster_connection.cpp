@@ -48,6 +48,10 @@ void ClusterConnection::start_heartbeat() {
             std::this_thread::sleep_for(std::chrono::milliseconds(heartbeat_interval_ms_));
             if (!heartbeat_thread_stop_.load()) {
                 on_timer();
+                // 驱动故障转移状态机：执行 PFAIL→FAIL 检查与 failover 推进
+                // （修复 P0-4：此前 executeFailover 从未被周期性调用，
+                // 导致故障检测→failover 链路断裂）
+                ClusterServer::instance().on_timer();
             }
         }
     });
@@ -538,6 +542,13 @@ void ClusterConnection::check_connections() {
     lock.unlock();
 
     for (const auto& name : timed_out_nodes) {
+        // 标记节点为 PFAIL（疑似下线）：触发故障检测的入口。
+        // 注意：这里只标 PFAIL；客观下线（FAIL）由 checkFailQuorum 在
+        // 心跳线程中基于 PFAIL 报告数达到法定人数时升级，避免将瞬时抖动
+        // 误判为永久下线。
+        if (state_) {
+            state_->markNodeAsPfail(name);
+        }
         if (ping_timeout_callback_) {
             ping_timeout_callback_(name);
         }

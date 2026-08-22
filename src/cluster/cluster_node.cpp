@@ -1,5 +1,7 @@
 // cluster_node.cpp
 #include "cluster_node.h"
+#include "cluster_gossip.h"  // 提供 GossipNodeInfo 完整定义（updateNodeInfo 使用）
+#include "cluster_common.h"
 #include "base/log.h"
 #include <algorithm>
 
@@ -35,6 +37,37 @@ void ClusterNode::addSlot(int slot) {
 void ClusterNode::delSlot(int slot) {
     std::lock_guard<std::mutex> lock(mutex_);
     std::erase(slots_, slot);
+}
+
+void ClusterNode::updateNodeInfo(const GossipNodeInfo& info) {
+    // 同步对端广播的节点元信息（flags/role/slots/config_epoch）。
+    // 注意：这里只同步可安全合并的字段，避免覆盖本节点的本地状态
+    // （如 connected_、replication_state_、投票记录等）。
+    if (info.flags & static_cast<uint16_t>(NodeFlags::kFail)) {
+        setFailFlag(true);
+    } else {
+        clearFlags(static_cast<uint64_t>(NodeFlags::kFail));
+    }
+    if (info.flags & static_cast<uint16_t>(NodeFlags::kPfail)) {
+        setPfailFlag(true);
+    } else {
+        clearFlags(static_cast<uint64_t>(NodeFlags::kPfail));
+    }
+    if (info.role == 0) {
+        setRole(NodeRole::kMaster);
+    } else {
+        setRole(NodeRole::kReplica);
+    }
+    // 修复 P0-4/High：config_epoch 现在为原子成员，使用 store 而非平铺赋值
+    info_.config_epoch.store(static_cast<int64_t>(info.epoch), std::memory_order_relaxed);
+
+    // 同步槽信息：用广播中的槽列表整体替换本地列表（仅在非故障转移期间安全）
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        slots_.assign(info.used_slot.begin(), info.used_slot.end());
+    }
+    LOG_DEBUG(CLUSTER, "Updated node %s info via gossip (flags=0x%X, role=%d, slots=%zu)",
+              info_.name.c_str(), info.flags, static_cast<int>(info.role), info.used_slot.size());
 }
 
 bool ClusterNode::hasSlot(int slot) const {

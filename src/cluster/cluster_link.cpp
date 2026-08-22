@@ -74,7 +74,10 @@ bool ClusterLink::connect() {
 }
 
 void ClusterLink::disconnect() {
-    if (!connected_.load()) {
+    // 保证只执行一次：先 CAS 把 connected_ 置 false，
+    // 避免 handle_read/handle_write 与断开回调中对同一对象重复调用
+    bool expected = true;
+    if (!connected_.compare_exchange_strong(expected, false)) {
         return;
     }
 
@@ -83,7 +86,6 @@ void ClusterLink::disconnect() {
         fd_ = -1;
     }
 
-    connected_.store(false);
     LOG_INFO(CLUSTER, "ClusterLink disconnected: %s", node_name_.c_str());
 }
 
@@ -254,6 +256,9 @@ void ClusterLink::handle_read() {
     } else if (n == 0) {
         // 对端关闭连接
         LOG_INFO(CLUSTER, "Connection closed by %s", node_name_.c_str());
+        // 顺序：先触发断开回调（回调中删除 link 会析构 this），
+        // 再调用 disconnect() 清理 fd/状态。disconnect() 内部已用 CAS 保证
+        // 只执行一次，且不再访问已被回调释放的资源。
         if (disconnect_callback_) {
             disconnect_callback_(node_name_, this);
         }

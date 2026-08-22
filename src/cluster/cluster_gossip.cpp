@@ -148,9 +148,14 @@ void ClusterGossip::handle_ping(const GossipMsg& msg) {
                 meet_callback_(info.ip, info.port);
             }
         } else {
-            // 更新已有节点信息
+            // 更新已有节点信息（含 flags/role/slots/config_epoch）
             if (update_callback_) {
                 update_callback_(existing);
+            } else {
+                // update_callback_ 未设置时，至少同步 PFAIL/FAIL 标志，避免脑裂
+                if (info.flags & static_cast<uint16_t>(NodeFlags::kFail)) {
+                    existing->setFailFlag(true);
+                }
             }
         }
     }
@@ -171,8 +176,14 @@ void ClusterGossip::handle_pong(const GossipMsg& msg) {
         }
 
         auto existing = state_->getNode(info.name);
-        if (existing && update_callback_) {
-            update_callback_(existing);
+        if (existing) {
+            if (update_callback_) {
+                update_callback_(existing);
+            } else {
+                if (info.flags & static_cast<uint16_t>(NodeFlags::kFail)) {
+                    existing->setFailFlag(true);
+                }
+            }
         }
     }
 }
@@ -283,7 +294,7 @@ void ClusterGossip::broadcast_fail(const std::string& node_name) {
     GossipMsg msg;
     msg.type = GossipType::kFail;
     msg.sender_name = my_node->getName();
-    msg.sender_epoch = static_cast<uint64_t>(my_node->getInfo().config_epoch);
+    msg.sender_epoch = static_cast<uint64_t>(my_node->getConfigEpoch());
 
     // 添加要广播的故障节点信息
     auto failed_node = state_->getNode(node_name);
@@ -331,10 +342,26 @@ void ClusterGossip::handle_failover_auth_req(const GossipMsg& msg) {
 void ClusterGossip::handle_failover_auth_ack(const GossipMsg& msg) {
     assert(state_ != nullptr);
     LOG_INFO(CLUSTER, "Received FAILOVER_AUTH_ACK from %s", msg.sender_name.c_str());
+    // 实际投票计票在 ClusterServer::handleFailoverAuthAck 中完成
+}
 
-    // 从nodes中获取投票确认信息
+void ClusterGossip::handle_update(const GossipMsg& msg) {
+    assert(state_ != nullptr);
+    LOG_INFO(CLUSTER, "Received UPDATE/PUSH from %s", msg.sender_name.c_str());
+
+    // 处理节点信息更新：用广播中的 flags/role/slots/config_epoch 同步本节点缓存。
+    // 修复 P0-5：此前 UPDATE/PUSH 消息被静默丢弃，导致新主接管槽位后其他节点仍相信死主。
     for (const auto& info : msg.nodes) {
-        LOG_INFO(CLUSTER, "Failover auth ack from node: %s", info.name.c_str());
+        auto node = state_->getNode(info.name);
+        if (node) {
+            if (update_callback_) {
+                // 先更新 known_nodes_，使 update_callback 能取到最新 gossip 信息
+                known_nodes_[info.name] = info;
+                update_callback_(node);
+            } else {
+                node->setFailFlag(info.flags & static_cast<uint16_t>(NodeFlags::kFail));
+            }
+        }
     }
 }
 

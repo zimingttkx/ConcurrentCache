@@ -51,6 +51,27 @@ void ClusterServer::init() {
     // 初始化 Gossip 协议
     gossip_.init(&state_);
 
+    // 设置 Gossip 的 update_callback：当收到 PING/PONG/MEET 携带的节点信息时，
+    // 用广播中的 flags/role/slots/config_epoch 同步本节点缓存（修复 P0-5：
+    // 此前该回调从未设置，导致新主接管槽位后其他节点仍相信死主）。
+    gossip_.set_update_callback([this](const std::shared_ptr<ClusterNode>& node) {
+        if (!node) return;
+        // 用本节点已知的 GossipNodeInfo 同步到 ClusterNode（通过 known_nodes_ 查询）
+        auto it = gossip_.get_known_node(node->getName());
+        if (it != gossip_.unknown_end()) {
+            node->updateNodeInfo(it->second);
+        }
+    });
+
+    // 设置 ping_timeout_callback：节点 PING 超时时，尝试将其升级为客观下线（FAIL）
+    // 若达到法定人数（多数派主节点都报告了该节点的 PFAIL）。修复 P0-4：
+    // 此前 handleNodeTimeout/checkFailQuorum 无任何调用者，死节点永不被发现。
+    connection_.set_ping_timeout_callback([this](const std::string& node_name) {
+        if (checkFailQuorum(node_name)) {
+            markNodeAsFail(node_name);
+        }
+    });
+
     // 设置连接回调 - 当收到 PONG 时将对端节点添加到状态
     // 这完成 MEET 命令的三次握手:发送 MEET -> 收到 PONG -> 添加对端节点
     connection_.set_node_connected_callback([this](const std::string& node_name) {
@@ -79,9 +100,13 @@ void ClusterServer::init() {
     });
 
     // 设置断开回调
+    // 修复 P0-8/Medium：此前任何 TCP 断连都直接 delNode，导致副本与死主断连时
+    // getMyMaster() 返回 nullptr 而中止故障转移。这里改为：仅移除连接，不删除节点；
+    // 节点是否 FAIL 由故障检测（PFAIL→FAIL）决定，failover 仍可进行。节点恢复时
+    // 由 handleNodeRecovery / PING 重新建立连接并 addNode。
     connection_.set_node_disconnected_callback([this](const std::string& node_name) {
-        state_.delNode(node_name);
-        LOG_INFO(CLUSTER, "Removed node: %s", node_name.c_str());
+        // 不立即删除节点，仅记录日志。故障检测会将其标记为 PFAIL/FAIL。
+        LOG_INFO(CLUSTER, "Node disconnected (link down): %s, keeping node for failover eligibility", node_name.c_str());
     });
 
     // 设置 MEET 回调 - 当收到其他节点发来的 MEET 消息时，将其添加到状态
@@ -149,7 +174,7 @@ void ClusterServer::init() {
             // 处理投票请求：如果本节点是主节点，发送投票确认
             for (const auto& info : gossip_msg.nodes) {
                 if (handleFailoverAuthRequest(info.name, static_cast<int64_t>(info.epoch), info.failover_offset)) {
-                    // 发送投票确认
+                    // 发送投票确认（携带投票主节点名，而非副本名，修复计票身份错误）
                     gossip_.broadcast_failover_auth_ack(info.name, static_cast<int64_t>(info.epoch));
                 }
             }
@@ -158,9 +183,16 @@ void ClusterServer::init() {
             gossip_.handle_failover_auth_ack(gossip_msg);
             // 从节点收到投票确认
             for (const auto& info : gossip_msg.nodes) {
-                // 增加投票计数
                 handleFailoverAuthAck(info.name);
             }
+        } else if (msg.header.type == static_cast<uint16_t>(ClusterMsgType::kUpdate) ||
+                   msg.header.type == static_cast<uint16_t>(ClusterMsgType::kPush) ||
+                   msg.header.type == static_cast<uint16_t>(ClusterMsgType::kMail) ||
+                   msg.header.type == static_cast<uint16_t>(ClusterMsgType::kPublish)) {
+            // 处理节点信息更新（P0-5 修复：此前 UPDATE/PUSH 消息被静默丢弃，
+            // 导致新主接管槽位后其他节点仍相信死主）。通过 gossip 的 update_callback
+            // 同步对端广播的 flags/role/slots/config_epoch。
+            gossip_.handle_update(gossip_msg);
         }
     });
 
@@ -238,7 +270,7 @@ void ClusterServer::saveNodesConf() {
              << flags << " "
              << master_name << " "
              << "0 0 "  // ping_sent, pong_recv
-             << info.config_epoch << " "
+             << node->getConfigEpoch() << " "
              << "connected";
 
         // 输出该节点负责的槽
@@ -663,7 +695,7 @@ void ClusterServer::markNodeAsFail(const std::string& node_name) {
     GossipMsg gossip_msg;
     gossip_msg.type = GossipType::kFail;
     gossip_msg.sender_name = getMyNodeName();
-    gossip_msg.sender_epoch = static_cast<uint64_t>(my_node_->getInfo().config_epoch);
+    gossip_msg.sender_epoch = static_cast<uint64_t>(my_node_->getConfigEpoch());
 
     GossipNodeInfo info;
     info.name = node->getName();
@@ -705,8 +737,11 @@ bool ClusterServer::startFailover(const std::string& master_name) {
     }
 
     // 增加 failover_epoch
-    int64_t new_epoch = master->getInfo().config_epoch + 1;
+    int64_t new_epoch = master->getConfigEpoch() + 1;
     my_node_->setFailoverEpoch(new_epoch);
+    // 关键修复（P0-6）：在发起选举前先抢占式提升本节点的 config_epoch，
+    // 防止同一集群内多次故障转移时 failover_epoch 永不递增导致后续投票被永久拒绝。
+    my_node_->setConfigEpoch(new_epoch);
     my_node_->setFailoverState(FailoverState::kWaitStart);
 
     // 记录故障转移开始时间
@@ -744,7 +779,7 @@ bool ClusterServer::handleFailoverAuthRequest(const std::string& replica_name, i
     auto replica = state_.getNode(replica_name);
     if (!replica) return false;
 
-    // 检查 epoch 是否更新
+    // 检查 epoch 是否更新（防止旧选举的重复/重放投票请求）
     if (epoch <= my_node_->getFailoverEpoch()) {
         LOG_WARN(CLUSTER, "Rejecting auth request from %s: epoch %ld <= my epoch %ld",
                  replica_name.c_str(), epoch, my_node_->getFailoverEpoch());
@@ -763,7 +798,7 @@ bool ClusterServer::handleFailoverAuthRequest(const std::string& replica_name, i
         return false;
     }
 
-    // 记录投票
+    // 记录投票（以副本名计票；同一副本只计一次）
     my_node_->addVote(replica_name, epoch, offset);
     my_node_->setFailoverEpoch(epoch);
 
@@ -773,11 +808,14 @@ bool ClusterServer::handleFailoverAuthRequest(const std::string& replica_name, i
 }
 
 void ClusterServer::handleFailoverAuthAck(const std::string& node_name) {
-    // 从节点收到主节点的投票确认
-    // 记录投票（用于多数派判断）
-    my_node_->addVote(node_name, my_node_->getFailoverEpoch(), my_node_->getMasterReplOffset());
-    LOG_INFO(CLUSTER, "Recorded failover auth ack from %s, vote count=%d",
-             node_name.c_str(), my_node_->getVoteCount());
+    // 从节点收到主节点的投票确认（ACK）。
+    // 修复 P0-4/Medium：计票应以「投票主节点名」为准，而非本节点（副本）名；
+    // 这里用发送 ACK 的主节点名计票，并校验该 ack 的 epoch 与当前故障转移轮次一致，
+    // 避免旧选举的延迟 ACK 被错误计入。
+    int64_t current_epoch = my_node_->getFailoverEpoch();
+    my_node_->addVote(node_name, current_epoch, my_node_->getMasterReplOffset());
+    LOG_INFO(CLUSTER, "Recorded failover auth ack from %s (epoch=%ld), vote count=%d",
+             node_name.c_str(), current_epoch, my_node_->getVoteCount());
 }
 
 std::vector<std::shared_ptr<ClusterNode>> ClusterServer::getReplicasForMaster(const std::string& master_name) const {
@@ -873,6 +911,12 @@ void ClusterServer::completeFailover() {
     // 获取主节点负责的所有槽
     std::vector<int> master_slots = master->getSlots();
 
+    // 将槽转移到本节点之前，先从旧主（master）移除这些槽的所有权，
+    // 避免转移后两个节点都宣称拥有同一批槽（修复 P0-9/Medium：旧主槽位未清除）。
+    for (int slot : master_slots) {
+        master->delSlot(slot);
+    }
+
     // 将槽转移到本节点
     for (int slot : master_slots) {
         setSlotOwner(slot, getMyNodeName());
@@ -880,6 +924,10 @@ void ClusterServer::completeFailover() {
 
     // 清除复制关系，本节点变为主节点
     clearReplicaOf();
+
+    // 关键修复（P0-6）：故障转移完成后提升 config_epoch，使后续选举轮次能继续推进
+    int64_t new_epoch = my_node_->getConfigEpoch() + 1;
+    my_node_->setConfigEpoch(new_epoch);
 
     // 更新故障转移状态
     my_node_->setFailoverState(FailoverState::kFailoverCompleted);
@@ -912,9 +960,10 @@ void ClusterServer::broadcastFailoverUpdate() {
 
     // 构建 UPDATE 消息，包含本节点的新槽信息
     GossipMsg msg;
-    msg.type = GossipType::kPush;  // 使用 kPush 作为 UPDATE
+    // 使用 kPush 作为 UPDATE 类型（与接收端回调处理一致）
+    msg.type = GossipType::kPush;
     msg.sender_name = getMyNodeName();
-    msg.sender_epoch = static_cast<uint64_t>(my_node_->getInfo().config_epoch);
+    msg.sender_epoch = static_cast<uint64_t>(my_node_->getConfigEpoch());
 
     GossipNodeInfo info;
     info.name = my_node_->getName();
@@ -922,7 +971,7 @@ void ClusterServer::broadcastFailoverUpdate() {
     info.port = static_cast<uint16_t>(my_node_->getInfo().port);
     info.flags = static_cast<uint16_t>(my_node_->getFlags());
     info.role = my_node_->isMaster() ? 0 : 1;
-    info.epoch = static_cast<uint64_t>(my_node_->getInfo().config_epoch);
+    info.epoch = static_cast<uint64_t>(my_node_->getConfigEpoch());
 
     const auto& slots = my_node_->getSlots();
     info.slot_count = static_cast<uint16_t>(std::min(slots.size(), static_cast<size_t>(16384)));
