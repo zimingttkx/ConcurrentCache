@@ -10,6 +10,10 @@
 #include <thread>
 #include <chrono>
 #include <zlib.h>
+#include <mutex>
+#include <string>
+#include <fcntl.h>
+#include <unistd.h>
 
 #if defined(_WIN32)
     #include <windows.h>
@@ -112,72 +116,105 @@ RdbPersistence::RdbPersistence() = default;
 RdbPersistence::~RdbPersistence() = default;
 
 bool RdbPersistence::save(const std::string& filepath, GlobalStorage& storage) {
-    FilePtr file_guard(fopen(filepath.c_str(), "w+b"));
-    file_ = file_guard.get();
-    if (!file_) {
-        LOG_ERROR(RDB, "Failed to open file for save: %s", filepath.c_str());
-        return false;
-    }
-    filepath_ = filepath;
+    // 防止与后台 save 或其他 save() 调用并发写同一文件
+    std::lock_guard<std::mutex> save_lock(save_mutex_);
 
-    try {
-        // 1. 写入 Header
-        // MAGIC: "CCRD"
-        write_uint32(kRdbMagic);
-
-        // VERSION: "0002"
-        fwrite(kRdbVersion, 4, 1, file_);
-
-        // 2. 写入数据库数量（暂时只支持 DB 0）
-        uint32_t db_count = 1;
-        write_uint32(db_count);
-
-        // 3. 获取所有 KV pairs（包括 TTL 信息）
-        auto all_kvs = storage.get_all_objects_with_ttl();
-
-        // 写入 KV pairs 数量
-        uint32_t kv_count = static_cast<uint32_t>(all_kvs.size());
-        write_uint32(kv_count);
-
-        LOG_INFO(RDB, "Saving %zu key-value pairs to %s", all_kvs.size(), filepath.c_str());
-
-        // 4. 写入每个 KV pair（带 TTL）
-        for (const auto& [key, obj, expire_time_ms] : all_kvs) {
-            write_kv_pair(key, obj, expire_time_ms);
+    // 原子写：先写临时文件，完成后 fsync + rename 覆盖目标，避免崩溃留下残缺文件
+    std::string tmp_path = filepath + ".tmp";
+    {
+        FilePtr file_guard(fopen(tmp_path.c_str(), "w+b"));
+        file_ = file_guard.get();
+        if (!file_) {
+            LOG_ERROR(RDB, "Failed to open temp file for save: %s", tmp_path.c_str());
+            return false;
         }
+        filepath_ = tmp_path;
 
-        // 刷新缓冲区，确保所有数据都被写入文件
-        fflush(file_);
+        try {
+            // 1. 写入 Header
+            // MAGIC: "CCRD"
+            write_uint32(kRdbMagic);
 
-        // 5. 写入 EOF 标记
-        write_uint8(static_cast<uint8_t>(RdbSpecialMarker::EOF_MARKER));
+            // VERSION: "0002"
+            fwrite(kRdbVersion, 4, 1, file_);
 
-        // 6. 记录 CRC 位置（此时游标在 EOF 之后）
-        long crc_pos = ftell(file_);
+            // 2. 写入数据库数量（暂时只支持 DB 0）
+            uint32_t db_count = 1;
+            write_uint32(db_count);
 
-        // 7. 计算 CRC（从文件开头到当前位置）
-        uint32_t crc = calculate_crc32_for_range(crc_pos);
+            // 3. 获取所有 KV pairs（包括 TTL 信息）
+            auto all_kvs = storage.get_all_objects_with_ttl();
 
-        // 8. 写入 CRC 值（使用 write_uint32 保证字节序转换）
-        write_uint32(crc);
-        fflush(file_);
+            // 写入 KV pairs 数量
+            uint32_t kv_count = static_cast<uint32_t>(all_kvs.size());
+            write_uint32(kv_count);
 
-        // file_guard 会自动关闭文件
-        file_ = nullptr;
+            LOG_INFO(RDB, "Saving %zu key-value pairs to %s", all_kvs.size(), filepath.c_str());
 
-        // 更新统计信息
-        update_bgsave_status(BgsaveStatus::SUCCESS, kv_count);
+            // 4. 写入每个 KV pair（带 TTL）
+            for (const auto& [key, obj, expire_time_ms] : all_kvs) {
+                write_kv_pair(key, obj, expire_time_ms);
+            }
 
-        LOG_INFO(RDB, "RDB save completed: %s, keys=%u", filepath.c_str(), kv_count);
-        return true;
+            // 刷新缓冲区，确保所有数据都被写入文件
+            fflush(file_);
 
-    } catch (const std::exception& e) {
-        LOG_ERROR(RDB, "Exception during save: %s", e.what());
-        update_bgsave_status(BgsaveStatus::FAILED, 0);
-        // file_guard 会自动关闭文件
-        file_ = nullptr;
+            // 5. 写入 EOF 标记
+            write_uint8(static_cast<uint8_t>(RdbSpecialMarker::EOF_MARKER));
+
+            // 6. 记录 CRC 位置（此时游标在 EOF 之后）
+            long crc_pos = ftell(file_);
+
+            // 7. 计算 CRC（从文件开头到当前位置）
+            uint32_t crc = calculate_crc32_for_range(crc_pos);
+
+            // 8. 写入 CRC 值（使用 write_uint32 保证字节序转换）
+            write_uint32(crc);
+            fflush(file_);
+
+            // 强制刷盘，避免缓存丢失
+            if (fflush(file_) != 0 || fsync(fileno(file_)) != 0) {
+                throw std::runtime_error("fsync failed during save");
+            }
+
+            // file_guard 会自动关闭文件
+            file_ = nullptr;
+
+            // 更新统计信息（在 rename 之前，避免子进程统计丢失问题）
+            update_bgsave_status(BgsaveStatus::SUCCESS, kv_count);
+
+        } catch (const std::exception& e) {
+            LOG_ERROR(RDB, "Exception during save: %s", e.what());
+            update_bgsave_status(BgsaveStatus::FAILED, 0);
+            // file_guard 会自动关闭文件
+            file_ = nullptr;
+            // 清理可能残留的临时文件
+            std::remove(tmp_path.c_str());
+            return false;
+        }
+    }
+
+    // 原子替换：rename 是原子操作，要么看到旧文件要么看到新文件
+    if (rename(tmp_path.c_str(), filepath.c_str()) != 0) {
+        LOG_ERROR(RDB, "Failed to rename temp file %s to %s: %s",
+                  tmp_path.c_str(), filepath.c_str(), strerror(errno));
+        std::remove(tmp_path.c_str());
         return false;
     }
+
+    // 同步目录元数据（确保 rename 持久化）
+    std::string dir = filepath.substr(0, filepath.find_last_of('/'));
+    if (!dir.empty()) {
+        int dirfd = open(dir.c_str(), O_RDONLY);
+        if (dirfd >= 0) {
+            fsync(dirfd);
+            close(dirfd);
+        }
+    }
+
+    LOG_INFO(RDB, "RDB save completed: %s, keys=%u", filepath.c_str(),
+             static_cast<uint32_t>(storage.size()));
+    return true;
 }
 
 bool RdbPersistence::save_in_background(const std::string& filepath, GlobalStorage& storage) {
@@ -283,49 +320,19 @@ static std::string escape_windows_arg(const std::string& arg) {
     wait_thread.detach();
 
 #else
-    // Unix/Linux: 使用 fork 创建子进程
-    pid_t pid = fork();
-
-    if (pid < 0) {
-        LOG_ERROR(RDB, "fork() failed for background save");
-        bgsave_in_progress_.store(0);
-        return false;
-    }
-
-    if (pid == 0) {
-        // 子进程
-        signal(SIGINT, SIG_IGN);
-        signal(SIGTERM, SIG_IGN);
-        signal(SIGCHLD, SIG_DFL);
-
+    // 方案 A：不使用 fork，直接在当前进程的独立线程内快照写临时文件
+    // 规避 fork-in-multithreaded 下自定义内存池锁的死锁/UB 风险
+    std::thread bg_thread([this, filepath, &storage]() {
         bool success = save(filepath, storage);
-        _exit(success ? 0 : 1);
-    }
-
-    LOG_INFO(RDB, "Background save started, pid=%d", pid);
-
-    // 启动后台线程等待子进程
-    std::thread wait_thread([this, pid]() {
-        int status;
-        pid_t ret = waitpid(pid, &status, 0);
-
-        if (ret > 0) {
-            bool success = WIFEXITED(status) && (WEXITSTATUS(status) == 0);
-            stats_.last_bgsave_status.store(
-                success ? BgsaveStatus::SUCCESS : BgsaveStatus::FAILED,
-                std::memory_order_release);
-            LOG_INFO(RDB, "Background save completed, pid=%d, success=%d", pid, success);
-        } else {
-            stats_.last_bgsave_status.store(BgsaveStatus::FAILED, std::memory_order_release);
-            LOG_ERROR(RDB, "Background save waitpid failed, pid=%d, ret=%d, errno=%d",
-                     pid, ret, errno);
-        }
-
+        stats_.last_bgsave_status.store(
+            success ? BgsaveStatus::SUCCESS : BgsaveStatus::FAILED,
+            std::memory_order_release);
+        LOG_INFO(RDB, "Background save completed (in-process thread), success=%d", success);
         bgsave_in_progress_.store(0, std::memory_order_release);
     });
-    wait_thread.detach();
+    bg_thread.detach();
 
-#endif
+    LOG_INFO(RDB, "Background save started (in-process thread)");
 
     // 父进程：设置初始状态
     stats_.last_bgsave_time_sec.store(current_time_sec(), std::memory_order_release);
@@ -333,6 +340,13 @@ static std::string escape_windows_arg(const std::string& arg) {
     stats_.total_bgsave_calls.fetch_add(1, std::memory_order_relaxed);
 
     return true;
+}
+
+#endif
+
+bool RdbPersistence::save_to_temp_and_rename(const std::string& filepath, GlobalStorage& storage) {
+    // 原子写实现：写临时文件后 rename（详见 save()）
+    return save(filepath, storage);
 }
 
 bool RdbPersistence::wait_for_bgsave(int timeout_ms) {
@@ -383,6 +397,13 @@ bool RdbPersistence::load(const std::string& filepath, GlobalStorage& storage) {
             return false;
         }
         LOG_INFO(RDB, "RDB version: %.4s", version);
+
+        // 修复 P1-11：校验版本，不允许以不兼容格式加载（同 magic 不同 layout 会损坏数据）
+        if (std::memcmp(version, kRdbVersion, 4) != 0) {
+            LOG_ERROR(RDB, "Unsupported RDB version: %.4s (expected %.4s)", version, kRdbVersion);
+            file_ = nullptr;
+            return false;
+        }
 
         // 2. 读取数据库数量
         uint32_t db_count = read_uint32();

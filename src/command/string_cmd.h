@@ -132,24 +132,27 @@ namespace cc_server {
 
             const std::string& key = args[1];
             auto& storage = GlobalStorage::instance();
-            auto opt = storage.get(key);
 
-            int64_t val = 0;
-            if (opt.has_value()) {
-                auto str_val = opt.value().get_string();
-                if (!str_val.has_value()) {
-                    return RespEncoder::encode_error("ERR value is not an integer");
+            // 原子读-改-写（在 shard 独占锁内完成，并发 INCR 不丢更新）
+            auto result = storage.incrby(key, 1);
+            if (!result.has_value()) {
+                // incrby 返回 nullopt 有三种原因，这里用 value 是否已存在区分
+                auto opt = storage.get(key);
+                if (opt.has_value() && opt.value().get_string().has_value()) {
+                    // 值是字符串但非整数
+                    try {
+                        std::stoll(opt.value().get_string().value());
+                    } catch (...) {
+                        return RespEncoder::encode_error("ERR value is not an integer");
+                    }
+                    // 是整数但溢出
+                    return RespEncoder::encode_error("ERR increment or decrement would overflow");
                 }
-                try {
-                    val = std::stoll(str_val.value());
-                } catch (...) {
-                    return RespEncoder::encode_error("ERR value is not an integer");
-                }
+                // 非字符串类型（列表/哈希等）
+                return RespEncoder::encode_error("WRONGTYPE Operation against a key holding the wrong kind of value");
             }
 
-            val++;
-            storage.set(key, CacheObject(std::to_string(val)));
-            return RespEncoder::encode_integer(val);
+            return RespEncoder::encode_integer(result.value());
         }
 
         [[nodiscard]] std::unique_ptr<Command> clone() const override {
@@ -173,24 +176,23 @@ namespace cc_server {
 
             const std::string& key = args[1];
             auto& storage = GlobalStorage::instance();
-            auto opt = storage.get(key);
 
-            int64_t val = 0;
-            if (opt.has_value()) {
-                auto str_val = opt.value().get_string();
-                if (!str_val.has_value()) {
-                    return RespEncoder::encode_error("ERR value is not an integer");
+            // 原子读-改-写（在 shard 独占锁内完成，并发 DECR 不丢更新）
+            auto result = storage.incrby(key, -1);
+            if (!result.has_value()) {
+                auto opt = storage.get(key);
+                if (opt.has_value() && opt.value().get_string().has_value()) {
+                    try {
+                        std::stoll(opt.value().get_string().value());
+                    } catch (...) {
+                        return RespEncoder::encode_error("ERR value is not an integer");
+                    }
+                    return RespEncoder::encode_error("ERR increment or decrement would overflow");
                 }
-                try {
-                    val = std::stoll(str_val.value());
-                } catch (...) {
-                    return RespEncoder::encode_error("ERR value is not an integer");
-                }
+                return RespEncoder::encode_error("WRONGTYPE Operation against a key holding the wrong kind of value");
             }
 
-            val--;
-            storage.set(key, CacheObject(std::to_string(val)));
-            return RespEncoder::encode_integer(val);
+            return RespEncoder::encode_integer(result.value());
         }
 
         [[nodiscard]] std::unique_ptr<Command> clone() const override {
@@ -1092,7 +1094,9 @@ namespace cc_server {
     public:
         std::string execute(const std::vector<std::string> &args) override {
             (void)args; // unused
-            static std::string dump_path = "./dump.rdb";
+            // 修复 P1-13：使用配置中的 rdb_path，而非硬编码 ./dump.rdb，避免手动 save
+            // 写入错误路径、重启加载旧配置路径导致数据丢失。
+            std::string dump_path = Config::instance().getString("rdb_path", "./dump.rdb");
             auto& rdb = RdbPersistence::instance();
 
             // 检查是否正在保存
@@ -1115,7 +1119,7 @@ namespace cc_server {
     public:
         std::string execute(const std::vector<std::string>& args) override {
             (void)args; // unused
-            static std::string dump_path = "./dump.rdb";
+            std::string dump_path = Config::instance().getString("rdb_path", "./dump.rdb");
             auto& rdb = RdbPersistence::instance();
 
             // 检查是否正在保存
@@ -1242,16 +1246,9 @@ namespace cc_server {
             const std::string& subcommand = args[1];
 
             if (subcommand == "sleep") {
-                if (args.size() < 3) {
-                    return RespEncoder::encode_error("ERR wrong number of arguments for 'debug sleep'");
-                }
-                try {
-                    double seconds = std::stod(args[2]);
-                    std::this_thread::sleep_for(std::chrono::duration<double>(seconds));
-                } catch (...) {
-                    return RespEncoder::encode_error("ERR invalid sleep time");
-                }
-                return RespEncoder::encode_simple_string("OK");
+                // 拒绝 DEBUG SLEEP：它会同步阻塞当前 SubReactor 的事件循环，
+                // 冻结该 reactor 上的所有客户端（修复 P1-9）。Redis 的实现也是异步/测试专用。
+                return RespEncoder::encode_error("ERR DEBUG SLEEP is not supported");
             }
 
             if (subcommand == "object") {

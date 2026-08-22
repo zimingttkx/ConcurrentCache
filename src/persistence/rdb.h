@@ -10,6 +10,7 @@
 #include <atomic>
 #include <chrono>
 #include <ctime>
+#include <cstdio>
 
 namespace cc_server {
     class GlobalStorage;
@@ -94,6 +95,12 @@ namespace cc_server {
          * @brief 加载 RDB 文件
          */
         bool load(const std::string& filepath, GlobalStorage& storage);
+
+        /**
+         * @brief 原子写封装：写临时文件后 rename（内部调用 save）
+         * @note 公开给需要显式原子保存的调用方使用
+         */
+        bool save_to_temp_and_rename(const std::string& filepath, GlobalStorage& storage);
 
         /**
          * @brief 获取 BGSAVE 是否正在进行
@@ -194,6 +201,9 @@ namespace cc_server {
         std::string filepath_;
         std::atomic<int> bgsave_in_progress_{0};  // 原子标记是否正在保存
         RdbStats stats_;
+
+        // 保存互斥锁：防止同步 save 与后台 save 并发写同一文件
+        std::mutex save_mutex_;
     };
 
 }  // namespace cc_server

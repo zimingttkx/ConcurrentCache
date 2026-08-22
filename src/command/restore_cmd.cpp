@@ -60,7 +60,12 @@ std::string RestoreCommand::execute(const std::vector<std::string>& args) {
         if (!std::getline(ss, size_line)) {
             return RespEncoder::encode_error("ERR invalid serialized data for LIST");
         }
-        size_t size = std::stoull(size_line);
+        size_t size = 0;
+        try {
+            size = std::stoull(size_line);
+        } catch (...) {
+            return RespEncoder::encode_error("ERR invalid serialized data for LIST");
+        }
         std::vector<std::string> elems;
         for (size_t i = 0; i < size; i++) {
             std::string elem;
@@ -78,7 +83,12 @@ std::string RestoreCommand::execute(const std::vector<std::string>& args) {
         if (!std::getline(ss, size_line)) {
             return RespEncoder::encode_error("ERR invalid serialized data for HASH");
         }
-        size_t size = std::stoull(size_line);
+        size_t size = 0;
+        try {
+            size = std::stoull(size_line);
+        } catch (...) {
+            return RespEncoder::encode_error("ERR invalid serialized data for HASH");
+        }
         for (size_t i = 0; i < size; i++) {
             std::string field, value;
             if (!std::getline(ss, field) || !std::getline(ss, value)) {
@@ -92,7 +102,12 @@ std::string RestoreCommand::execute(const std::vector<std::string>& args) {
         if (!std::getline(ss, size_line)) {
             return RespEncoder::encode_error("ERR invalid serialized data for SET");
         }
-        size_t size = std::stoull(size_line);
+        size_t size = 0;
+        try {
+            size = std::stoull(size_line);
+        } catch (...) {
+            return RespEncoder::encode_error("ERR invalid serialized data for SET");
+        }
         for (size_t i = 0; i < size; i++) {
             std::string member;
             if (!std::getline(ss, member)) {
@@ -106,13 +121,23 @@ std::string RestoreCommand::execute(const std::vector<std::string>& args) {
         if (!std::getline(ss, size_line)) {
             return RespEncoder::encode_error("ERR invalid serialized data for ZSET");
         }
-        size_t size = std::stoull(size_line);
+        size_t size = 0;
+        try {
+            size = std::stoull(size_line);
+        } catch (...) {
+            return RespEncoder::encode_error("ERR invalid serialized data for ZSET");
+        }
         for (size_t i = 0; i < size; i++) {
             std::string member, score_str;
             if (!std::getline(ss, member) || !std::getline(ss, score_str)) {
                 break;
             }
-            double score = std::stod(score_str);
+            double score = 0;
+            try {
+                score = std::stod(score_str);
+            } catch (...) {
+                return RespEncoder::encode_error("ERR invalid serialized data for ZSET");
+            }
             obj.zset_add(member, score);
         }
     } else {
