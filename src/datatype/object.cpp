@@ -1,4 +1,5 @@
 #include "datatype/object.h"
+#include <cstdio>
 
 namespace cc_server {
 
@@ -474,11 +475,15 @@ std::string CacheObject::serialize() const {
         }
         case ObjectType::ZSET: {
             // 格式：ZSET\n<size>\n<member1>\n<score1>\n<member2>\n<score2>\n...
+            // 修复 P1-13：double 用 %.17g 保证与 std::stod 往返精度一致
+            // （否则 std::to_string 只 6 位小数，0.123456789 会丢精度）
             result += "ZSET\n";
             result += std::to_string(zset_val_.size());
             result += "\n";
+            char score_buf[32];
             for (const auto& z : zset_val_) {
-                result += z.member + "\n" + std::to_string(z.score) + "\n";
+                snprintf(score_buf, sizeof(score_buf), "%.17g", z.score);
+                result += z.member + "\n" + score_buf + "\n";
             }
             break;
         }

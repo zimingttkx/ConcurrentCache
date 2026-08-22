@@ -2,6 +2,7 @@
 #include "base/log.h"
 #include <mutex>
 #include <cassert>
+#include <limits>
 
 namespace cc_server {
 
@@ -46,16 +47,20 @@ namespace cc_server {
             return std::nullopt;
         }
 
-        // 惰性删除：检查是否过期
-        if (expire_dict_.is_expired(key)) {
+        // 惰性删除：检查是否过期（以 CacheEntry.expire_at_ms 为准，避免两锁竞态）
+        if (expire_dict_.is_expired(key) ||
+            (it->second.expire_at_ms > 0 && current_time_ms() >= it->second.expire_at_ms)) {
             LOG_DEBUG(STORAGE, "Get key=%s - expired, triggering lazy delete", key.c_str());
+            // 注：expire_at_ms 改为 atomic 后，这里可去掉 expire_dict_ 的二次查询，
+            // 但为了兼容现有主动过期路径先保留双判。
             lock.unlock();
             del(key);
             return std::nullopt;
         }
 
-        // 更新访问时间
-        it->second.last_access_time_ms = current_time_ms();
+        // 更新访问时间（原子写，避免共享锁下的数据竞争；修复 P1-4）
+        // 读取 LRU 时间戳仅在 evict_one 的 pass2 独占锁下发生，此处写与读无并发竞争。
+        it->second.last_access_time_ms.store(current_time_ms(), std::memory_order_relaxed);
 
         LOG_TRACE(STORAGE, "Get key=%s - found, shard=%zu", key.c_str(), shard_idx);
         return it->second.value;
@@ -86,8 +91,10 @@ namespace cc_server {
         // 获取当前时间
         int64_t now = current_time_ms();
 
-        // 在对应分片的unordered_map里面插入或者更新
-        stores_[shard_idx].insert_or_assign(key, CacheEntry(value, now));
+        // 在对应分片的unordered_map里面插入或者更新（同时维护 expire_at_ms，保持单真相源）
+        CacheEntry entry(value, now);
+        entry.expire_at_ms = -1;  // set 命令清除过期
+        stores_[shard_idx].insert_or_assign(key, std::move(entry));
 
         // 增加脏计数器
         dirty_counter_.fetch_add(1, std::memory_order_relaxed);
@@ -139,7 +146,11 @@ namespace cc_server {
 
         const size_t shard_idx  = get_shard_index(key);
         std::shared_lock<std::shared_mutex> lock(mutexes_[shard_idx]);
-        return stores_[shard_idx].contains(key);
+        bool in_store = stores_[shard_idx].contains(key);
+        if (!in_store) return false;
+        // 一致性修复（P1-12）：已过期未删除的键不应被 EXIST/DBSIZE 计入
+        if (expire_dict_.is_expired(key)) return false;
+        return true;
     }
 
 
@@ -220,7 +231,16 @@ namespace cc_server {
         // 第二遍：从最老的分片删除该键
         {
             std::unique_lock<std::shared_mutex> lock(mutexes_[oldest_shard]);
-            stores_[oldest_shard].erase(oldest_key);
+            // TOCTOU 修复（P1-6）：重新校验该键仍存在且 last_access_time_ms 未被并发更新。
+            // 若键已消失或访问时间已改变，则本次不淘汰（避免假淘汰或误删热键）。
+            auto it = stores_[oldest_shard].find(oldest_key);
+            if (it != stores_[oldest_shard].end() &&
+                it->second.last_access_time_ms.load(std::memory_order_relaxed) == oldest_time) {
+                stores_[oldest_shard].erase(it);
+            } else {
+                // 键状态已变化，本次跳过重试，交由下一轮 evict_if_needed 处理
+                return "";
+            }
         }
 
         // 同时删除过期记录
@@ -332,24 +352,74 @@ namespace cc_server {
         // 获取当前时间
         int64_t now = current_time_ms();
 
-        // 设置值
-        stores_[shard_idx].insert_or_assign(key, CacheEntry(value, now));
-
-        // 设置过期时间（如果 ttl_ms > 0，转换为绝对时间戳）
+        // 设置值（同时维护 expire_at_ms，保持单真相源）
+        CacheEntry entry(value, now);
         if (ttl_ms > 0) {
-            int64_t expire_time_ms = now + ttl_ms;
-            expire_dict_.set_expire_time(key, expire_time_ms);
+            entry.expire_at_ms = now + ttl_ms;
+            expire_dict_.set_expire_time(key, entry.expire_at_ms);
             LOG_DEBUG(STORAGE, "Set_with_expire key=%s, ttl_ms=%ld, expire_at=%ld, shard=%zu",
-                     key.c_str(), ttl_ms, expire_time_ms, shard_idx);
+                     key.c_str(), ttl_ms, entry.expire_at_ms, shard_idx);
         } else {
-            // ttl_ms <= 0 表示永不过期，清除过期时间
+            entry.expire_at_ms = -1;
             expire_dict_.remove(key);
             LOG_DEBUG(STORAGE, "Set_with_expire key=%s (no expire), shard=%zu",
                      key.c_str(), shard_idx);
         }
+        stores_[shard_idx].insert_or_assign(key, std::move(entry));
 
         // 增加脏计数器
         dirty_counter_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    /**
+     * @brief 原子增加/减少键值（INCR/DECR/INCRBY/DECRBY 内部实现）
+     *
+     * 在 shard 独占锁内完成 读-改-写，保证并发 INCR 不丢更新。
+     * 返回新值；若当前值非整数或递增会溢出 int64，返回 nullopt。
+     */
+    std::optional<int64_t> GlobalStorage::incrby(const std::string& key, int64_t delta) {
+        assert(!key.empty() && "GlobalStorage::incrby - key is empty");
+
+        // 淘汰检查（与 set 一致，避免长时间持锁前先做）
+        evict_if_needed(key);
+
+        const size_t shard_idx = get_shard_index(key);
+        std::unique_lock<std::shared_mutex> lock(mutexes_[shard_idx]);
+
+        // 惰性删除：若已过期，当作不存在（从 0 起算）
+        if (expire_dict_.is_expired(key)) {
+            stores_[shard_idx].erase(key);
+            expire_dict_.remove(key);
+        }
+
+        int64_t val = 0;
+        auto it = stores_[shard_idx].find(key);
+        if (it != stores_[shard_idx].end()) {
+            // 值必须是字符串类型且可解析为整数
+            auto str_val = it->second.value.get_string();
+            if (!str_val.has_value()) {
+                return std::nullopt;  // 非字符串值（列表/哈希等）→ 调用方应回 WRONGTYPE
+            }
+            try {
+                val = std::stoll(str_val.value());
+            } catch (...) {
+                return std::nullopt;  // 非整数 → 调用方应回 "value is not an integer"
+            }
+        }
+
+        // 溢出检查：delta > 0 时 val > INT64_MAX - delta 会溢出
+        if ((delta > 0 && val > std::numeric_limits<int64_t>::max() - delta) ||
+            (delta < 0 && val < std::numeric_limits<int64_t>::min() - delta)) {
+            return std::nullopt;  // 溢出 → 调用方应回 "increment or decrement would overflow"
+        }
+
+        val += delta;
+
+        int64_t now = current_time_ms();
+        stores_[shard_idx].insert_or_assign(key, CacheEntry(CacheObject(std::to_string(val)), now));
+        dirty_counter_.fetch_add(1, std::memory_order_relaxed);
+
+        return val;
     }
 
 }

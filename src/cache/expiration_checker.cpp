@@ -62,46 +62,46 @@ namespace cc_server {
             size_t deleted_count = 0;
             size_t checked_count = 0;
 
+            // 时间预算内反复抽样删除（修复 P1-7：此前每轮只取 20 个候选，
+            // 大规模过期键会长时间驻留内存）。Redis 的 activeExpireCycle 行为。
+            auto cycle_start = std::chrono::steady_clock::now();
+            bool budget_exhausted = false;
+
             try {
-                // 获取候选键进行检查
-                auto candidates = expire_dict_.get_candidates(20);
-                checked_count = candidates.size();
+                do {
+                    if (!running_.load()) break;
 
-                if (candidates.empty()) {
-                    LOG_TRACE(EXPIRE, "No candidate keys to check");
-                }
+                    auto candidates = expire_dict_.get_candidates(20);
+                    checked_count += candidates.size();
+                    if (candidates.empty()) break;
 
-                for (const auto& key : candidates) {
-                    // 再次检查运行状态，防止长时间操作阻塞退出
-                    if (!running_.load()) {
-                        LOG_TRACE(EXPIRE, "Stop requested, breaking from check loop");
-                        break;
-                    }
-
-                    if (expire_dict_.is_expired(key)) {
-                        // 同时删除 GlobalStorage 中的数据和 ExpireDict 中的记录
-                        bool deleted = storage_.del(key);
-                        if (deleted) {
-                            ++deleted_count;
-                            LOG_DEBUG(EXPIRE, "Periodic delete: key=%s", key.c_str());
+                    for (const auto& key : candidates) {
+                        if (!running_.load()) break;
+                        if (expire_dict_.is_expired(key)) {
+                            bool deleted = storage_.del(key);
+                            if (deleted) ++deleted_count;
                         }
                     }
-                }
 
-                if (deleted_count > 0) {
-                    LOG_INFO(EXPIRE, "Periodic cleanup: checked=%zu, deleted=%zu",
-                            checked_count, deleted_count);
-                } else if (checked_count > 0) {
-                    LOG_TRACE(EXPIRE, "Periodic check complete: checked=%zu, none expired", checked_count);
-                }
-
+                    auto now = std::chrono::steady_clock::now();
+                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now - cycle_start).count();
+                    if (elapsed >= kMaxCheckDurationMs) {
+                        budget_exhausted = true;
+                    }
+                } while (!budget_exhausted);
             } catch (const std::exception& e) {
                 LOG_ERROR(EXPIRE, "Exception in expiration check loop: %s", e.what());
             } catch (...) {
                 LOG_ERROR(EXPIRE, "Unknown exception in expiration check loop");
             }
 
-            // 休眠
+            if (deleted_count > 0) {
+                LOG_INFO(EXPIRE, "Periodic cleanup: checked=%zu, deleted=%zu",
+                        checked_count, deleted_count);
+            }
+
+            // 在预算用尽或候选耗尽后休眠一个检查间隔
             std::this_thread::sleep_for(std::chrono::milliseconds(kCheckIntervalMs));
         }
 

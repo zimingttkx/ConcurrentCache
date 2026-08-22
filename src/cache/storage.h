@@ -15,9 +15,40 @@ namespace cc_server {
     // 缓存条目结构体
     struct CacheEntry {
         CacheObject value;  // 替换原来的 std::string value
-        int64_t last_access_time_ms;
+        std::atomic<int64_t> last_access_time_ms;  // 原子：读路径可能并发更新（修复 P1-4）
+        int64_t expire_at_ms = -1;  // 绝对过期时间戳（毫秒），-1 表示永不过期（修复 P1-5 单锁一致性）
+
         CacheEntry() : last_access_time_ms(0) {}
         CacheEntry(const CacheObject& v, int64_t t) : value(v), last_access_time_ms(t) {}
+
+        // std::atomic 不可拷贝/移动，需手动实现（否则 unordered_map 的
+        // insert_or_assign/emplace 无法编译）
+        CacheEntry(CacheEntry&& o) noexcept
+            : value(std::move(o.value)),
+              last_access_time_ms(o.last_access_time_ms.load(std::memory_order_relaxed)),
+              expire_at_ms(o.expire_at_ms) {}
+        CacheEntry& operator=(CacheEntry&& o) noexcept {
+            if (this != &o) {
+                value = std::move(o.value);
+                last_access_time_ms.store(o.last_access_time_ms.load(std::memory_order_relaxed),
+                                          std::memory_order_relaxed);
+                expire_at_ms = o.expire_at_ms;
+            }
+            return *this;
+        }
+        CacheEntry(const CacheEntry& o)
+            : value(o.value),
+              last_access_time_ms(o.last_access_time_ms.load(std::memory_order_relaxed)),
+              expire_at_ms(o.expire_at_ms) {}
+        CacheEntry& operator=(const CacheEntry& o) {
+            if (this != &o) {
+                value = o.value;
+                last_access_time_ms.store(o.last_access_time_ms.load(std::memory_order_relaxed),
+                                          std::memory_order_relaxed);
+                expire_at_ms = o.expire_at_ms;
+            }
+            return *this;
+        }
     };
 
     // 淘汰策略配置
@@ -103,6 +134,15 @@ namespace cc_server {
         // 获取所有对象用于 RDB 持久化（带 TTL）
         std::vector<KVWithTTL> get_all_objects_with_ttl() const;
 
+        /**
+         * @brief 原子性设置键值对和过期时间
+         * @param key 键
+         * @param value 值
+         * @param ttl_ms 过期时间（毫秒），<=0 表示永不过期
+         * @note 用于 SETEX 等需要原子性设置值和过期时间的场景
+         */
+        void set_with_expire(const std::string& key, const CacheObject& value, int64_t ttl_ms);
+
         // 设置键的过期时间（供 RDB 加载时使用）
         void set_expire(const std::string& key, int64_t ttl_ms);
 
@@ -113,13 +153,13 @@ namespace cc_server {
         }
 
         /**
-         * @brief 原子性设置键值对和过期时间
+         * @brief 原子增加/减少键值（用于 INCR/DECR/INCRBY/DECRBY）
          * @param key 键
-         * @param value 值
-         * @param ttl_ms 过期时间（毫秒），<=0 表示永不过期
-         * @note 用于 SETEX 等需要原子性设置值和过期时间的场景
+         * @param delta 增量（可正可负）
+         * @return 成功返回新值；键不存在则从 0 起算；非整数值/溢出返回 nullopt
+         * @note 在 shard 独占锁内完成读-改-写，保证并发 INCR 不丢更新
          */
-        void set_with_expire(const std::string& key, const CacheObject& value, int64_t ttl_ms);
+        std::optional<int64_t> incrby(const std::string& key, int64_t delta);
 
         // 脏计数器相关方法
         void increment_dirty() { dirty_counter_.fetch_add(1, std::memory_order_relaxed); }
