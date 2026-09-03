@@ -194,11 +194,12 @@ stateDiagram-v2
     kNone --> kConnect: 收到 REPLICAOF
     kConnect --> kHandshake: TCP 建立
     kHandshake --> kSync: 发送 PSYNC
-    kSync --> kSendingRdb: 主发 RDB
-    kSendingRdb --> kSendingkv: 增量命令
-    kSendingkv --> kConnected: offset 追上
-    kConnected --> kConnected: 持续复制
+    kSync --> kSendingRdb: 主发全量快照（RESTORE 流）
+    kSendingRdb --> kConnected: 快照完成 + backlog 回放
+    kConnected --> kConnected: 持续增量复制（RESP 数组命令流）
 ```
+
+> `kSendingRdb` 期间主节点收到的写命令进入该副本的 `pending_commands` backlog，快照发送完成后按序回放再切换到 `kConnected`——快照期间没有丢失窗口。
 
 ### 5.2 `ReplicationMgr`（`src/cluster/replication_mgr.{h,cpp}`）
 
@@ -221,6 +222,7 @@ struct ReplicaInfo {
     int64_t last_ack_time;
     SyncState sync_state;
     std::shared_ptr<ClusterNode> node;
+    std::vector<std::string> pending_commands;  // 全量同步期间的写命令 backlog
 };
 ```
 
@@ -231,18 +233,27 @@ static constexpr size_t kReplicationBufferSize = 10 * 1024 * 1024;  // 10MB
 std::vector<ReplicationBufferEntry> repl_buffer_;
 ```
 
-**复制流程**（简化）：
+**复制流程**：
 
 ```text
 主端：
-  1. 收到写命令 → replicate_command(cmd) 写 repl_buffer_
-  2. 后台线程遍历 replicas_，发送未确认的缓冲
+  1. 收到写命令 → 编码为 RESP 数组（RespEncoder::encode_array）
+     → replicate_command(cmd) 写 repl_buffer_
+  2. kSendingRdb 副本：命令进该副本的 pending_commands backlog
+  3. kConnected 副本：立即推送增量命令
+  4. 全量同步（send_rdb_to_replica）：
+     逐 key 发送 "RESTORE key ttl_ms serialized REPLACE"（RESP 数组，
+     保留 LIST/HASH/SET/ZSET 类型并携带 TTL），
+     完成后回放 backlog → 置 kConnected
 
 副本端：
   1. handle_replication_command(cmd_line)
+     优先按 RESP 数组解析（二进制安全）；旧格式（空格分割）仅作兼容回退
   2. 在本地执行相同命令
   3. 回复 REPLCONF ACK offset
 ```
+
+**为什么复制命令必须是 RESP 数组而不是空格拼接？** value 可能包含空格、`\xC0`（bus 参数分隔符）、`\n`（`serialize()` 多行文本）——文本拼接会被截断/错位，RESP bulk string 自带长度前缀，完全二进制安全。
 
 ### 5.3 复制协议命令
 
@@ -250,8 +261,9 @@ std::vector<ReplicationBufferEntry> repl_buffer_;
 |------|------|------|
 | `PSYNC ? -1` | 副本 → 主 | 全量同步请求 |
 | `PSYNC <runid> <offset>` | 副本 → 主 | 增量同步请求 |
-| `+FULLRESYNC <runid> <offset>` | 主 → 副本 | 全量同步响应（含 RDB 跟随） |
+| `+FULLRESYNC <runid> <offset>` | 主 → 副本 | 全量同步响应（RESTORE 流跟随） |
 | `+CONTINUE` | 主 → 副本 | 增量同步成功 |
+| `REPLSYNC:<replica_name>` | 副本 → 主 | bus 侧全量同步触发（kRepData） |
 | `REPLCONF listening-port <port>` | 副本 → 主 | 注册端口 |
 | `REPLCONF ACK <offset>` | 副本 → 主 | 确认偏移 |
 
@@ -312,12 +324,50 @@ flowchart TB
 
 **为什么 +10000？** 与 Redis Cluster 约定一致，方便客户端识别集群端口。
 
-**`ClusterLink`**：单条节点间 TCP 连接。负责：
+### 7.1 帧格式（`ClusterMsgHeader`）
 
-- 消息编解码
-- 异步发送
-- 心跳（与 Gossip 协同）
-- 断开重连
+```cpp
+struct ClusterMsgHeader {
+    uint32_t magic;           // 0x43 ('C')
+    uint16_t version;         // 协议版本 = 1
+    uint16_t type;            // ClusterMsgType
+    uint32_t length;          // 帧总长度（含 header，单位字节）
+    uint64_t sender_epoch;
+    char sender_name[40];
+    uint16_t flags;
+    uint16_t port;
+    uint32_t state;
+    uint8_t slot_map[2048];   // 预留槽位图
+};                            // sizeof = 2120（length 落在对齐空隙，格式大小未变）
+```
+
+header 之后是参数区，各参数以 `\xC0` 分隔。
+
+**接收端校验**（`ClusterLink::read_complete`）：
+
+| 检查 | 失败处理 |
+|------|---------|
+| `magic != 0x43` | 跳过非集群字节（容忍握手数据混入） |
+| `length < sizeof(header)`（即 < 2120） | 协议错误 → **断开连接** |
+| `length > 256MB` | 协议错误 → **断开连接** |
+| 缓冲区数据 < `length` | 等待更多数据（半包） |
+
+> **为什么 length 必须有下限校验？** 若 `length < header`，帧被判定"完整"但解码消费 0 字节，`while (read_complete())` 永不退出——单个畸形包就能把 EventLoop 线程打到 100% CPU 死循环（远程 DoS）。`length` 为 uint32（此前是 uint16），复制大 value（>64KB）不会回绕截断。
+
+### 7.2 `ClusterLink` 生命周期
+
+`ClusterLink` 是单条节点间 TCP 连接，负责消息编解码、异步发送、心跳协同。
+
+**断开协议**（防止 UAF 的固定顺序，`disconnect_and_notify()`）：
+
+```text
+1. CAS 置 connected_ = false     → 之后所有事件回调直接返回
+2. close(fd)
+3. 触发 disconnect_callback_     → 回调可能销毁 this
+4. 回调返回后绝不访问任何成员
+```
+
+所有断开路径（读错误 / 对端关闭 / 写错误 / 协议错误）都必须走这个顺序；`handle_write` 在持有 `send_mutex_` 时只置断开标志，解锁后再触发回调（回调里的析构会再拿这把锁）。bus 侧（`ClusterBus`）在断开回调中销毁 link 并**注销其 Channel**；下游回调收到的 link 参数为 `nullptr`（bus 自管的 Channel 由 bus 注销，自连链路由 `ClusterConnection` 注销）。
 
 ## 8. 客户端重定向
 
@@ -350,7 +400,11 @@ std::string ClusterServer::checkRedirect(const std::string& key) const {
 | 单实例 | `ClusterServer::instance()` Magic Static |
 | 槽表与节点表一致 | 所有修改都加 `slots_mutex_` + `mutex_` |
 | 同一时刻只有一个从节点晋升 | epoch 单调递增 + 投票多数 |
-| 复制不丢命令 | 10MB 环形缓冲 + offset 确认 |
+| 复制不丢命令 | 快照期 backlog + 10MB 环形缓冲 + offset 确认 |
+| 复制流二进制安全 | 命令以 RESP 数组编码传输（长度前缀，无歧义分隔） |
+| 非法 bus 帧不阻塞事件循环 | `length` 下限/上限校验，违规即断链 |
+| Link 销毁不产生悬空回调 | `disconnect_and_notify()` 固定断开顺序 + bus 注销 Channel |
+| 网络消息解析异常不杀进程 | gossip 安全解析 + kRepData 执行 catch + EventLoop 兜底 catch |
 | 客户端最终能拿到数据 | MOVED 重定向 + 客户端缓存槽表 |
 | 节点通信与客户端通信隔离 | `ClusterBus` 监听 `port + 10000` |
 
@@ -384,8 +438,11 @@ cluster_node_timeout = 5000
 | 节点管理 | `src/cluster/cluster_state.cpp`（`addNode/setNodeForSlot`） |
 | 心跳 | `src/cluster/cluster_gossip.cpp`（`handle_ping/pong`） |
 | 复制缓冲 | `src/cluster/replication_mgr.cpp`（`replicate_command/add_to_replication_buffer`） |
+| 全量同步 | `src/cluster/replication_mgr.cpp`（`send_rdb_to_replica`：RESTORE 流 + backlog 回放） |
 | 故障转移 | `src/cluster/cluster_server.cpp`（`startFailover/executeFailover`） |
-| 节点通信 | `src/cluster/cluster_bus.cpp`（`handle_accept/create_link`） |
+| 帧编解码/校验 | `src/cluster/cluster_link.cpp`（`read_complete/decode_msg`） |
+| Link 断开顺序 | `src/cluster/cluster_link.cpp`（`disconnect_and_notify`） |
+| 节点通信 | `src/cluster/cluster_bus.cpp`（`handle_accept/create_link/remove_link`） |
 | 客户端命令 | `src/command/cluster_cmd.cpp`（`CLUSTER MEET/SLOTS/NODES`） |
 | 复制协议 | `src/command/psync_cmd.cpp`（`PSYNC`） |
 

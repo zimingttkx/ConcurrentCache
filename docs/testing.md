@@ -31,7 +31,7 @@
 | `long-running-stress-test` | `stress_test/long_running_stress_test.cpp` | 长时间稳定性（数小时） |
 | `load-limit-test` | `stress_test/load_limit_test.cpp` | 逐步加压找性能拐点 |
 | `network-stress-test` | `network_test/network_stress_test.cpp` | SubReactorPool 大连接并发 |
-| `cluster-tests` | `cluster_test/cluster_test.cpp` + `cluster_replication_test.cpp` + `cluster_strict_test.cpp` | 集群 Gossip / 复制 / 槽位 |
+| `cluster-tests` | `cluster_test/cluster_test.cpp` | 集群 Gossip / 复制 / 槽位 |
 
 > **注意**：`command_test/` 目录源码已就绪但**当前 `test_v3_main.cpp` 中禁用**。启用方法见 § 7。
 

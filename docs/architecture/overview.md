@@ -65,23 +65,25 @@
 
 `main.cpp` 严格按照以下顺序初始化：
 
-1. 注册 `SIGINT` / `SIGTERM` 信号处理器
-2. 加载 `conf/concurrentcache.conf`
-3. 初始化日志系统
-4. 初始化 + 启动 `SubReactorPool`（N 个 I/O 线程）
-5. 初始化 `MainReactor`（创建 listen socket）
-6. **加载 RDB**（`RdbPersistence::load`）— 启动前必须完成
-7. 初始化 `ClusterServer`（设置 EventLoop 引用）
-8. 启动 `ExpirationChecker`（100ms 周期）
-9. 启动 `RdbScheduler`（时间+阈值触发）
-10. 启动 `ClusterServer`（如启用）
-11. `MainReactor::start()` — **阻塞**，进入 epoll 循环
+1. `setrlimit(RLIMIT_NOFILE)` 提到 65535（支撑大量并发连接）
+2. 注册 `SIGINT` / `SIGTERM` 信号处理器
+3. 加载 `conf/concurrentcache.conf`（`rdb_save_interval ≤ 0` 等非法值自动回退默认）
+4. 初始化日志系统
+5. 初始化 + 启动 `SubReactorPool`（N 个 I/O 线程）
+6. 创建通用 `ThreadPool`（异步任务）
+7. 初始化 `MainReactor`（创建 listen socket）
+8. **加载 RDB**（`RdbPersistence::load`）— 必须在 `ExpirationChecker` 启动前完成
+9. 初始化 `ClusterServer`（先 `set_event_loop`，再 `init()`）
+10. 启动 `ExpirationChecker`（100ms 周期）
+11. 启动 `RdbScheduler`（时间+阈值触发）
+12. 启动 `ClusterServer`（如启用）
+13. `MainReactor::start()` — **阻塞**，进入 epoll 循环
 
 **优雅退出**（SIGINT/SIGTERM 到达）：
 
-1. `signal_handler` 设 `g_running = false`
-2. `EventLoop::quit()` + `wakeup()` 唤醒 epoll
-3. 顺序停止：`RdbScheduler` → `SubReactorPool` → `MainReactor` → `ExpirationChecker` → `ClusterServer` → `ThreadPool`
+1. `signal_handler` 设 `g_running = false`（async-signal-safe：仅 atomic exchange + `write(STDERR)` + `EventLoop::quit()`）
+2. 主 loop 退出，`main_reactor.start()` 返回
+3. 顺序停止：`RdbScheduler` → `SubReactorPool`（quit + join 全部 SubReactor）→ `MainReactor` → `ExpirationChecker` → `ClusterServer` → `ThreadPool`
 4. **强制 `RdbPersistence::save`**（保证最后写不丢）
 5. 进程退出
 
@@ -90,6 +92,7 @@
 1. `GlobalStorage::instance()` 必须在 `RdbPersistence::load()` 之前可用
 2. `SubReactorPool` 必须先于 `MainReactor` 启动
 3. RDB 加载必须在 `ExpirationChecker` 启动前完成
+4. 线程池必须**最后**停止（其他组件可能有排队任务）
 
 ## 5. 请求处理时序（以 GET key 为例）
 
@@ -104,20 +107,22 @@ Client ──TCP──► MainReactor (accept)
                   │
                   ▼
              Connection::handle_read()
-              ├── read() → input_buffer_
-              ├── RespParser::parse() → RespValue
-              └── CommandCallback → GetCommand
+              ├── recv() → input_buffer_
+              ├── has_protocol_error? → 回错 + close（协议级，断开）
+              ├── RespParser::parse() → RespValue（parse 错误 → 回错 + reset，可恢复）
+              └── CommandCallback → GetCommand（执行 try/catch 兜底）
                     │
                     ▼
              GlobalStorage::get(key)
               ├── hash(key) % 64 → shard_index
               ├── mutexes_[shard].lock_shared()
               ├── stores_[shard].find(key)
+              ├── expire_dict_.is_expired? → 删除并返回 nil
               └── return optional<CacheObject>
                     │
                     ▼
              RespEncoder::encode_bulk_string() / encode_nil()
-              └── write() → client
+              └── output_buffer_ → write() → client
 ```
 
 **关键路径耗时**（Release 构建、8 核）：
@@ -138,11 +143,12 @@ Client ──TCP──► MainReactor (accept)
 |--------|---------|
 | `GlobalStorage` 全局唯一 | Magic Static 单例 + `delete` 拷贝构造 |
 | 每分片独立加锁 | 64 把 `std::shared_mutex` + 哈希分片 |
-| `Connection` 生命周期 ≤ `EventLoop` | `SubReactor` 持有 `unique_ptr<Connection>` |
+| `Connection` 生命周期 ≤ `EventLoop` | `SubReactor` 持有 `unique_ptr<Connection>`；关闭走「先回调后关 fd」防泄漏 |
+| 畸形输入不杀进程 | 协议错误回错断开；命令执行/事件分发双层 try/catch 兜底 |
 | `Command` 实例独立 | `CommandFactory` 存储模板 + `clone()` 创建新实例 |
-| 过期键最终被删除 | 惰性删除（get 时）+ 周期删除（100ms 抽 20 个）双重保证 |
-| 写入 RDB 前不丢数据 | 周期快照 + 优雅退出强制保存 |
-| 信号处理不阻塞 | `signal_handler` 仅做 atomic store + `write()`（async-signal-safe） |
+| 过期键最终被删除 | 惰性删除（get 时）+ 周期删除（100ms 周期、25ms 预算内反复抽样）双重保证 |
+| 写入 RDB 前不丢数据 | 周期快照（.tmp+rename 原子写）+ 优雅退出强制保存 |
+| 信号处理不阻塞 | `signal_handler` 仅做 atomic exchange + `write()` + `quit()`（async-signal-safe） |
 | WRONGTYPE 保护 | 所有类型敏感命令执行前检查 `CacheObject::type()` |
 
 ## 7. 性能特征

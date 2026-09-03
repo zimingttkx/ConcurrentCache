@@ -4,7 +4,7 @@
 
 | 文档状态 | 维护者 | 最后更新 | 适用版本 |
 |---------|--------|---------|---------|
-| Active | ConcurrentCache Team | 2026-06 | V3.x |
+| Active | ConcurrentCache Team | 2026-09 | V3.x |
 
 ---
 
@@ -44,11 +44,11 @@ docs/
 | 文档 | 内容 | 何时看 |
 |------|------|-------|
 | [`overview.md`](architecture/overview.md) | 7 层组件图、模块依赖、请求时序、关键不变量、性能数据 | **第一份必读** |
-| [`network.md`](architecture/network.md) | `MainReactor` 端口监听、`SubReactorPool` 轮询、`EventLoop` epoll LT、`Connection` 缓冲区 | 改网络层、调连接性能 |
+| [`network.md`](architecture/network.md) | `MainReactor` 端口监听、`SubReactorPool` 轮询、`EventLoop` epoll LT、`Connection` 缓冲区、协议错误处理与优雅关机顺序 | 改网络层、调连接性能 |
 | [`storage.md`](architecture/storage.md) | `GlobalStorage` 64 分片 + `std::shared_mutex`、`ExpireDict` 过期字典、`ExpirationChecker` 定期清理、ARU 淘汰 | 改存储、调并发瓶颈 |
 | [`memory-pool.md`](architecture/memory-pool.md) | `SizeClass` 29 级、`ThreadCache` 无锁分配、`CentralCache` 细粒度锁、`PageCache` Span 管理 | 改内存池、分析碎片 |
-| [`persistence.md`](architecture/persistence.md) | RDB 魔数 `CCRD`、5 类型序列化、`RdbScheduler` 周期+阈值触发、优雅退出保存 | 改持久化、查数据丢失 |
-| [`cluster.md`](architecture/cluster.md) | `ClusterServer` 单例、16384 槽 CRC16、`ClusterGossip` Ping/Pong/Meet/Fail、`ReplicationMgr` 10MB 缓冲、客观下线+投票 | 部署集群、排查主从 |
+| [`persistence.md`](architecture/persistence.md) | RDB 魔数 `CCRD`、5 类型序列化、原子保存（.tmp+rename）、`RdbScheduler` 周期+阈值触发、优雅退出保存 | 改持久化、查数据丢失 |
+| [`cluster.md`](architecture/cluster.md) | `ClusterServer` 单例、16384 槽 CRC16、`ClusterGossip` Ping/Pong/Meet/Fail、`ReplicationMgr` RESTORE 流全量同步 + backlog、帧校验与 Link 断开顺序、客观下线+投票 | 部署集群、排查主从 |
 
 ### 3.2 API
 

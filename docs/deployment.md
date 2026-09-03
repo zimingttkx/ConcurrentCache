@@ -132,11 +132,11 @@ sudo systemctl start concurrentcache
 | `reactor_count` | CPU 核数 | SubReactor 数量 |
 | `thread_pool_size` | CPU 核数 | 通用 ThreadPool 数量 |
 | `rdb_path` | `./dump.rdb` | RDB 文件路径 |
-| `rdb_save_interval` | `900` | 自动保存间隔（秒） |
-| `rdb_dirty_threshold` | `1` | 达到 N 个脏键就触发保存 |
-| `max_entries` | `2000000` | 存储上限（触发 ARU 淘汰） |
+| `rdb_save_interval` | `900` | 自动保存间隔（秒；配置 ≤ 0 时自动回退默认） |
+| `rdb_dirty_threshold` | `1` | 达到 N 个脏键就触发保存（配置 ≤ 0 时自动回退默认） |
+| `max_entries` | `2000000` | 存储上限（触发 ARU 淘汰；**当前未接线**——代码中 `set_max_entries` 无调用方，运行期恒为内置默认 2,000,000，配置值不生效） |
 | `cluster_enabled` | `false` | 是否启用集群模式 |
-| `cluster_node_timeout` | `5000` | Gossip 节点超时（毫秒） |
+| `cluster_node_timeout` | `15000` | Gossip 节点超时（毫秒；注意代码默认值为 15000，conf 中未配置时以此为准） |
 
 **示例配置**：
 

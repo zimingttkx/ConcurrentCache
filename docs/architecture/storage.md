@@ -54,8 +54,8 @@ flowchart TB
 | `stores_` | `std::vector<unordered_map<string, CacheEntry>>` | 每个分片一个 map |
 | `mutexes_` | `std::unique_ptr<shared_mutex[]>` | 每个分片一把 `std::shared_mutex` |
 | `expire_dict_` | `ExpireDict` | 键 → 过期时间戳（毫秒） |
-| `dirty_counter_` | `std::atomic<size_t>` | 自上次 BGSAVE 起的写操作数 |
-| `max_entries_` | `size_t` | `EvictionConfig::kMaxEntries = 2,000,000`（默认） |
+| `dirty_counter_` | `std::atomic<size_t>` | 自上次成功启动 BGSAVE 起的写操作数 |
+| `max_entries_` | `size_t` | `EvictionConfig::kMaxEntries = 2,000,000`（默认；注意 conf 中的 `max_entries` 配置**未接线**——`set_max_entries` 无调用方，运行期恒为此值） |
 
 **分片定位**：
 
@@ -69,8 +69,9 @@ size_t get_shard_index(const std::string& key) const {
 
 ```cpp
 struct CacheEntry {
-    CacheObject value;               // 实际数据
-    int64_t last_access_time_ms;     // ARU 用的访问时间
+    CacheObject value;                        // 实际数据
+    std::atomic<int64_t> last_access_time_ms; // ARU 用的访问时间（原子：GET 共享锁下更新）
+    int64_t expire_at_ms = -1;                // 绝对过期时间戳；-1 = 永不过期
 };
 ```
 
@@ -126,10 +127,10 @@ flowchart LR
 | `del` | `lock_unique()` | 同上 |
 | `size` | 遍历所有分片 `lock_shared()` | 全局读 |
 | `clear` | 遍历所有分片 `lock_unique()` | 全局写 |
-| `evict_one` | 遍历分片 `lock_unique()` | 按 `last_access_time_ms` 找最旧 |
+| `evict_one` | 随机采样单分片 `lock_unique()`（最多试 8 个分片） | 片内已过期优先，否则取 `last_access_time_ms` 最小（见 §5.2） |
 | `get_all_objects*` | 遍历分片 `lock_shared()` | RDB 用 |
 
-**为什么 64 分片？** 与 CPU 核数成倍数（8 核 × 8 倍），足以让绝大多数并发请求落到不同分片，锁竞争概率 < 1%。
+**为什么 64 分片？** 代码注释按「CPU 核心数量 × 2」的倍数思路取值（数值为硬编码 64），足以让绝大多数并发请求落到不同分片，锁竞争概率 < 1%。
 
 ## 4. 过期管理
 
@@ -138,14 +139,16 @@ flowchart LR
 ```mermaid
 flowchart TB
     GET[GET key] --> CK{expire_dict<br/>is_expired?}
-    CK -->|Yes| DEL1[del + remove expire]
+    CK -->|Yes| DEL1[storage.del<br/>内部含 remove expire]
     CK -->|No| RTN[返回 value]
 
-    BG[ExpirationChecker<br/>100ms 周期] --> EX[ExpireDict::delete_expired]
-    EX -->|get_candidates 20| CK2{is_expired?}
-    CK2 -->|Yes| DEL2[del + remove expire]
+    BG[ExpirationChecker<br/>100ms 周期] --> GC[ExpireDict::get_candidates 20]
+    GC --> CK2{is_expired?}
+    CK2 -->|Yes| DEL2[storage.del<br/>内部含 remove expire]
     CK2 -->|No| SKIP[跳过]
 ```
+
+> 注：后台路径只调 `get_candidates` + `storage.del`；`ExpireDict::delete_expired()` 目前是无调用方的未接线 API。
 
 ### 4.2 `ExpireDict`（`src/cache/expire_dict.{h,cpp}`）
 
@@ -160,11 +163,11 @@ flowchart TB
 |------|------|
 | `set(key, expire_ms)` | `set_expire_time(key, current_ms + expire_ms)` |
 | `set_expire_time(key, ts)` | 直接设置绝对时间戳（RDB 加载用） |
-| `get_ttl(key)` | 返回剩余毫秒数；-1 = 永不过期，-2 = 不存在/已过期 |
-| `is_expired(key)` | `get_expire_time(key) <= current_time_ms()` |
+| `get_ttl(key)` | 返回剩余毫秒数；**-2 = 不存在或已过期**（本方法不返回 -1，"永不过期" 的 -1 由命令层依据 `contains()` 判定） |
+| `is_expired(key)` | **不存在 → false**；存在 → `now >= expire_time` |
 | `persist(key)` | 从 `expire_map_` 移除 |
-| `get_candidates(n)` | 随机抽取 n 个 key（用于定期删除） |
-| `delete_expired()` | 遍历所有 key，删除已过期的 |
+| `get_candidates(n)` | 随机抽样 n 个 key（迭代器随机定位，不拷贝全表；`want*4 >= total` 时退化为顺序遍历） |
+| `delete_expired()` | 遍历所有 key 删除已过期的（**当前无调用方**） |
 
 ### 4.3 `ExpirationChecker`（`src/cache/expiration_checker.{h,cpp}`）
 
@@ -172,21 +175,24 @@ flowchart TB
 |----|---|
 | 后台线程 | 1 个 |
 | 检查周期 | `kCheckIntervalMs = 100` ms |
-| 单次最大耗时 | `kMaxCheckDurationMs = 25` ms |
+| 单次时间预算 | `kMaxCheckDurationMs = 25` ms |
 | 单次抽样数 | 20 个 key |
 
-**调度逻辑**（`expiration_checker.cpp::run()`）：
+**调度逻辑**（`expiration_checker.cpp::run()`）——25ms 预算内**反复**抽样删除，而非一批：
 
 ```text
 while (running_):
     sleep(100ms)
     start = now()
-    ExpireDict::get_candidates(20)
-    for each candidate:
-        if is_expired:
-            storage->del(key)
-            expire_dict.remove(key)
-        if now() - start > 25ms: break   // 限时长，保护 P99
+    do:
+        candidates = ExpireDict::get_candidates(20)
+        if candidates.empty(): break
+        for each candidate:
+            if is_expired:
+                storage->del(key)          // 内部已 remove expire
+        elapsed = now() - start
+    while (elapsed < 25ms)                 // 预算内循环多批
+    if elapsed >= 25ms: budget_exhausted   // 记录，下周期继续
 ```
 
 **为什么双删除？** 单一策略都有问题：
@@ -196,7 +202,7 @@ while (running_):
 
 **双重策略保证**：热 key 立即删（GET 时发现过期），冷 key 100ms 内被抽样删。
 
-## 5. ARU 淘汰（近似 LRU）
+## 5. ARU 淘汰（随机分片采样近似 LRU）
 
 ### 5.1 触发条件
 
@@ -210,22 +216,25 @@ struct EvictionConfig {
 };
 ```
 
-`GlobalStorage::evict_if_needed(hint_key)` 在每次 `set` 后调用：
+`GlobalStorage::evict_if_needed(hint_key)` 在每次 `set`/`set_with_expire`/`incrby` 前调用：
 
-1. 遍历所有分片 `size()` 之和
+1. 遍历所有分片求 `size()` 之和
 2. 若 `size >= max_entries_ * 0.9` → 触发淘汰
-3. 反复调用 `evict_one()` 直到 `size <= max_entries_ * 0.6`（腾出 40% 空间）
+3. 反复调用 `evict_one()` 直到 `size <= max_entries_ * 0.6`（腾出 40% 空间）；
+   单轮最多淘汰 1024 个，每 64 个复查一次 `size()`（防并发写入导致过度淘汰）
 
-### 5.2 淘汰算法
+### 5.2 淘汰算法（随机分片采样）
 
 `evict_one()`：
 
-1. 遍历 64 个分片，每个分片 `lock_unique()`
-2. 找 `last_access_time_ms` 最小的 entry
-3. 删除它（同时清理 `expire_dict_`）
-4. 返回被淘汰的 key
+1. 用线程本地 RNG 随机选一个分片（最多重试 8 个分片）
+2. 对该分片 `lock_unique()`
+3. 片内扫描：**已过期的 key 优先删除**（等于免费清理）；否则取 `last_access_time_ms` 最小的 entry
+4. 当场删除并清理 `expire_dict_`，返回被淘汰的 key
 
-**为什么是"近似" LRU？** 完全 LRU 需要维护全局双向链表，开销大。本项目用时间戳采样 + 触发式扫描，已能保证 90% 以上命中率（实际场景中冷数据访问频率远低于热数据）。
+**为什么是采样而不是全局扫描？** 全局最老 key 需要两遍全库扫描（找最老 + 回该分片删除）；在 200 万 key、单轮需淘汰 80 万个的规模下是数十万次全库遍历，且多个写线程并发触发时互相叠加——写入延迟会从微秒级恶化到分钟级。采样版单次代价 O(分片内条目数) ≈ 全库/64，这是 Redis `maxmemory-samples` 的同款思路。
+
+**为什么是"近似" LRU？** 完全 LRU 需要维护全局双向链表，开销大。随机采样分片内最老 key 已能保证良好的命中率（实际场景中冷数据访问频率远低于热数据）。
 
 ## 6. RDB 集成
 
@@ -252,10 +261,13 @@ struct KVWithTTL {
 **写入路径**（RDB 加载时）：
 
 ```cpp
-void GlobalStorage::set_expire(const std::string& key, int64_t ttl_ms);
-// ttl_ms <= 0 → expire_dict_.persist(key)
-// ttl_ms > 0  → expire_dict_.set_expire_time(key, current_ms + ttl_ms)
+// 原子路径：在分片独占锁内同时写 CacheEntry.expire_at_ms = now + ttl
+// 与 expire_dict_.set_expire_time（单真相源，两处一致）
+storage.set_with_expire(key, obj, 剩余ttl_ms);
+// 已过期的 key 加载时直接跳过，不写入
 ```
+
+> **已知旁路**：`EXPIRE` 命令只改 `expire_dict_`，不更新 `CacheEntry::expire_at_ms`。GET 的双判仍能兜底过期删除，但 `evict_one` 的「已过期优先」对 EXPIRE 设置的 key 不生效（只能按 LRU 淘汰）。另 `GlobalStorage::set_expire()` 为无调用方的死 API。
 
 ## 7. 关键不变量
 
@@ -263,21 +275,22 @@ void GlobalStorage::set_expire(const std::string& key, int64_t ttl_ms);
 |--------|---------|
 | 单实例 | `static GlobalStorage& instance()`（Magic Static） + `delete` 拷贝 |
 | 分片数与锁数一致 | `mutexes_ = std::make_unique<shared_mutex[]>(num_shards_)` |
-| 过期键不会返回 | GET 时检查 `expire_dict_.is_expired()` → 删除后再读 |
+| 过期键不会返回 | GET 时检查 `expire_dict_.is_expired()` 与 `CacheEntry::expire_at_ms` → 删除后再读 |
 | `dirty_counter` 单调递增直至 `reset_dirty_count()` | `fetch_add(1, memory_order_relaxed)` |
-| 写操作后 `dirty_counter++` | 命令层 `set`/`del`/`expire` 等每次都 `storage.increment_dirty()` |
+| 写操作后 `dirty_counter++` | `set`/`del`/`set_with_expire`/`incrby` 内部递增（含 INCR 原子路径） |
 | WRONGTYPE 类型保护 | 所有类型敏感命令执行前检查 `CacheObject::type()` |
-| `last_access_time_ms` 更新时机 | `evict_one` 扫描时记录；目前**未在 GET 时更新**（ARU 简化） |
+| 淘汰单次代价有界 | 随机分片采样（O(全库/64)），单轮上限 1024 |
+| `last_access_time_ms` 更新时机 | GET 命中时原子更新；淘汰采样时读取 |
 
 ## 8. 性能与调优
 
 | 现象 | 排查 | 调优 |
 |------|------|------|
 | GET P99 突增 | `tsan` 检测锁竞争 | 调大 `num_shards_`（需重构） |
-| 内存持续上涨 | 检查 `max_entries` 是否设置 | 调小 `kEvictThreshold` 提前淘汰 |
+| 内存持续上涨 | 检查 `max_entries_` 触发点是否到达 | `kEvictThreshold`/`kMaxEntries` 为编译期常量，调参需改代码重编 |
 | 过期键残留 | `ExpirationChecker` 线程是否存活 | 调小 `kCheckIntervalMs` |
 | `dirty_counter` 持续高位 | 写多读少 | 调小 `rdb_dirty_threshold` 更频繁落盘 |
-| CacheEntry 占用大 | key 平均长度 | 调大 `max_entries` 或改用 mmap |
+| CacheEntry 占用大 | key 平均长度 | 调大 `max_entries_`（同上，需改代码）或改用 mmap |
 
 ## 9. 关键源码位置
 

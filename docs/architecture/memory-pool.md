@@ -3,6 +3,7 @@
 > **范围**：三级内存池（ThreadCache → CentralCache → PageCache）、29 级 SizeClass、Span 管理、合并策略。
 > **源码**：`src/memorypool/`
 > **前置阅读**：[架构总览](./overview.md)
+> **当前状态**：模块已完整实现并编译进二进制，但**服务器数据路径尚未接入**——所有分配仍走系统 `malloc/free`。接入方法：在热点分配点改用 `MemoryPool::allocate/deallocate`（见 §8）。
 
 ## 1. 设计目标
 
@@ -82,6 +83,8 @@ static size_t SizeClass::round_up(size_t size);    // 实际分配大小
 
 ```cpp
 static ThreadCache* ThreadCache::get_instance();   // thread_local 单例
+// 实现：static thread_local ThreadCache instance; return &instance;
+// （线程首次经过时构造，线程退出时析构并把缓存归还 CentralCache）
 ```
 
 **分配**（`allocate(size)`）：
@@ -98,7 +101,10 @@ static ThreadCache* ThreadCache::get_instance();   // thread_local 单例
 1. class_index = SizeClass::get_index(size)
 2. push 到 free_lists_[class_index]
 3. 若该 FreeList 超过阈值：return_to_central(class_index) 批量归还
+   （批量归还以 256 个为一批循环 pop，防止单次 pop_batch 超限）
 ```
+
+**线程退出**：`~ThreadCache()` 析构把所有 SizeClass 缓存的空闲对象**全部**归还 CentralCache（此前缺少析构，≤32 个/类的对象随线程死亡而泄漏）。
 
 **为什么无锁？** `thread_local` 变量每个线程独立。`SubReactor` 线程、`ExpirationChecker` 线程、`ThreadPool` 工作线程各自有独立实例，互不干扰。
 
@@ -130,8 +136,10 @@ lock(locks_[class_index])
 lock(locks_[class_index])
 1. 找到 obj 所属 Span
 2. push 到 Span->free_list_
-3. if Span 全部空闲：free_span(span)  // 归还给 PageCache
+3. if free_count_ == span->total_objects_：free_span(span)  // 归还给 PageCache
 ```
+
+> **为什么用 `total_objects_` 而不是重算阈值？** 旧实现用 `num_pages × page_size / class_size` 重算"全部空闲"阈值，对不能整除的 size class（如 384B）该阈值**永远达不到**——Span 永不归还 PageCache，等于慢性泄漏。现在切分 Span 时把实际切出的对象数存入 `span->total_objects_`，归还判定直接比较。
 
 ## 6. PageCache（`src/memorypool/page_cache.{h,cpp}`）
 
@@ -171,6 +179,8 @@ lock(mutex_)
 
 **为什么合并重要？** 减少外部碎片。例如连续 4 页、4 页、4 页 单独释放后再次申请 12 页会失败；合并后可以满足。
 
+> 合并安全性：CentralCache 仅在 Span **完全空闲**（`free_count_ == total_objects_`）时才调 `free_span`，且不跨 free 持有 Span 裸指针，因此合并不会产生悬空指针。
+
 ## 7. Span（`src/memorypool/span.h`）
 
 ```cpp
@@ -180,6 +190,7 @@ struct Span {
     size_t size_class_;      // 对应 SizeClass 索引
     void* free_list_;        // Span 内空闲小块链表头
     size_t free_count_;      // 空闲小块数量
+    size_t total_objects_;   // 实际切分出的对象总数（归还 PageCache 的判定依据）
     Span* next_;             // 双向链表指针
     Span* prev_;
 };
