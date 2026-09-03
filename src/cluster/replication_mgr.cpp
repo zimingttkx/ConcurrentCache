@@ -126,6 +126,19 @@ void ReplicationMgr::replicate_command(const std::string& command) {
     auto replicas = get_all_replicas();
     LOG_INFO(CLUSTER, "REPL-SEND[%ld] cmd=%s replicas=%zu",
              seq, command.c_str(), replicas.size());
+
+    // 修复 P1-2c：全量同步期间（kSendingRdb）的写入不能既不在快照里、
+    // 又不推增量（旧代码直接跳过 → 永久丢失）。这些命令先记入该副本的
+    // backlog，快照发送完成后按序回放（见 send_rdb_to_replica 尾部）。
+    {
+        std::unique_lock<std::shared_mutex> lock(replicas_mutex_);
+        for (auto& [name, replica] : replicas_) {
+            if (replica && replica->sync_state == SyncState::kSendingRdb) {
+                replica->pending_commands.push_back(command);
+            }
+        }
+    }
+
     for (auto& replica : replicas) {
         if (replica->sync_state == SyncState::kSendingkv ||
             replica->sync_state == SyncState::kConnected) {
@@ -202,36 +215,54 @@ bool ReplicationMgr::send_rdb_to_replica(const std::string& replica_name) {
 
     // 序列化所有数据并通过 cluster bus 发送
     auto& storage = GlobalStorage::instance();
-    auto all_kvs = storage.get_all_objects();
+    auto all_kvs = storage.get_all_objects_with_ttl();
     int64_t sent_count = 0;
 
-    for (const auto& [key, obj] : all_kvs) {
-        std::string value_str;
-        if (obj.type() == ObjectType::STRING) {
-            auto opt_val = obj.get_string();
-            if (opt_val.has_value()) {
-                value_str = opt_val.value();
-            } else {
-                continue;
+    // 修复 P1-2b：全量同步改用 RESTORE 传输完整 CacheObject（保留 LIST/HASH/
+    // SET/ZSET 类型），并携带 TTL。旧代码对一切类型发 "SET key value_str"：
+    // 非 STRING 类型经 serialize() 的多行文本在副本上被存成错误的 STRING，
+    // 之后 LPUSH/HGET 等命令在副本上永远 WRONGTYPE，主从类型永久不一致。
+    for (const auto& kv : all_kvs) {
+        // args: RESTORE key ttl_ms serialized_value REPLACE
+        // ttl_ms 取剩余生存时间；永不过期为 -1（与 RESTORE 命令语义一致）
+        int64_t ttl_ms = -1;
+        if (kv.expire_time_ms > 0) {
+            ttl_ms = kv.expire_time_ms - storage.current_time_ms();
+            if (ttl_ms <= 0) {
+                continue;  // 快照时已过期，不发
             }
-        } else {
-            // 对非 STRING 类型使用 serialize() 编码
-            value_str = obj.serialize();
         }
-        std::string cmd_line = "SET " + key + " " + value_str;
-        if (!send_replication_msg(replica_name, cmd_line)) {
-            LOG_WARN(CLUSTER, "Failed to send RDB entry for key=%s to replica=%s",
-                     key.c_str(), replica_name.c_str());
+        std::vector<std::string> args = {
+            "RESTORE", kv.key, std::to_string(ttl_ms), kv.value.serialize(), "REPLACE"
+        };
+        if (!send_replication_args(replica_name, args)) {
+            LOG_WARN(CLUSTER, "Failed to send RESTORE for key=%s to replica=%s",
+                     kv.key.c_str(), replica_name.c_str());
         }
         sent_count++;
     }
 
-    // 标记 RDB 发送完成，进入增量同步状态
-    replica->sync_state = SyncState::kConnected;
+    // 修复 P1-2c：快照发送完成，回放期间积压的写命令，然后进入增量同步。
+    // 顺序：先取走 backlog 再切 kConnected —— 取走后新命令直接走增量推送，
+    // 取走前的命令都在 backlog 快照里，不丢不重。
+    std::vector<std::string> backlog;
+    {
+        std::unique_lock<std::shared_mutex> lock(replicas_mutex_);
+        auto it = replicas_.find(replica_name);
+        if (it != replicas_.end()) {
+            backlog = std::move(it->second->pending_commands);
+            it->second->pending_commands.clear();
+            it->second->sync_state = SyncState::kConnected;
+        }
+    }
+    for (const auto& cmd : backlog) {
+        send_replication_msg(replica_name, cmd);
+    }
 
     rdb_send_in_progress_.store(false);
 
-    LOG_INFO(CLUSTER, "RDB sent to replica %s: %ld keys", replica_name.c_str(), sent_count);
+    LOG_INFO(CLUSTER, "RDB sent to replica %s: %ld keys, %zu backlog commands replayed",
+             replica_name.c_str(), sent_count, backlog.size());
     return true;
 }
 
@@ -247,14 +278,53 @@ bool ReplicationMgr::send_replication_msg(const std::string& replica_name,
     return conn->send_command_to_node(replica_name, args);
 }
 
+bool ReplicationMgr::send_replication_args(const std::string& replica_name,
+                                           const std::vector<std::string>& args) {
+    if (args.empty()) {
+        return false;
+    }
+    auto* conn = ClusterServer::instance().getConnection();
+    if (!conn) {
+        return false;
+    }
+
+    // 修复 P1-2a：把命令编码为 RESP 数组文本（二进制安全），整段作为单个
+    // kRepData 参数传输。RESP bulk string 自带长度前缀，key/value 中的空格、
+    // \xC0（bus 参数分隔符）、\n（serialize 多行文本）都不会再被截断。
+    std::string resp_cmd = RespEncoder::encode_array(args);
+    std::vector<std::string> bus_args = {resp_cmd};
+    return conn->send_command_to_node(replica_name, bus_args);
+}
+
 void ReplicationMgr::handle_replication_command(const std::string& cmd_line) {
     // 使用 CommandFactory 管道执行复制命令，不再手工解析
     static std::atomic<int64_t> repl_seq{0};
     int64_t seq = repl_seq.fetch_add(1);
 
-    // 按空格分割命令行
+    // 修复 P1-2a：优先按 RESP 数组解析（新协议，二进制安全）。
+    // 首字节是 '*' 且能完整解析 → RESP 数组；否则回退旧的空格分割
+    // （兼容运行中升级窗口内旧主节点发来的文本命令）。
     std::vector<std::string> args;
-    {
+    bool parsed = false;
+    if (!cmd_line.empty() && cmd_line[0] == '*') {
+        Buffer tmp;
+        tmp.append(cmd_line.data(), cmd_line.size());
+        RespParser parser;
+        std::vector<RespValue> parsed_values = parser.parse(&tmp);
+        if (!parser.error().empty()) {
+            LOG_WARN(CLUSTER, "REPL-CMD[%ld] malformed RESP payload: %s",
+                     seq, parser.error().c_str());
+            return;
+        }
+        if (!parsed_values.empty() && parsed_values[0].type == RespType::ARRAY) {
+            for (const auto& v : parsed_values[0].as_array()) {
+                args.push_back(v.as_string());
+            }
+            parsed = true;
+        }
+    }
+    if (!parsed) {
+        // 旧格式回退：按空格分割命令行（不识别含空格的 value，仅兼容旧对端）
         std::istringstream iss(cmd_line);
         std::string token;
         while (iss >> token) {

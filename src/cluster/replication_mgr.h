@@ -39,6 +39,12 @@ struct ReplicaInfo {
     SyncState sync_state;                   // 同步状态
     std::shared_ptr<ClusterNode> node;      // 副本节点指针
 
+    // 快照 backlog（修复 P1-2c：全量同步期间的写入丢失）
+    // 全量快照发送期间（kSendingRdb），replicate_command 会把命令同时写入
+    // 每个 kSendingRdb 副本的 backlog；快照发送完成后按序回放，副本即可
+    // 无缝衔接增量流。sync_state 由 replicas_mutex_ 保护，backlog 同锁保护。
+    std::vector<std::string> pending_commands;
+
     ReplicaInfo() : port(0), repl_offset(0), last_ack_time(0),
                     sync_state(SyncState::kNone), node(nullptr) {}
 };
@@ -77,8 +83,15 @@ public:
     // 发送 RDB 文件给副本
     bool send_rdb_to_replica(const std::string& replica_name);
 
-    // 通过 cluster bus 发送复制命令给指定副本
+    // 通过 cluster bus 发送复制命令给指定副本（空格分隔的命令行，
+    // 旧接口 —— 仅用于 backlog 回放等内部场景）
     bool send_replication_msg(const std::string& replica_name, const std::string& cmd_line);
+
+    // 通过 cluster bus 发送复制命令（RESP 数组编码，二进制安全）。
+    // 修复 P1-2a：value 含空格/\xC0/\n 时文本拼接会被截断错位；
+    // 这里把参数编码为 RESP 数组（$len\r\n...\r\n），副本端用 RespParser 解析。
+    bool send_replication_args(const std::string& replica_name,
+                               const std::vector<std::string>& args);
 
     // 处理收到的复制命令（副本端调用）
     void handle_replication_command(const std::string& cmd_line);
