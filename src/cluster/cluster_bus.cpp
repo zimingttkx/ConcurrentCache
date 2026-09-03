@@ -238,11 +238,15 @@ ClusterLink* ClusterBus::create_link(int fd, const std::string& node_name, const
         }
     });
 
-    link->set_disconnect_callback([this, raw_link](const std::string& name, ClusterLink* /*link*/) {
-        // 注意：这里的 link 参数可能是悬空指针，使用传入的 raw_link 代替
+    link->set_disconnect_callback([this](const std::string& name, ClusterLink* /*link*/) {
+        // 修复 P0-2：此回调在 ClusterLink::disconnect_and_notify 内触发，
+        // 回调返回后 link 即被销毁。remove_link 会销毁 link 并注销其 Channel，
+        // 之后不能再向下游传递任何 link 指针（旧代码传 raw_link —— 悬空指针被
+        // 下游 on_node_disconnected 解引用）。传 nullptr：bus 侧 Channel 已由
+        // remove_link 负责注销，下游无需也无法再做。
         remove_link(name);
         if (disconnect_callback_) {
-            disconnect_callback_(name, raw_link);
+            disconnect_callback_(name, nullptr);
         }
     });
 
@@ -263,9 +267,8 @@ ClusterLink* ClusterBus::create_link(int fd, const std::string& node_name, const
 }
 
 void ClusterBus::remove_link(const std::string& node_name) {
-    // 注意：此函数可能在 ClusterLink 的析构函数中调用
-    // 必须先从 EventLoop 注销 Channel，然后再销毁 ClusterLink
-    // 否则会出现 Use-After-Free
+    // 注意：此函数由 ClusterLink::disconnect_and_notify 的断开回调触发，
+    // 调用时 link 尚未销毁（this 仍有效），但回调返回后 link 就会死亡。
 
     int fd_to_remove = -1;
 
@@ -280,8 +283,12 @@ void ClusterBus::remove_link(const std::string& node_name) {
         }
     }
 
-    // 在 ClusterLink 销毁后，再注销 EventLoop 中的 Channel
     if (fd_to_remove >= 0) {
+        // 关键（修复 P0-2/UAF-3）：必须在 link 销毁后、事件再次到来前，
+        // 把这条链路的 Channel 从 EventLoop 注销并删除。
+        // 旧代码只清理 ClusterBus 自己注册的 channel 之外的路径，
+        // 导致 Channel 泄漏并继续留在 epoll 中，其回调捕获已析构的
+        // ClusterLink* —— fd 复用后同 fd 事件会调用已释放对象。
         if (event_loop_) {
             unregister_link_from_loop_fd(fd_to_remove);
         }

@@ -128,24 +128,35 @@ bool ClusterConnection::connect_to_node(const std::string& node_name,
 }
 
 void ClusterConnection::disconnect_from_node(const std::string& node_name) {
+    // 修复 P0-2：旧代码先 links_.erase(it)（析构 link），随后还解引用 link_ptr
+    // 调用 fd()/disconnect() —— 直接 UAF。正确顺序：
+    //   1) 取出 link 指针（link 仍存活）
+    //   2) 注销 Channel + disconnect()
+    //   3) 最后 erase（销毁 link）
+    // 注意：普通 disconnect() 不触发断开回调，不会重入本函数。
     ClusterLink* link_ptr = nullptr;
 
     {
-        std::unique_lock<std::shared_mutex> lock(links_mutex_);
-
+        std::shared_lock<std::shared_mutex> lock(links_mutex_);
         auto it = links_.find(node_name);
         if (it != links_.end()) {
             link_ptr = it->second.get();
-            links_.erase(it);
         }
     }
 
     if (link_ptr) {
-        // 先从 EventLoop 注销 Channel
+        // 先从 EventLoop 注销 Channel，再断开 socket（link 此时仍有效）
         if (event_loop_) {
             unregister_link_from_loop(link_ptr);
         }
         link_ptr->disconnect();
+
+        // 最后从 map 移除并销毁 link
+        {
+            std::unique_lock<std::shared_mutex> lock(links_mutex_);
+            links_.erase(node_name);
+        }
+
         LOG_INFO(CLUSTER, "Disconnected from node: %s", node_name.c_str());
 
         if (node_disconnected_callback_) {
@@ -253,9 +264,9 @@ bool ClusterConnection::send_command_to_node(const std::string& node_name,
     // 将命令包装在 ClusterMsg 中（使用 kRepData 类型）
     ClusterMsg msg;
     msg.header.type = static_cast<uint16_t>(ClusterMsgType::kRepData);
-    msg.header.length = static_cast<uint16_t>(sizeof(msg.header));
+    msg.header.length = static_cast<uint32_t>(sizeof(msg.header));
     for (const auto& arg : args) {
-        msg.header.length += static_cast<uint16_t>(arg.size() + 1);
+        msg.header.length += static_cast<uint32_t>(arg.size() + 1);
     }
     msg.args = args;
     return link->send_msg(msg);
@@ -324,13 +335,17 @@ bool ClusterConnection::is_node_connected(const std::string& node_name) const {
 }
 
 void ClusterConnection::on_node_disconnected(const std::string& node_name, ClusterLink* link) {
-    // 先从 EventLoop 注销 Channel
+    // 修复 P0-2：link 可能为 nullptr —— ClusterBus 侧的断开回调里 link 即将/已经
+    // 被销毁（其 Channel 由 ClusterBus::remove_link 负责注销），传 nullptr 表示
+    // "没有可用的 link 对象"。只有传入仍有效的 link 时才做 EventLoop 注销。
     if (link && event_loop_) {
         unregister_link_from_loop(link);
     }
 
-    std::unique_lock<std::shared_mutex> lock(links_mutex_);
-    links_.erase(node_name);
+    {
+        std::unique_lock<std::shared_mutex> lock(links_mutex_);
+        links_.erase(node_name);
+    }
 
     LOG_INFO(CLUSTER, "Node disconnected: %s", node_name.c_str());
 
@@ -480,8 +495,18 @@ void ClusterConnection::handle_link_msg(ClusterMsg&& msg, ClusterLink* link) {
                     repl_mgr.send_rdb_to_replica(replica_name);
                 }
             } else {
-                // 这是复制数据命令，在副本端执行
-                ReplicationMgr::instance().handle_replication_command(cmd_line);
+                // 这是复制数据命令，在副本端执行。
+                // 修复 P0-3：命令执行可能抛异常（畸形数据/类型错误等），
+                // 无 catch 会沿 handle_read → EventLoop 一路上抛 → std::terminate
+                try {
+                    ReplicationMgr::instance().handle_replication_command(cmd_line);
+                } catch (const std::exception& e) {
+                    LOG_ERROR(CLUSTER, "Replication command '%s' threw: %s",
+                              cmd_line.c_str(), e.what());
+                } catch (...) {
+                    LOG_ERROR(CLUSTER, "Replication command '%s' threw unknown exception",
+                              cmd_line.c_str());
+                }
             }
         }
     }

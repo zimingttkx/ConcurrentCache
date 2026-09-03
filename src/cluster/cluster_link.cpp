@@ -89,6 +89,33 @@ void ClusterLink::disconnect() {
     LOG_INFO(CLUSTER, "ClusterLink disconnected: %s", node_name_.c_str());
 }
 
+void ClusterLink::disconnect_and_notify() {
+    // 修复 P0-2（三重 UAF）：断开顺序必须是
+    //   1) CAS 置 connected_=false —— 之后所有事件回调直接返回
+    //   2) 关闭 fd
+    //   3) 触发 disconnect_callback_（回调可能销毁 this）
+    // 回调返回后，本函数（以及调用它的 handle_read/handle_write 事件路径）
+    // 绝不再访问任何成员变量 —— this 可能已在回调中被 delete。
+    // 旧代码先回调再 disconnect()，而 disconnect() 是成员函数，
+    // CAS connected_ 就是在解引用已被销毁的对象。
+    bool expected = true;
+    if (!connected_.compare_exchange_strong(expected, false)) {
+        return;  // 已断开/已通知过
+    }
+
+    if (fd_ >= 0) {
+        close(fd_);
+        fd_ = -1;
+    }
+
+    LOG_INFO(CLUSTER, "ClusterLink disconnected: %s", node_name_.c_str());
+
+    if (disconnect_callback_) {
+        disconnect_callback_(node_name_, this);
+    }
+    // 注意：此处 return 后不得再触碰 this 的任何成员。
+}
+
 bool ClusterLink::send_msg(const ClusterMsg& msg) {
     if (!connected_.load()) {
         LOG_WARN(CLUSTER, "Cannot send msg to disconnected link: %s", node_name_.c_str());
@@ -98,7 +125,7 @@ bool ClusterLink::send_msg(const ClusterMsg& msg) {
     // 构建消息头 + 内容
     ClusterMsgHeader header = msg.header;
     header.type = static_cast<uint16_t>(msg.header.type);
-    header.length = static_cast<uint16_t>(sizeof(header));
+    header.length = static_cast<uint32_t>(sizeof(header));
 
     // 如果 sender_name 未设置，从 ClusterServer 获取本节点名称
     if (header.sender_name[0] == '\0') {
@@ -108,9 +135,9 @@ bool ClusterLink::send_msg(const ClusterMsg& msg) {
         }
     }
 
-    // 计算参数总长度
+    // 计算参数总长度（uint32，修复 P0-1：uint16 截断导致 >64KB 消息错位）
     for (const auto& arg : msg.args) {
-        header.length += static_cast<uint16_t>(arg.size() + 1);  // +1 for separator
+        header.length += static_cast<uint32_t>(arg.size() + 1);  // +1 for separator
     }
 
     // 添加诊断日志（仅在非心跳消息时）
@@ -235,6 +262,8 @@ bool ClusterLink::send_raw(const std::string& data) {
 }
 
 void ClusterLink::handle_read() {
+    // disconnected_ 时立即返回：可能已被 disconnect_and_notify 断开，
+    // 或者 this 正处于断开回调中（回调可能销毁 this）
     if (!connected_.load()) {
         return;
     }
@@ -249,26 +278,26 @@ void ClusterLink::handle_read() {
         // 处理接收到的数据
         while (read_complete()) {
             if (!decode_msg()) {
-                LOG_ERROR(CLUSTER, "Failed to decode message from %s", node_name_.c_str());
-                break;
+                // 协议错误（含非法 length 帧，见 read_complete）：
+                // 必须断开，否则滞留的坏字节会让这条链路永久失效
+                LOG_ERROR(CLUSTER, "Failed to decode message from %s, disconnecting",
+                          node_name_.c_str());
+                disconnect_and_notify();
+                return;  // 回调可能已销毁 this，不得再访问成员
             }
         }
     } else if (n == 0) {
         // 对端关闭连接
         LOG_INFO(CLUSTER, "Connection closed by %s", node_name_.c_str());
-        // 顺序：先触发断开回调（回调中删除 link 会析构 this），
-        // 再调用 disconnect() 清理 fd/状态。disconnect() 内部已用 CAS 保证
-        // 只执行一次，且不再访问已被回调释放的资源。
-        if (disconnect_callback_) {
-            disconnect_callback_(node_name_, this);
-        }
-        disconnect();
+        // disconnect_and_notify 内部先断链再触发回调；
+        // 回调（可能销毁 this）返回后立即 return，不再访问任何成员。
+        // （修复 P0-2：旧代码先触发回调销毁 this，再调用成员函数 disconnect() —— UAF）
+        disconnect_and_notify();
+        return;
     } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
         LOG_ERROR(CLUSTER, "Read error from %s: %s", node_name_.c_str(), strerror(errno));
-        if (disconnect_callback_) {
-            disconnect_callback_(node_name_, this);
-        }
-        disconnect();
+        disconnect_and_notify();
+        return;
     }
 }
 
@@ -277,32 +306,38 @@ void ClusterLink::handle_write() {
         return;
     }
 
-    std::lock_guard<std::mutex> lock(send_mutex_);
+    // 只在锁内操作 send_buffer_。断开处理不能在持锁时同步触发回调
+    // （回调可能销毁 this → 析构函数再拿 send_mutex_ → 死锁/递归），
+    // 先记录需要断开，解锁后再走 disconnect_and_notify。
+    bool need_disconnect = false;
 
-    while (send_buffer_.readable_bytes() != 0) {
-        ssize_t n = send(fd_, send_buffer_.peek(), send_buffer_.readable_bytes(), 0);
+    {
+        std::lock_guard<std::mutex> lock(send_mutex_);
 
-        if (n > 0) {
-            send_buffer_.retrieve(static_cast<size_t>(n));
-        } else if (n == 0) {
-            // 连接被关闭
-            LOG_INFO(CLUSTER, "Connection closed by %s during write", node_name_.c_str());
-            if (disconnect_callback_) {
-                disconnect_callback_(node_name_, this);
+        while (send_buffer_.readable_bytes() != 0) {
+            ssize_t n = send(fd_, send_buffer_.peek(), send_buffer_.readable_bytes(), 0);
+
+            if (n > 0) {
+                send_buffer_.retrieve(static_cast<size_t>(n));
+            } else if (n == 0) {
+                LOG_INFO(CLUSTER, "Connection closed by %s during write", node_name_.c_str());
+                need_disconnect = true;
+                break;
+            } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                LOG_ERROR(CLUSTER, "Write error to %s: %s", node_name_.c_str(), strerror(errno));
+                need_disconnect = true;
+                break;
+            } else {
+                // EAGAIN/EWOULDBLOCK - 发送缓冲区满，稍后再试
+                break;
             }
-            disconnect();
-            break;
-        } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
-            LOG_ERROR(CLUSTER, "Write error to %s: %s", node_name_.c_str(), strerror(errno));
-            if (disconnect_callback_) {
-                disconnect_callback_(node_name_, this);
-            }
-            disconnect();
-            break;
-        } else {
-            // EAGAIN/EWOULDBLOCK - 发送缓冲区满，稍后再试
-            break;
         }
+    }
+
+    if (need_disconnect) {
+        // 解锁后断开：回调可能销毁 this，返回后立即 return
+        disconnect_and_notify();
+        return;
     }
 }
 
@@ -339,9 +374,26 @@ bool ClusterLink::read_complete() {
         return false;
     }
 
-    // 获取消息长度
-    uint16_t msg_len;
+    // 获取消息长度（uint32，含 header）
+    uint32_t msg_len;
     memcpy(&msg_len, data + offsetof(ClusterMsgHeader, length), sizeof(msg_len));
+
+    // 修复 P0-1（远程 DoS 死循环）：length 必须至少能容纳 header。
+    // 旧代码 length 可为 0..kHeaderSize-1：read_complete 返回 true 而 decode_msg
+    // 消费 0 字节（retrieve(0)），handle_read 的 while(read_complete()) 永不退出
+    // → EventLoop 线程 100% CPU 死循环，整台服务器失去响应。
+    // 此处返回 true 让调用方走 decode_msg 失败 → 断链路径清理。
+    if (msg_len < kHeaderSize) {
+        LOG_ERROR(CLUSTER, "Malformed frame from %s: length=%u < header_size=%zu",
+                  node_name_.c_str(), msg_len, kHeaderSize);
+        return true;
+    }
+
+    // 单帧上限 256MB：防御恶意超大长度（避免 recv_buffer_ 被撑爆前先拒绝）
+    if (msg_len > (256u << 20)) {
+        LOG_ERROR(CLUSTER, "Oversized frame from %s: length=%u", node_name_.c_str(), msg_len);
+        return true;  // 走断链
+    }
 
     return len >= msg_len;
 }
@@ -355,6 +407,12 @@ bool ClusterLink::decode_msg() {
 
     ClusterMsg msg;
     memcpy(&msg.header, data, kHeaderSize);
+
+    // 防御：read_complete 对非法帧返回 true（走断链），这里必须同步校验，
+    // 避免 length < kHeaderSize 时 size_t 下溢
+    if (msg.header.length < kHeaderSize) {
+        return false;
+    }
 
     // 解析参数：header 之后的数据以 \xC0 分隔
     size_t args_size = msg.header.length - kHeaderSize;

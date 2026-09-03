@@ -12,6 +12,22 @@
 #include <sstream>
 namespace cc_server {
 
+// 安全整数解析：gossip 消息字段来自网络对端（修复 P0-3），
+// std::stoi 对非数字输入抛 std::invalid_argument，该异常沿
+// gossip_callback → handle_link_msg → handle_read → EventLoop::loop
+// 一路上抛且无任何 catch → std::terminate 杀死整个进程。
+// 成功返回 true 并写入 out；失败返回 false（该字段所在节点条目被跳过）。
+static bool parse_int_field(const std::string& s, long long& out) {
+    if (s.empty()) return false;
+    try {
+        size_t idx = 0;
+        out = std::stoll(s, &idx);
+        return idx == s.size();
+    } catch (...) {
+        return false;
+    }
+}
+
 ClusterServer& ClusterServer::instance() {
     static ClusterServer instance;
     return instance;
@@ -138,6 +154,8 @@ void ClusterServer::init() {
 
         // 从 args 解析节点信息
         // 格式: node_name,ip,port,flags,role 或 node_name,ip,port,flags,role,failover_offset
+        // 修复 P0-3：所有数字字段经 parse_int_field 安全解析（来自网络对端），
+        // 非法条目跳过而不是让异常杀死整个进程
         for (const auto& arg : msg.args) {
             std::stringstream ss(arg);
             std::string node_name, ip, port_str, flags_str, role_str, offset_str;
@@ -149,16 +167,28 @@ void ClusterServer::init() {
                 continue;
             }
 
+            long long port = 0, flags = 0, role = 0;
+            if (!parse_int_field(port_str, port) ||
+                !parse_int_field(flags_str, flags) ||
+                !parse_int_field(role_str, role)) {
+                LOG_WARN(CLUSTER, "Malformed gossip node entry from %s: '%s'",
+                         sender.c_str(), arg.c_str());
+                continue;
+            }
+
             GossipNodeInfo info;
             info.name = node_name;
             info.ip = ip;
-            info.port = static_cast<uint16_t>(std::stoi(port_str));
-            info.flags = static_cast<uint16_t>(std::stoi(flags_str));
-            info.role = static_cast<uint8_t>(std::stoi(role_str));
+            info.port = static_cast<uint16_t>(port);
+            info.flags = static_cast<uint16_t>(flags);
+            info.role = static_cast<uint8_t>(role);
 
-            // 可选：解析 failover_offset
+            // 可选：解析 failover_offset（同样安全解析，非法则按 0 处理）
             if (std::getline(ss, offset_str, ',')) {
-                info.failover_offset = std::stoll(offset_str);
+                long long offset = 0;
+                if (parse_int_field(offset_str, offset)) {
+                    info.failover_offset = offset;
+                }
             }
 
             gossip_msg.nodes.push_back(info);

@@ -33,11 +33,14 @@ enum class ClusterMsgType : uint16_t {
 };
 
 // 集群消息头
+// 注意：length 字段为 uint32（含 header 的总字节数）。
+// 修复 P0-1：此前为 uint16，复制大 value（>64KB）时发送端累加回绕截断，
+// 接收端提前判定消息完整，导致后续字节流永久错位。
 struct ClusterMsgHeader {
     uint32_t magic;           // 消息标识 (0x43 = 'C')
     uint16_t version;         // 协议版本
     uint16_t type;            // 消息类型
-    uint16_t length;          // 消息长度
+    uint32_t length;          // 消息总长度（含 header，单位字节）
     uint64_t sender_epoch;    // 发送者 epoch
     char sender_name[40];     // 发送者节点名
     uint16_t flags;           // 发送者标志
@@ -77,6 +80,14 @@ public:
     void disconnect();                   // 断开连接
     void set_fd(int fd) { fd_ = fd; connected_.store(true); }  // 直接设置fd（入站连接用）
     [[nodiscard]] bool is_connected() const { return connected_.load(); }
+
+    // 断开并通知（修复 P0-2 UAF）：
+    // 1. 先置 disconnected（后续事件回调直接返回，不再触碰 this 的资源）
+    // 2. 关闭 fd
+    // 3. 调用 disconnect_callback_（回调可能销毁 this）
+    // 4. 调用返回后绝不访问任何成员 —— 由调用方（handle_read/handle_write 的
+    //    事件路径）在回调返回后立即 return
+    void disconnect_and_notify();
 
     // 发送消息
     bool send_msg(const ClusterMsg& msg);

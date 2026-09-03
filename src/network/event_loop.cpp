@@ -168,8 +168,19 @@ namespace cc_server {
                     LOG_DEBUG(event_loop, "Event loop processing: fd=%d, events=%u", fd, events_[i].events);
                     // 告诉 Channel 发生了什么事件
                     channel->set_triggered_events(events_[i].events);
-                    // 调用 Channel 的回调函数处理
-                    channel->handle_event();
+                    // 调用 Channel 的回调函数处理。
+                    // 兜底 try-catch（修复 P0-3）：回调链（客户端命令、cluster 消息
+                    // 解析等）深处抛出的异常若一路上抛会导致 std::terminate 杀死
+                    // 整个进程——一条畸形消息不应能击穿服务器。这里吞掉异常并
+                    // 记录日志，事件循环继续运行。
+                    try {
+                        channel->handle_event();
+                    } catch (const std::exception& e) {
+                        LOG_ERROR(event_loop, "Unhandled exception in channel callback (fd=%d): %s",
+                                  fd, e.what());
+                    } catch (...) {
+                        LOG_ERROR(event_loop, "Unhandled unknown exception in channel callback (fd=%d)", fd);
+                    }
                 } else {
                     LOG_WARN(event_loop, "Event for unknown fd=%d", fd);
                 }
