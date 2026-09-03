@@ -30,8 +30,8 @@
 | `stress-test` | `stress_test/stress_test.cpp` | 高并发读写混合（短期） |
 | `long-running-stress-test` | `stress_test/long_running_stress_test.cpp` | 长时间稳定性（数小时） |
 | `load-limit-test` | `stress_test/load_limit_test.cpp` | 逐步加压找性能拐点 |
-| `network-stress-test` | `network_test/network_stress_test.cpp` | SubReactorPool 大连接并发 |
-| `cluster-tests` | `cluster_test/cluster_test.cpp` | 集群 Gossip / 复制 / 槽位 |
+| `network-stress-test` | `network_test/network_stress_test_main.cpp` + `network_stress_test.cpp` | SubReactorPool 大连接并发 |
+| `cluster-tests` | `cluster_test/cluster_test.cpp`（`cluster_replication_test.cpp`、`cluster_strict_test.cpp` 有独立 `main()`，**未接入构建**） | 集群 Gossip / 复制 / 槽位 |
 
 > **注意**：`command_test/` 目录源码已就绪但**当前 `test_v3_main.cpp` 中禁用**。启用方法见 § 7。
 
@@ -216,7 +216,9 @@ TEST_SUITE("GlobalStorage Basic Operations") {
 
 ### 5.6 原子操作
 
-**可执行文件**：`atomic-tests`（含 5 个子文件）
+**可执行文件**：`atomic-tests`（仅编译 `atomic_correctness_test.cpp`）
+
+> 目录内另有 5 个带独立 `main()` 的子文件（`atomic_first/minimal/progressive/multi/memory_order_test.cpp`），**未接入构建**，需手动编译运行。
 
 | 子文件 | 测试内容 |
 |--------|---------|
@@ -266,9 +268,9 @@ TEST_SUITE("GlobalStorage Basic Operations") {
 | `e2e_psync_replication_test.py` | PSYNC 复制验证 | 数十秒 |
 | `cluster_stress_test.py` | 集群压力 | 数分钟 |
 | `stress_find_limit.py` | 寻找性能极限 | 数分钟 |
-| `run_all_tests.py` | 上述脚本总入口（不含 `comparison_test.py`） | 取决于组合 |
+| `run_all_tests.py` | 总入口，仅含连接风暴 / 高并发 / 一致性 / 混沌 4 项 | 取决于组合 |
 
-> `comparison_test.py` 需要安装 `redis`，其余脚本使用原生 Python socket（无外部依赖）。
+> `comparison_test.py` 需要**本机安装 redis-server 7.0.15**（测试时以 subprocess 启动），全部脚本基于原生 Python socket/asyncio 实现 RESP 客户端，无第三方 Python 依赖。failover / cluster_full / psync / cluster_stress / stress_find_limit 不在 `run_all_tests.py` 中，需单独运行。
 
 **典型用法**：
 

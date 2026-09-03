@@ -53,7 +53,7 @@ sudo yum install -y cmake gcc-c++ zlib-devel
 ### 2.3 编译
 
 ```bash
-git clone https://github.com/dingziming/ConcurrentCache.git
+git clone https://github.com/zimingttkx/ConcurrentCache.git
 cd ConcurrentCache
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
@@ -127,8 +127,8 @@ sudo systemctl start concurrentcache
 
 | Key | 默认 | 说明 |
 |-----|------|------|
-| `port` | `16379` | 客户端监听端口 |
-| `log_level` | `4` | 日志级别（数值越大越详细） |
+| `port` | `6379`（程序内置）/ `16379`（仓库 conf 值） | 客户端监听端口 |
+| `log_level` | `1`（DEBUG） | `0`=TRACE … `5`=FATAL，**数值越大越不详细**；conf 中的 `4` 表示只输出 ERROR/FATAL |
 | `reactor_count` | CPU 核数 | SubReactor 数量 |
 | `thread_pool_size` | CPU 核数 | 通用 ThreadPool 数量 |
 | `rdb_path` | `./dump.rdb` | RDB 文件路径 |
@@ -136,7 +136,12 @@ sudo systemctl start concurrentcache
 | `rdb_dirty_threshold` | `1` | 达到 N 个脏键就触发保存（配置 ≤ 0 时自动回退默认） |
 | `max_entries` | `2000000` | 存储上限（触发 ARU 淘汰；**当前未接线**——代码中 `set_max_entries` 无调用方，运行期恒为内置默认 2,000,000，配置值不生效） |
 | `cluster_enabled` | `false` | 是否启用集群模式 |
-| `cluster_node_timeout` | `15000` | Gossip 节点超时（毫秒；注意代码默认值为 15000，conf 中未配置时以此为准） |
+| `cluster_node_timeout` | `15000` | Gossip 节点超时（毫秒） |
+| `cluster_config_file` | `nodes.conf` | 集群节点状态文件 |
+| `cluster_replica_validity_factor` | `10` | 从节点失联判定倍率 |
+| `cluster_require_full_coverage` | `false` | 槽位不全时是否拒绝服务 |
+| `cluster_bind_addr` | `127.0.0.1` | 集群 bus 绑定地址 |
+| `log_file` / `log_max_size` / `log_max_files` | `./logs/concurrentcache.log` / 100MB / 5 | 日志轮转（**当前仅占位**，Logger 尚未读取） |
 
 **示例配置**：
 
@@ -177,8 +182,9 @@ docker exec concurrentcache redis-cli -p 16379 PING
 
 - 非 root 用户（`appuser`）
 - 内置 `redis-tools`（用于健康检查）
-- 健康检查：`redis-cli -p 16379 PING` 每 30s
+- 镜像内 `EXPOSE 6379` + 健康检查 `redis-cli -p 6379 PING`（每 30s）——Dockerfile 假定容器内端口为 **6379**。上面 `-p 16379:16379` 的映射要求挂载的 conf 中 `port = 16379`；若用镜像默认 conf（`port = 16379`），命令应为 `-p 16379:16379`；若未挂载 conf，则映射 `-p 16379:6379`
 - 默认 ENTRYPOINT：`/app/concurrentcache-server`
+- 注意：Dockerfile 的 `CMD ["--config", ...]` 参数**会被忽略**——服务器不解析 argv，固定读取 `conf/concurrentcache.conf` 相对路径
 
 ### 5.2 本地构建镜像
 
@@ -192,6 +198,8 @@ docker build -t concurrentcache:latest .
 2. **runtime 阶段**：`debian:bookworm-slim` + `zlib1g` + `ca-certificates` + `redis-tools` → 复制二进制 + conf
 
 ### 5.3 Docker Compose
+
+> 仓库根目录**没有** docker-compose.yml，以下为参考示例，需自行创建：
 
 ```yaml
 # docker-compose.yml
@@ -330,8 +338,8 @@ redis-cli -p 16379 INFO all
 ### 8.3 调试命令
 
 ```bash
-redis-cli -p 16379 DEBUG SLEEP 5     # 模拟慢请求
 redis-cli -p 16379 DEBUG OBJECT key   # 查看对象类型
+# 注意：DEBUG SLEEP 已被禁用（会阻塞事件循环），返回 -ERR DEBUG SLEEP is not supported
 ```
 
 ## 9. 故障排查（Runbook）

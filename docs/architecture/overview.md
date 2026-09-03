@@ -54,7 +54,7 @@
 | 网络 | `src/network/` | `MainReactor`、`SubReactorPool`、`EventLoop`、`Connection`、`Channel`、`Buffer` | 端口监听、连接分发、I/O 多路复用、读写缓冲 |
 | 协议 | `src/protocol/` | `RespParser`、`RespEncoder` | RESP 2.0 解析/编码 |
 | 命令 | `src/command/` | `Command` 基类、`CommandFactory` 单例 | 44 个命令注册、参数校验、调用存储层 |
-| 存储 | `src/cache/` | `GlobalStorage`、`CacheObject`、`ExpireDict`、`ExpirationChecker` | 64 分片哈希表、5 数据类型、过期管理 |
+| 存储 | `src/cache/` | `GlobalStorage`、`CacheObject`、`ExpireDict`、`ExpirationChecker` | 64 分片哈希表、5 数据类型、过期管理、ARU 随机分片采样淘汰（单轮上限 1024） |
 | 持久化 | `src/persistence/` | `RdbPersistence`、`RdbScheduler` | RDB 写入/读取、自动保存调度 |
 | 集群 | `src/cluster/` | `ClusterServer`、`ClusterState`、`ClusterNode`、`ClusterBus`、`ClusterGossip`、`ReplicationMgr` | 槽位管理、Gossip、主从复制、故障转移 |
 | 基础设施 | `src/base/` | `Logger`、`Config`、`ThreadPool`、`Signal`、`lock.cpp` | 跨层通用组件 |

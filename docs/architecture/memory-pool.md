@@ -31,7 +31,7 @@ flowchart TB
     SL -->|hit| SP1[Span 切分小块]
     SL -->|miss| FPC[fetch_from_page_cache]
     FPC --> PC[PageCache]
-    PC --> MMAP[mmap / brk]
+    PC --> MMAP[mmap 匿名映射]
 ```
 
 **三级关系**：
@@ -100,8 +100,8 @@ static ThreadCache* ThreadCache::get_instance();   // thread_local 单例
 ```text
 1. class_index = SizeClass::get_index(size)
 2. push 到 free_lists_[class_index]
-3. 若该 FreeList 超过阈值：return_to_central(class_index) 批量归还
-   （批量归还以 256 个为一批循环 pop，防止单次 pop_batch 超限）
+3. 若该 FreeList 超过阈值（> 32 个）：return_to_central(class_index) 批量归还
+   （归还一半；批量归还以 256 个为一批循环 pop，防止单次 pop_batch 超限）
 ```
 
 **线程退出**：`~ThreadCache()` 析构把所有 SizeClass 缓存的空闲对象**全部**归还 CentralCache（此前缺少析构，≤32 个/类的对象随线程死亡而泄漏）。
@@ -156,7 +156,10 @@ lock(locks_[class_index])
 ```text
 lock(mutex_)
 1. if free_span_lists_[num_pages] 非空: pop 返回
-2. else 向系统申请 num_pages 页（mmap / brk），封装为 Span 返回
+2. 从更大的 Span 分裂：遍历 free_span_lists_.lower_bound(num_pages + 1)，
+   取最小可用的大 Span，切出前 num_pages 页返回，
+   剩余部分封装为新 Span 放回空闲链表并重建 page_span_map_ 映射
+3. 真的没有 → 向系统申请 num_pages 页（mmap 匿名映射），封装为 Span 返回
 ```
 
 **释放 + 合并**（`free_span(span)`）：
@@ -164,18 +167,21 @@ lock(mutex_)
 ```text
 lock(mutex_)
 1. coalesce_span(span)  // 关键：合并相邻空闲 Span
-2. 按 num_pages 插入 free_span_lists_
+2. 按 num_pages 插入 free_span_lists_ 并重建 page_span_map_ 映射
 ```
 
 **Span 合并（`coalesce_span`）**：
 
 ```text
 输入：刚释放的 Span
-1. 在 page_span_map_ 查 page_id - 1 的 Span，若空闲 → 合并到前面
-2. 在 page_span_map_ 查 page_id + num_pages 的 Span，若空闲 → 合并到后面
-3. 更新合并后 Span 的 page_id_、num_pages_，并从原 page_span_map_ 移除旧 Span
-返回：合并后的 Span
+1. while 循环向前合并：查 page_span_map_[page_id - 1]，若空闲 → 合并，
+   被合并 Span 从 free_span_lists_ 移除并 delete，直到前邻不空闲
+2. while 循环向后合并：查 page_span_map_[page_id + num_pages]，同上
+3. 更新合并后 Span 的 page_id_、num_pages_
+返回：合并后的 Span（由 free_span 统一重新入链表）
 ```
+
+> 注意：Span 归还 PageCache 后**不会 munmap**——系统内存只增不减，空闲 Span 在本模块内复用。这是"内存峰值不释放"的设计使然（保留复用），不是泄漏。
 
 **为什么合并重要？** 减少外部碎片。例如连续 4 页、4 页、4 页 单独释放后再次申请 12 页会失败；合并后可以满足。
 
