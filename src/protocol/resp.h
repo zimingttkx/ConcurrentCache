@@ -202,6 +202,20 @@ public:
     
     static bool has_complete_command(const Buffer* buffer);
 
+    // 检查并标记协议错误（修复 P1-1）
+    //
+    // has_complete_command 是静态方法、无法保存错误状态；而"长度行不是数字"
+    // 这类输入（如 "*abc\r\n"）会让解析永远无法推进——坏字节滞留 buffer 头部，
+    // 该连接此后的一切数据都无法解析，连接静默卡死。
+    //
+    // 本方法对 buffer 头部数据做同样的合法性检查：发现协议错误时设置
+    // protocol_error_ 并返回 true。调用方（handle_read）应回 -ERR Protocol
+    // error 并关闭连接（与 Redis 行为一致），而不是无限等待。
+    bool has_protocol_error(const Buffer* buffer);
+
+    // 返回协议错误信息，无错误时为空
+    [[nodiscard]] const std::string& protocol_error() const { return protocol_error_; }
+
 private:
     
     // parse_one() - 解析单个 RESP 值
@@ -248,10 +262,16 @@ private:
 
     
     // error_msg_ - 错误信息成员变量
-    
+
     // 存储最近的错误信息
-    
+
     std::string error_msg_;
+
+    // protocol_error_ - 协议级错误（P1-1）
+    // 由 has_protocol_error() 设置；区别于 error_msg_（单次解析错误、可重置），
+    // 协议错误意味着字节流已不可解析，唯一出路是断开连接。
+
+    std::string protocol_error_;
     
     
     // CR 和 LF - 常量

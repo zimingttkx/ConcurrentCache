@@ -143,6 +143,21 @@ namespace cc_server {
             // 注意：解析错误时不再 drain（消耗）坏字节是 P2-4 的遗留行为；
             // 这里我们保持原有协议稳健性：逐条消费完整命令，畸形命令单独回错误，
             // 不把坏字节永久滞留（parse() 内部已按完整命令推进 reader index）。
+
+            // 修复 P1-1（连接永久卡死）：先检查是否为不可解析的协议错误
+            // （如 "*abc\r\n"）。此类坏字节会让 has_complete_command 永远返回
+            // false 且不设置 error —— 旧代码既不回错也不清 buffer，坏字节滞留
+            // buffer 头部，该连接此后的一切数据都无法解析，静默卡死。
+            // 处理方式与 Redis 一致：回 -ERR Protocol error 并关闭连接。
+            if (resp_parser_.has_protocol_error(input_buffer())) {
+                LOG_ERROR(connection, "RESP protocol error from fd=%d: %s, closing connection",
+                          client_socket_.fd(), resp_parser_.protocol_error().c_str());
+                send_response(RespEncoder::encode_error("ERR Protocol error: " +
+                                                        resp_parser_.protocol_error()));
+                close();
+                return;
+            }
+
             std::vector<RespValue> commands = resp_parser_.parse(input_buffer());
             if (!resp_parser_.error().empty()) {
                 LOG_ERROR(connection, "RESP parse error: %s", resp_parser_.error().c_str());
@@ -345,17 +360,20 @@ namespace cc_server {
             loop_->remove_channel(channel_.get());
         }
 
-        // client_socket_.close() 会：
-        // - 关闭 fd
-        // - 发送 FIN 给对方（如果是对方先关的，这步已经完成）
-        // - 清理 socket 相关资源
-        client_socket_.close();
-
-        // 触发 close_callback_ 通知 SubReactor 来销毁 Connection
-        // 注意：这会导致 Connection 被销毁，所以之后不应该再访问 this
+        // 修复 P0-4（Connection 泄漏）：必须先触发 close_callback_ 再关闭 fd。
+        // 旧代码先 client_socket_.close()（fd_ 置 -1）再触发回调，
+        // 回调里 SubReactor::remove_connection 用 conn->fd()（恒为 -1）作 key
+        // 去 erase connections_ —— 永远删不掉，每次断开泄漏整个 Connection
+        // 对象（含 Channel、双 Buffer、RespParser）直至 OOM。
+        // 注意：回调会销毁 this，返回后不得再访问任何成员。
         if (close_callback_) {
             close_callback_();
         }
+
+        // 回调（及其触发的销毁流程）结束后 fd 通常已随对象析构关闭；
+        // 若 Connection 未被销毁（例如所有者选择保留），这里兜底关闭。
+        // client_socket_ 析构时也会自动 close，此处保证不依赖析构顺序。
+        client_socket_.close();
     }
 
     /**

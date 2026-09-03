@@ -38,6 +38,61 @@ void RespParser::reset() {
     // 如果解析失败，整个 parse() 调用会失败，不存在"恢复后继续"的需求
 }
 
+// has_protocol_error() - 检查 buffer 头部是否为不可解析的协议错误（P1-1）
+//
+// 只做"结构合法性"检查：长度行/计数行必须是数字、类型字节必须合法、
+// 负数长度必须为 -1。发现任何一项非法 → 设置 protocol_error_ 并返回 true。
+// 数据不完整（等更多字节）不算错误，返回 false。
+bool RespParser::has_protocol_error(const Buffer* buffer) {
+    if (!protocol_error_.empty()) {
+        return true;  // 已处于协议错误状态
+    }
+
+    const char* data = buffer->peek();
+    size_t len = buffer->readable_bytes();
+    if (len < 1) return false;
+
+    auto fail = [this](const char* msg) {
+        protocol_error_ = msg;
+        return true;
+    };
+
+    char type = data[0];
+
+    if (type != '+' && type != '-' && type != ':' &&
+        type != '$' && type != '*') {
+        return fail("unknown type byte");
+    }
+
+    if (len < 2) return false;
+
+    // 找第一行（长度/计数行）
+    const char* crlf = find_crlf(data + 1, len - 1);
+    if (!crlf) return false;  // 行不完整，等数据
+
+    std::string num_str(data + 1, static_cast<size_t>(crlf - (data + 1)));
+
+    if (type == '$' || type == '*') {
+        int64_t n = 0;
+        if (!parse_int64_safe(num_str, n)) {
+            return fail("invalid number in protocol header");
+        }
+        // 仅 -1 是合法负数（null）
+        if (n < -1) {
+            return fail("invalid negative length");
+        }
+        // 上限检查与 has_complete_command 保持一致
+        if (type == '$' && n > static_cast<int64_t>(512 * 1024 * 1024)) {
+            return fail("bulk string length exceeds limit");
+        }
+        if (type == '*' && n > static_cast<int64_t>(1024 * 1024)) {
+            return fail("array length exceeds limit");
+        }
+    }
+
+    return false;
+}
+
 
 // parse() - 核心解析函数
 std::vector<RespValue> RespParser::parse(Buffer* buffer) {

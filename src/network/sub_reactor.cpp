@@ -189,13 +189,13 @@ void SubReactor::join_thread() {
             if (is_write_command &&
                 ClusterServer::instance().isEnabled() &&
                 !ClusterServer::instance().isReplica()) {
-                // 构建完整的 RESP 命令字符串用于复制
-                std::string cmd_line;
-                for (size_t i = 0; i < args.size(); ++i) {
-                    if (i > 0) cmd_line += " ";
-                    cmd_line += args[i];
-                }
-                ReplicationMgr::instance().replicate_command(cmd_line);
+                // 修复 P1-2a：以 RESP 数组编码复制命令（二进制安全）。
+                // 旧代码用空格拼接命令行，value 含空格即被副本端错误切分；
+                // 副本端 handle_replication_command 优先按 RESP 数组解析。
+                // 用单元素封装保持「命令行进 repl_buffer_」的既有语义：
+                // backlog/offset 记账以整个编码后的命令为单位。
+                std::string resp_cmd = RespEncoder::encode_array(args);
+                ReplicationMgr::instance().replicate_command(resp_cmd);
             }
         } else {
             // 命令不存在，返回错误响应
