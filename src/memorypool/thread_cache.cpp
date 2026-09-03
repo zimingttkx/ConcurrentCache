@@ -12,6 +12,14 @@
 
 namespace cc_server {
 
+ThreadCache* ThreadCache::get_instance() {
+    // 每线程一个实例（thread_local）：分配/释放路径完全无锁。
+    // 修复 P2（链接地雷）：此前 get_instance 只有声明、全仓库无定义，
+    // MemoryPool::allocate/deallocate 一旦被调用即链接失败。
+    static thread_local ThreadCache instance;
+    return &instance;
+}
+
 ThreadCache::ThreadCache() {
     // 初始化每个SizeClass对应的FreeList
     free_lists_.resize(SizeClass::kNumClasses);

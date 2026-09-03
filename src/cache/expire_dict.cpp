@@ -119,33 +119,49 @@ namespace cc_server {
 
         std::shared_lock<std::shared_mutex> lock(mutex_);
 
-        // 收集所有键
-        std::vector<std::string> all_keys;
-        all_keys.reserve(expire_map_.size());
-        for (const auto& [key, _] : expire_map_) {
-            all_keys.push_back(key);
-        }
-
-        // 边界检查：没有键可返回
-        if (all_keys.empty()) {
+        const size_t total = expire_map_.size();
+        if (total == 0) {
             LOG_TRACE(EXPIRE, "Got 0 candidates (requested %d), no keys in expire_dict", n);
             return {};
         }
 
-        // 随机打乱
-        std::shuffle(all_keys.begin(), all_keys.end(),
-                     std::mt19937{std::random_device{}()});
+        // 修复 P2-perf：改为随机采样（Redis activeExpireCycle 的做法）。
+        // 旧实现把整个 expire_map_ 拷贝成 vector 再 shuffle——10 万个带 TTL 的
+        // key 时，每 100ms 深拷贝 10 万个 std::string 并长时间持共享锁，
+        // 阻塞 EXPIRE/TTL 等写路径。现在只从迭代器随机定位 n 个位置。
+        const size_t want = std::min(static_cast<size_t>(n), total);
 
-        // 取前 n 个作为候选
+        static thread_local std::mt19937 rng{std::random_device{}()};
+        std::uniform_int_distribution<size_t> dist(0, total - 1);
+
         std::vector<std::string> candidates;
-        candidates.reserve(static_cast<size_t>(n));
-        int max_count = std::min(n, static_cast<int>(all_keys.size()));
-        for (size_t i = 0; i < static_cast<size_t>(max_count); ++i) {
-            candidates.push_back(all_keys[i]);
+        candidates.reserve(want);
+
+        // 随机取 want 个下标，用 std::advance 定位（无序 map 不支持随机访问）。
+        // want 通常为 20，代价远小于全表拷贝；极端 n 接近 total 时（want*4>=total）
+        // 直接顺序遍历一次更划算。
+        if (want * 4 >= total) {
+            for (const auto& [key, _] : expire_map_) {
+                candidates.push_back(key);
+                if (candidates.size() >= want) break;
+            }
+        } else {
+            auto it = expire_map_.begin();
+            size_t last = 0;
+            for (size_t k = 0; k < want; ++k) {
+                size_t target = dist(rng);
+                if (target < last) {
+                    // 单调化：避免来回扫描（重复取样不影响过期抽样的随机目的）
+                    target = last;
+                }
+                std::advance(it, target - last);
+                last = target;
+                candidates.push_back(it->first);
+            }
         }
 
         LOG_TRACE(EXPIRE, "Got %zu candidates (requested %d), total keys=%zu",
-                 candidates.size(), n, expire_map_.size());
+                 candidates.size(), n, total);
 
         return candidates;
     }

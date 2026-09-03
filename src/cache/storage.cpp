@@ -3,6 +3,7 @@
 #include <mutex>
 #include <cassert>
 #include <limits>
+#include <random>
 
 namespace cc_server {
 
@@ -197,59 +198,61 @@ namespace cc_server {
      * ARU 淘汰方法
      *
      */
+
+    // 修复 P2-perf（淘汰性能悬崖）：近似 LRU 采用「随机分片采样」——
+    // 旧 evict_one 是两遍全库扫描（64 分片全遍历找出全局最老 key，再回到
+    // 该分片删除），在 200 万 key、需淘汰 80 万个的规模下是数十万次全库扫描，
+    // 且多个写线程并发进入无互斥，写入延迟从微秒级飙升到分钟级。
+    // 新实现：随机挑一个分片，加锁后在片内找最老的 key 并当场删除，
+    // 单次代价 O(分片内条目数) ≈ 全库/64。
     std::string GlobalStorage::evict_one() {
-        const int64_t now = current_time_ms();
-        std::string oldest_key;
-        int64_t oldest_time = now;
-        size_t oldest_shard = 0;
-        bool found = false;
+        static thread_local std::mt19937 rng{std::random_device{}()};
 
-        // 第一遍：找到最老的键
-        for (size_t i = 0; i < num_shards_; i++) {
-            std::shared_lock<std::shared_mutex> lock(mutexes_[i]);
-            for (const auto& [key, entry] : stores_[i]) {
-                if (!found || entry.last_access_time_ms < oldest_time) {
-                    oldest_time = entry.last_access_time_ms;
-                    oldest_key = key;
-                    oldest_shard = i;
-                    found = true;
+        for (int attempt = 0; attempt < 8; ++attempt) {
+            // 随机选一个分片（避免每次都扫 0 号分片造成倾斜）
+            size_t shard = std::uniform_int_distribution<size_t>(
+                0, num_shards_ - 1)(rng);
+
+            {
+                std::unique_lock<std::shared_mutex> lock(mutexes_[shard]);
+                auto& store = stores_[shard];
+                if (store.empty()) {
+                    continue;  // 该分片空，换下一个
                 }
+
+                // 片内找最老的 key（已过期 key 优先删除，等于免费清理）
+                auto oldest_it = store.end();
+                int64_t oldest_time = std::numeric_limits<int64_t>::max();
+                auto expired_it = store.end();
+
+                for (auto it = store.begin(); it != store.end(); ++it) {
+                    if (it->second.expire_at_ms > 0 && current_time_ms() >= it->second.expire_at_ms) {
+                        expired_it = it;
+                        break;
+                    }
+                    if (it->second.last_access_time_ms < oldest_time) {
+                        oldest_time = it->second.last_access_time_ms;
+                        oldest_it = it;
+                    }
+                }
+
+                auto victim_it = (expired_it != store.end()) ? expired_it : oldest_it;
+                if (victim_it == store.end()) {
+                    continue;
+                }
+
+                std::string victim_key = victim_it->first;
+                store.erase(victim_it);
+                expire_dict_.remove(victim_key);
+
+                LOG_DEBUG(CACHE, "Evicted key=%s from shard=%zu (sampling LRU)",
+                          victim_key.c_str(), shard);
+                return victim_key;
             }
         }
 
-        // 没有键可以淘汰
-        if (!found || oldest_key.empty()) {
-            LOG_WARN(CACHE, "Evict_one - no key found to evict, found=%d, key_empty=%d",
-                    found, oldest_key.empty());
-            return "";
-        }
-
-        // 防御性检查：确保找到的键有效
-        assert(oldest_shard < num_shards_ && "GlobalStorage::evict_one - shard index out of bounds");
-        assert(!oldest_key.empty() && "GlobalStorage::evict_one - oldest_key is empty");
-
-        // 第二遍：从最老的分片删除该键
-        {
-            std::unique_lock<std::shared_mutex> lock(mutexes_[oldest_shard]);
-            // TOCTOU 修复（P1-6）：重新校验该键仍存在且 last_access_time_ms 未被并发更新。
-            // 若键已消失或访问时间已改变，则本次不淘汰（避免假淘汰或误删热键）。
-            auto it = stores_[oldest_shard].find(oldest_key);
-            if (it != stores_[oldest_shard].end() &&
-                it->second.last_access_time_ms.load(std::memory_order_relaxed) == oldest_time) {
-                stores_[oldest_shard].erase(it);
-            } else {
-                // 键状态已变化，本次跳过重试，交由下一轮 evict_if_needed 处理
-                return "";
-            }
-        }
-
-        // 同时删除过期记录
-        expire_dict_.remove(oldest_key);
-
-        LOG_INFO(CACHE, "Evicted key=%s, shard=%zu, last_access=%ldms ago",
-                oldest_key.c_str(), oldest_shard, now - oldest_time);
-
-        return oldest_key;
+        LOG_WARN(CACHE, "Evict_one - no key found after %d sampled shards", 8);
+        return "";
     }
 
     void GlobalStorage::evict_if_needed(const std::string& hint_key) {
@@ -274,16 +277,21 @@ namespace cc_server {
         // 防御性检查：目标大小必须有效
         assert(target_size < max_entries_ && "GlobalStorage::evict_if_needed - target_size invalid");
 
+        // 修复 P2-perf：限制单次淘汰循环的最多次数并中途复查 size()。
+        // 旧循环只依赖本地计数，若与并发写入脱节可能一次淘汰远超必要数量。
         size_t evicted_count = 0;
-        while (current_size > target_size) {
-            std::string evicted = evict_one();
-            if (evicted.empty()) {
+        constexpr size_t kMaxEvictPerCycle = 1024;
+        while (evicted_count < kMaxEvictPerCycle) {
+            if (evict_one().empty()) {
                 LOG_WARN(CACHE, "Eviction stopped - no more keys to evict, evicted=%zu", evicted_count);
                 break;
             }
             ++evicted_count;
-            --current_size;
-            LOG_DEBUG(CACHE, "Evicted key during auto-eviction: %s", evicted.c_str());
+            if (evicted_count % 64 == 0) {
+                if (size() <= target_size) {
+                    break;
+                }
+            }
         }
 
         LOG_INFO(CACHE, "Eviction complete - evicted %zu keys, current_size=%zu, target_size=%zu",

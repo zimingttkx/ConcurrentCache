@@ -197,26 +197,34 @@ void SpinLock::unlock() {
 RecursiveMutex::RecursiveMutex() = default;
 
 void RecursiveMutex::lock() {
+    // 修复 P2（互斥完全失效）：所有状态访问必须在 mutex_ 保护下进行。
+    // 旧实现有两个致命问题：
+    //   1. 等待谓词写成 owner_thread_ != this_thread —— 持有者是线程 A 时，
+    //      等待者 B 的谓词立即为真，B 不等待直接进入临界区，与 A 并发执行，
+    //      "递归互斥锁"完全不互斥。
+    //   2. lock/try_lock 的快速路径在 mutex_ 外读写 owner_thread_/count_
+    //      （非原子），是数据竞争 UB。
+    // 正确语义：同一线程重入计数+1；其他线程必须等 owner 释放（owner 为空）。
     std::thread::id this_thread = std::this_thread::get_id();
+    std::unique_lock<std::mutex> lock(mutex_);
     if (owner_thread_ == this_thread) {
         count_++;
         return;
     }
-    std::unique_lock<std::mutex> lock(mutex_);
-    cv_.wait(lock, [this, this_thread] {
-        return owner_thread_ != this_thread;
+    cv_.wait(lock, [this] {
+        return owner_thread_ == std::thread::id();
     });
     owner_thread_ = this_thread;
     count_ = 1;
 }
 
 bool RecursiveMutex::try_lock() {
+    std::lock_guard<std::mutex> lock(mutex_);
     std::thread::id this_thread = std::this_thread::get_id();
     if (owner_thread_ == this_thread) {
         count_++;
         return true;
     }
-    std::lock_guard<std::mutex> lock(mutex_);
     if (owner_thread_ != std::thread::id()) {
         return false;
     }
@@ -226,9 +234,10 @@ bool RecursiveMutex::try_lock() {
 }
 
 void RecursiveMutex::unlock() {
+    std::lock_guard<std::mutex> lock(mutex_);
     std::thread::id this_thread = std::this_thread::get_id();
     if (owner_thread_ != this_thread) {
-        return;
+        return;  // 非持有线程调用：忽略（与旧行为一致，避免误释放）
     }
     count_--;
     if (count_ == 0) {

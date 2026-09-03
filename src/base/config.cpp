@@ -75,7 +75,11 @@ bool Config::load(const std::string& filename) {
 }
 
 void Config::reload() {
+    // 快照（配置 + 观察者列表）都在锁内完成，锁外只回调。
+    // 修复 P2（数据竞争）：旧代码锁外遍历 observers_（config_data_ 已快照，
+    // 但观察者 map 本身没有）——与 addObserver/removeObserver 并发时是 UB。
     std::vector<std::pair<std::string, std::string>> pending_notifications;
+    std::map<std::string, std::vector<ConfigObserver*>> observers_snapshot;
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
@@ -97,15 +101,16 @@ void Config::reload() {
             config_data_["log_max_files"] = "5";
         }
 
-        // 收集通知数据
+        // 收集通知数据与观察者快照
         for (auto& kv : config_data_) {
             pending_notifications.push_back({kv.first, kv.second});
         }
+        observers_snapshot = observers_;
     }
-    // 在锁外调用观察者，避免死锁
+    // 在锁外调用观察者，避免死锁；遍历的是快照，无并发问题
     for (auto& [key, val] : pending_notifications) {
-        auto it = observers_.find(key);
-        if (it != observers_.end()) {
+        auto it = observers_snapshot.find(key);
+        if (it != observers_snapshot.end()) {
             for (auto* obs : it->second) {
                 obs->onConfigChange(key, val);
             }
