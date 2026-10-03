@@ -1,0 +1,246 @@
+name: Daily
+
+# 重档：sanitizer、长压测、起真服务的 e2e、跟真 redis 的对比、多架构与旧发行版。
+# 这些都不设 required —— 它们的作用是"每天告诉你真相"，而不是拦合并。
+# 参照 Redis 的 ci.yml / daily.yml 分层：快门禁小、夜间档大。
+on:
+  schedule:
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+    inputs:
+      skipjobs:
+        description: '逗号分隔，跳过这些 job：tsan,ubsan,leaks,slow,e2e,redis,portability'
+        required: false
+        default: ''
+  push:
+    branches: [ main ]
+
+concurrency:
+  group: daily-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  sanitizers:
+    if: ${{ !contains(github.event.inputs.skipjobs, 'sanitizer') }}
+    name: sanitizer-${{ matrix.san }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # TSAN 与 ASAN 互斥（根 CMakeLists.txt:12-14 直接 FATAL_ERROR），所以分两个 job。
+        san: [thread, address, undefined]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential zlib1g-dev
+
+      - name: Configure and build
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DENABLE_TSAN=ON
+          cmake --build build --parallel "$(nproc)"
+        if: matrix.san == 'thread'
+
+      - name: Configure and build (asan)
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DENABLE_ASAN=ON
+          cmake --build build --parallel "$(nproc)"
+        if: matrix.san == 'address'
+
+      - name: Configure and build (ubsan)
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DENABLE_UBSAN=ON
+          cmake --build build --parallel "$(nproc)"
+        if: matrix.san == 'undefined'
+
+      # 不拦合并（本 workflow 里没有 required check），但必须每天看得见。
+      # lock-race/deadlock 里存在故意构造的竞争与死锁场景，TSAN 报它们是预期行为，
+      # 需要逐条区分"测试故意"与"产品真有"。
+      - name: Run gate + contract suites
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          TSAN_OPTIONS="halt_on_error=0" ctest --test-dir build -L "gate|contract" -j1 --output-on-failure 2>&1 | tee san.log
+          {
+            echo "### ${{ matrix.san }} sanitizer"
+            grep -E "tests passed|tests failed" san.log || echo "见日志"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sanitizer-${{ matrix.san }}
+          path: san.log
+          retention-days: 14
+
+  # 泄漏单独跑：thread_local ThreadCache、mmap span、rdb.cpp:333 的 detached 快照
+  # 线程都会报，混在 asan-smoke 里只会让信号被噪声淹没。
+  leaks:
+    if: ${{ !contains(github.event.inputs.skipjobs, 'leaks') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential zlib1g-dev
+
+      - name: Configure and build
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DENABLE_ASAN=ON
+          cmake --build build --parallel "$(nproc)"
+
+      - name: Leak sweep
+        continue-on-error: true
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=0
+        run: ctest --test-dir build -L "gate|contract" -j1 --output-on-failure
+
+  slow:
+    if: ${{ !contains(github.event.inputs.skipjobs, 'slow') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential zlib1g-dev
+
+      - name: Configure and build
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+          cmake --build build --parallel "$(nproc)"
+
+      # 短参数先跑：load-limit 与 long-running 默认就是数分钟到 180s 起步，
+      # 完整跑法留给手动 workflow_dispatch。
+      - name: Stress suites
+        continue-on-error: true
+        run: ctest --test-dir build -L slow -j1 --output-on-failure
+
+  e2e:
+    if: ${{ !contains(github.event.inputs.skipjobs, 'e2e') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential zlib1g-dev python3
+
+      - name: Build server
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+          cmake --build build --target concurrentcache-server --parallel "$(nproc)"
+
+      # 这几个脚本自己在临时目录生成 conf 并改 cwd 启动节点（它们依赖
+      # build/concurrentcache-server 这个路径，所以不能挪构建目录）。
+      - name: Cluster and replication e2e
+        run: |
+          python3 test/e2e_test/e2e_failover_test.py
+          python3 test/e2e_test/e2e_psync_replication_test.py
+          python3 test/e2e_test/cluster_stress_test.py
+
+      - name: Full-cluster e2e
+        continue-on-error: true
+        run: python3 test/e2e_test/e2e_cluster_full_test.py
+
+      - name: Limit probe
+        continue-on-error: true
+        run: python3 test/e2e_test/stress_find_limit.py
+
+      - name: Upload e2e reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-reports
+          path: |
+            **/*_report.json
+            **/comparison_report.json
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # 与真 redis-server 对比。runner 给的 Redis 版本与文档要求的 7.0.15 未必一致，
+  # 所以版本差异只作观察，不判红。
+  redis-compat:
+    if: ${{ !contains(github.event.inputs.skipjobs, 'redis') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential zlib1g-dev python3 redis-server redis-tools
+
+      - name: Build server
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+          cmake --build build --target concurrentcache-server --parallel "$(nproc)"
+
+      - name: Compare against Redis
+        continue-on-error: true
+        run: python3 test/e2e_test/comparison_test.py
+
+  # 可移植性：Redis 在 ci.yml 里跑老发行版与 arm。这里先补两条最可能藏问题的。
+  portability:
+    if: ${{ !contains(github.event.inputs.skipjobs, 'portability') }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04-arm]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential zlib1g-dev
+
+      - name: Configure and build
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+          cmake --build build --parallel "$(nproc)"
+
+  codeql:
+    name: CodeQL
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: cpp
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential zlib1g-dev
+
+      - name: Build for codeql
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+          cmake --build build --parallel "$(nproc)"
+
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:cpp"
