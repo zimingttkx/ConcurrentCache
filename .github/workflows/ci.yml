@@ -6,10 +6,16 @@ on:
   pull_request:
     branches: [ main, master ]
 
+# 同一分支上的旧运行直接取消，避免 push + pull_request 双触发排队。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
-    name: Build
+    name: build-release
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -24,10 +30,10 @@ jobs:
         run: |
           mkdir -p build
           cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Release
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
 
       - name: Build
-        run: cmake --build build --parallel 2
+        run: cmake --build build --parallel "$(nproc)"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -35,3 +41,20 @@ jobs:
           name: concurrentcache-binary
           path: build/concurrentcache-server
           retention-days: 1
+
+  # .dockerignore 排除了 test/，而 add_subdirectory(test) 曾是无条件的，
+  # 导致 docker build 在 configure 阶段失败。这个 job 就是那条回归的哨兵。
+  docker:
+    name: docker-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t concurrentcache:ci .
+
+      - name: Inspect image
+        run: docker images concurrentcache:ci
