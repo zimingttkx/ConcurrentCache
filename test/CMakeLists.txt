@@ -136,6 +136,12 @@ add_executable(concurrency-tests
     tests.cpp
 )
 
+# 语义契约测试：起真服务器、走真 socket 与真 RESP，断言 Redis 的（也是本仓库
+# 文档承诺的）行为。多数条目今天会失败，所以标签是 contract —— 可见但不拦合并。
+add_executable(contract-tests
+    contract_test/contract_test.cpp
+)
+
 # 命令表探针（scripts/ci/check_consistency.py 用）：它是工具不是用例，所以进
 # CC_TEST_TARGETS 拿到编译/链接参数，但不注册进 ctest。
 add_executable(command-table-probe
@@ -159,6 +165,7 @@ set(CC_TEST_TARGETS
     network-stress-test
     cluster-tests
     concurrency-tests
+    contract-tests
     command-table-probe
 )
 
@@ -233,6 +240,7 @@ set(CC_TESTS
     "LockBoundaryTests|lock-boundary-tests|contract|120"
     "V3Tests|concurrentcache-v3-tests|contract|600"
     "ConcurrencyTests|concurrency-tests|contract|300"
+    "ContractTests|contract-tests|contract|180"
     "LockStressTests|lock-stress-tests|slow|300"
     "StressTest|stress-test|slow|1800"
     "LoadLimitTest|load-limit-test|slow|3600"
@@ -272,8 +280,14 @@ set_tests_properties(NetworkStressTest PROPERTIES
     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
 
+# 契约测试要起真服务器：把 server 二进制的绝对路径用生成器表达式交给它，
+# 这样同一份测试在 build/、ASAN/TSan、Debug 构型下都能找到被测物。
+set_tests_properties(ContractTests PROPERTIES
+    ENVIRONMENT "CC_SERVER_BIN=$<TARGET_FILE:concurrentcache-server>"
+    RESOURCE_LOCK "cc_server_port"
+)
+
 # command_test/command_test.cpp 故意不接入任何 target：它已和产品 API 脱节
 # （构造 CommandFactory(storage)、调用 create_command()，而现在只有 instance()
-# 与 create()；且用局部 GlobalStorage 而不是 GlobalStorage::instance()），并且
-# 框架的 expect_eq 是单模板参数，EXPECT_EQ(std::string, "字面量") 推导不出来。
+# 与 create()；且用局部 GlobalStorage 而不是 GlobalStorage::instance()）。
 # 要恢复命令层覆盖必须先重写这个文件，属于缺陷队列而不是接线工作。
