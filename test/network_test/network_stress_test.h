@@ -8,6 +8,10 @@
 #include <atomic>
 #include <random>
 #include <chrono>
+// 本头文件用 std::shared_ptr / std::make_shared（:39、:78），必须自己 include；
+// libstdc++ 14 会经由别的头带进来，11 不会，于是 gcc-11 直接报
+// "make_shared is not a member of std"。
+#include <memory>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
