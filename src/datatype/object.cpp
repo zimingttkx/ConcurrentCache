@@ -49,6 +49,12 @@ bool CacheObject::validate() const {
     return true;
 }
 
+void CacheObject::discard_string_payload() {
+    // swap 而不是 clear()：clear() 不释放容量，一个大值 SET 完再 HSET
+    // 会把整块缓冲区一直挂在已经变成 HASH 的对象上。
+    std::string().swap(string_val_);
+}
+
 // List 操作
 bool CacheObject::list_push(const std::string& val, bool front) {
     if (type_ != ObjectType::LIST && type_ != ObjectType::STRING) [[unlikely]] {
@@ -57,6 +63,7 @@ bool CacheObject::list_push(const std::string& val, bool front) {
     }
     if (type_ == ObjectType::STRING) {
         std::string old_val = std::move(string_val_);
+        discard_string_payload();
         type_ = ObjectType::LIST;
         list_val_.clear();
         // 只有非空字符串才保留为列表首元素（避免默认构造的空字符串污染列表）
@@ -208,6 +215,9 @@ bool CacheObject::hash_set(const std::string& field, const std::string& value) {
         LOG_WARN(kModule, "hash_set - object is not HASH");
         return false;
     }
+    if (type_ == ObjectType::STRING) {
+        discard_string_payload();
+    }
     type_ = ObjectType::HASH;
     hash_val_[field] = value;
     LOG_DEBUG(kModule, "hash_set - field=%s, new_size=%zu", field.c_str(), hash_val_.size());
@@ -266,6 +276,9 @@ bool CacheObject::set_add(const std::string& member) {
         LOG_WARN(kModule, "set_add - object is not SET");
         return false;
     }
+    if (type_ == ObjectType::STRING) {
+        discard_string_payload();
+    }
     type_ = ObjectType::SET;
     auto [it, inserted] = set_val_.insert(member);
     LOG_DEBUG(kModule, "set_add - member=%s, inserted=%d, new_size=%zu",
@@ -302,6 +315,9 @@ bool CacheObject::zset_add(const std::string& member, double score) {
     if (type_ != ObjectType::ZSET && type_ != ObjectType::STRING) [[unlikely]] {
         LOG_WARN(kModule, "zset_add - object is not ZSET");
         return false;
+    }
+    if (type_ == ObjectType::STRING) {
+        discard_string_payload();
     }
     type_ = ObjectType::ZSET;
 
