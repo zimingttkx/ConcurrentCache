@@ -317,6 +317,58 @@ void test_zset_range_operations() {
 }
 
 // ============================================================================
+// STRING 表示的类型契约测试
+// ============================================================================
+
+// get_string() 返回空 optional 是调用方区分"键里装的是别的类型"和
+// "键里装的是空字符串"的唯一依据（GET 回 WRONGTYPE 还是回 ""、INCR 回
+// WRONGTYPE 还是回 not an integer，全走这条路）。这里同时锁死两半：
+// 读取侧要按 type_ 拦，写入侧容器接管 key 时要把旧字符串真的扔掉。
+void test_string_type_contract() {
+    TEST_SUITE("CacheObject String Type Contract");
+
+    // 空字符串是合法的 STRING，必须与"不是字符串"区分开
+    CacheObject empty_str(std::string(""));
+    EXPECT_TRUE(empty_str.get_string().has_value());
+    EXPECT_EQ(empty_str.get_string().value(), std::string(""));
+
+    // Hash 接管
+    CacheObject as_hash(std::string("10"));
+    EXPECT_TRUE(as_hash.hash_set("f", "keepme"));
+    EXPECT_EQ(as_hash.type(), ObjectType::HASH);
+    EXPECT_TRUE(!as_hash.get_string().has_value());
+    EXPECT_EQ(as_hash.hash_get("f").value(), std::string("keepme"));
+
+    // Set 接管
+    CacheObject as_set(std::string("10"));
+    EXPECT_TRUE(as_set.set_add("m"));
+    EXPECT_EQ(as_set.type(), ObjectType::SET);
+    EXPECT_TRUE(!as_set.get_string().has_value());
+
+    // ZSet 接管
+    CacheObject as_zset(std::string("10"));
+    EXPECT_TRUE(as_zset.zset_add("m", 1.0));
+    EXPECT_EQ(as_zset.type(), ObjectType::ZSET);
+    EXPECT_TRUE(!as_zset.get_string().has_value());
+
+    // List 接管：旧值保留为首元素，但不再能被当作 string 读出来
+    CacheObject as_list(std::string("10"));
+    EXPECT_TRUE(as_list.list_push("20", true));
+    EXPECT_EQ(as_list.type(), ObjectType::LIST);
+    EXPECT_TRUE(!as_list.get_string().has_value());
+    EXPECT_EQ(as_list.list_size(), static_cast<size_t>(2));
+
+    // 换回 STRING 之后必须能正常读出来：判定跟着 type_ 走，不是一次性标记
+    CacheObject back_to_str(std::string("x"));
+    EXPECT_TRUE(back_to_str.hash_set("f", "v"));
+    EXPECT_TRUE(!back_to_str.get_string().has_value());
+    back_to_str.set_string("now-a-string");
+    EXPECT_TRUE(back_to_str.get_string().has_value());
+
+    std::cout << "✓ String type contract test passed\n";
+}
+
+// ============================================================================
 // 类型验证测试
 // ============================================================================
 
@@ -416,6 +468,7 @@ void run_all_datatype_tests() {
     test_zset_range_operations();
 
     // 其他测试
+    test_string_type_contract();
     test_type_validation();
     test_memory_size();
 

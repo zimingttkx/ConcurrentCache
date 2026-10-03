@@ -53,7 +53,13 @@ namespace cc_server {
         bool validate() const;
 
         // string 操作
+        // 非 STRING 类型必须返回 nullopt：GET 与 INCR/DECR（经 storage.incrby）都是
+        // 靠这个 optional 为空来判 WRONGTYPE 的，直接返回 string_val_ 会让容器键上
+        // 残留的旧字符串被当成当前值——那两条错误分支因此永远不会走到。
         std::optional<std::string> get_string() const {
+            if (type_ != ObjectType::STRING) {
+                return std::nullopt;
+            }
             return string_val_;
         }
         void set_string(const std::string& val) {
@@ -136,6 +142,10 @@ namespace cc_server {
                 return member < other.member;  // 分数相同时按字典序
             }
         };
+
+        // 容器操作把 key 从 STRING 接管成 HASH/SET/ZSET/LIST 时，必须同时丢弃
+        // STRING 表示：type() 已经改口了，旧字符串若留着就成了第二个真相源。
+        void discard_string_payload();
 
         ObjectType type_;
 
