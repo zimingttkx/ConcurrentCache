@@ -6,10 +6,12 @@ on:
   pull_request:
     branches: [ main, master ]
 
-# 同一分支上的旧运行直接取消，避免排队堆积。
+# PR 分支上取消被取代的旧运行；main 上不取消 —— 连续合并时，前一次运行是唯一
+# 对已进 main 的代码的验证，取消它会留下没人验过的窗口（实测发生过：d69fd05
+# 的运行被 454f038 挤成 cancelled）。
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   # 每个 job 自己 configure + build（Redis 的 ci.yml 也是这个形状）：用

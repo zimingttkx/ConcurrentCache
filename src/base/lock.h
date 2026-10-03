@@ -119,9 +119,10 @@ namespace cc_server {
     // __builtin_ia32_pause() 是 GCC/Clang 提供的内联函数
     #define CPU_PAUSE() __builtin_ia32_pause()
 #elif defined(__aarch64__)
-    // ARM64 架构使用 yield 指令
-    // __builtin_arm_yield() 是 GCC/Clang 提供的内联函数
-    #define CPU_PAUSE() __builtin_arm_yield()
+    // ARM64：__builtin_arm_yield() 是 Clang 的内建函数，GCC 没有，
+    // 在 arm64 runner 上直接编译失败。改成内联 yield 指令，
+    // memory clobber 保证自旋体不会被重排到它前面。
+    #define CPU_PAUSE() __asm__ __volatile__("yield" ::: "memory")
 #else
     // 未知架构，使用空操作
     // do {} while(0) 是一个空循环，编译时会优化成什么都不做

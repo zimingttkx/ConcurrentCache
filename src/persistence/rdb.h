@@ -11,6 +11,9 @@
 #include <chrono>
 #include <ctime>
 #include <cstdio>
+// 本头文件里 inline 的 operator<<(std::ostream&, BgsaveStatus) 需要 ostream 的
+// 完整定义；此前只靠别的头传递包含，gcc-11 下就找不到 operator<< 重载了。
+#include <ostream>
 
 namespace cc_server {
     class GlobalStorage;

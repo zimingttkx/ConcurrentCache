@@ -9,11 +9,9 @@ on:
   workflow_dispatch:
     inputs:
       skipjobs:
-        description: '逗号分隔，跳过这些 job：tsan,ubsan,leaks,slow,e2e,redis,portability'
+        description: '逗号分隔，跳过这些 job：sanitizer,leaks,slow,e2e,redis,portability'
         required: false
         default: ''
-  push:
-    branches: [ main ]
 
 concurrency:
   group: daily-${{ github.ref }}
@@ -223,6 +221,13 @@ jobs:
     name: CodeQL
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+
+    # analyze 要把结果上传成 code scanning 分析，默认 token 没有 security-events
+    # 权限时直接 "Resource not accessible by integration" 失败。
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
 
     steps:
       - uses: actions/checkout@v4
