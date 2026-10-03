@@ -6,12 +6,18 @@ on:
   pull_request:
     branches: [ main, master ]
 
-# 同一分支上的旧运行直接取消，避免 push + pull_request 双触发排队。
+# 同一分支上的旧运行直接取消，避免排队堆积。
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  # 每个 job 自己 configure + build（Redis 的 ci.yml 也是这个形状）：用
+  # artifact 传十几个测试二进制比重编更脆，墙钟时间差别不大。
+  #
+  # job 名一律显式写死且不用 matrix：这些名字之后要逐个填进分支保护的
+  # required status checks，matrix 会自动追加 " (…)" 后缀导致对不上、PR 永久 pending。
+
   build:
     name: build-release
     runs-on: ubuntu-24.04
@@ -27,10 +33,7 @@ jobs:
           sudo apt-get install -y cmake build-essential zlib1g-dev
 
       - name: Configure
-        run: |
-          mkdir -p build
-          cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
 
       - name: Build
         run: cmake --build build --parallel "$(nproc)"
@@ -42,8 +45,30 @@ jobs:
           path: build/concurrentcache-server
           retention-days: 1
 
-  # 每个 job 自己 configure + build（Redis 的 ci.yml 也是这个形状）：用
-  # artifact 传 16 个测试二进制比重编更脆，而且墙钟时间差别不大。
+  # 代码里有 70+ 处 assert（storage.cpp、expire_dict.cpp、cluster_state.cpp 等）。
+  # 只在 Release 下构建等于这些契约从未被执行过 —— Redis 也专门留一条
+  # -DDEBUG_ASSERTIONS 的路。本 job 目前只编译不跑测试：Debug 首日很可能被
+  # 既有 assert 直接 SIGABRT（assert 不会被 TestSuite 的 try/catch 接住，会带走
+  # 整个二进制），先把它编译出来看真实状态，再决定何时挂测试。
+  assert:
+    name: build-assert
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential zlib1g-dev
+
+      - name: Configure and build (asserts live)
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
+          cmake --build build --parallel "$(nproc)"
+
   gate:
     name: gate-tests
     runs-on: ubuntu-24.04
@@ -68,6 +93,8 @@ jobs:
       - name: Run gate tests
         run: ctest --test-dir build -L gate --output-on-failure -j1
 
+  # 不拦合并：这一层跑"结果还没人知道"或"断言正确语义而产品尚不满足"的用例。
+  # pipefail 保证 ctest 的失败不被 tee 吞掉。
   contract:
     name: contract-tests
     runs-on: ubuntu-24.04
@@ -87,8 +114,6 @@ jobs:
           cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
           cmake --build build --parallel "$(nproc)"
 
-      # 不拦合并：这一层跑的是"结果还没人知道"的测试，第一次跑才知道真相。
-      # pipefail 保证 ctest 的失败不被 tee 吞掉，作业状态才是真的。
       - name: Run contract tests
         continue-on-error: true
         run: |
@@ -102,6 +127,77 @@ jobs:
             grep -E "tests passed|tests failed" contract.log || echo "见上方日志"
             echo
             echo "某项连续绿之后，把 test/CMakeLists.txt 注册表里它的标签改成 gate 即完成收紧。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # 三张表 + 测试文件清单 + 配置口径 + 端口一致性。注册表由 command-table-probe
+  # 在运行时回答，脚本不信任自己对 C++ 源码的正则。
+  consistency:
+    name: consistency
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential zlib1g-dev python3
+
+      - name: Build the probe
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+          cmake --build build --target command-table-probe --parallel "$(nproc)"
+
+      - name: Check tables, inventory and ports
+        run: python3 scripts/ci/check_consistency.py build/test/command-table-probe
+
+  asan:
+    name: asan-smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    env:
+      # detect_leaks 本轮关掉：thread_local ThreadCache、mmap span、rdb.cpp:333 的
+      # detached 快照线程都会报泄漏，那是缺陷队列而不是回归信号。泄漏单独跑
+      # daily 的 asan-leaks（不拦合并）。
+      ASAN_OPTIONS: detect_leaks=0:halt_on_error=1:abort_on_error=1:exitcode=99:detect_stack_use_after_return=0
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential zlib1g-dev
+
+      - name: Configure and build (ASan)
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug -DENABLE_ASAN=ON -DBUILD_TESTING=ON
+          cmake --build build --parallel "$(nproc)"
+
+      # 这一步是拦合并的：ASAN 下的编译/链接必须干净。
+      - name: ASan build summary
+        run: |
+          {
+            echo "### asan-smoke"
+            echo "构建配置：Debug + -fsanitize=address，全部测试 target 编译链接通过。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # 运行阶段暂时只观察不拦：这是 gate 第一次在 Debug 下跑，而 assert() 只在
+      # Debug 生效且 SIGABRT 不会被 TestSuite 的 try/catch 接住（整个二进制直接没）。
+      # 攒够连续干净结果后，把 continue-on-error 去掉即完成收紧。
+      - name: ASan sweep (observe)
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          ctest --test-dir build -L "gate|contract" -j1 --output-on-failure 2>&1 | tee asan.log
+          {
+            echo
+            echo "### ASAN 运行结果（不拦合并）"
+            grep -E "tests passed|tests failed" asan.log || echo "见上方日志"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # .dockerignore 排除了 test/，而 add_subdirectory(test) 曾是无条件的，

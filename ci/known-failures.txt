@@ -1,0 +1,34 @@
+# CI 基线名单 —— 只允许变短，不允许变长。
+#
+# 语法：kind|name|说明（# 开头与空行忽略）
+# 规则：每一项都对应"脚本本来会判红、但暂时放过"的一处已知缺陷。
+#       当它不再失败时，脚本会主动报错要求删掉这一行。
+#       这就是棘轮：想让流水线变绿只有一条路，就是把缺陷修掉。
+#
+# kind 取值：
+#   gap          两张表脱钩（命令注册表 / 复制写白名单）
+#   legacy-file  test/ 下存在但故意不接入构建的源文件
+#   config-warn  配置项读到了但代码里没人用
+
+# 复制写白名单里有、但 CommandFactory 并没有注册的命令。
+# 对应产品缺陷：INCRBY/DECRBY 实际不存在，白名单是死条目。
+gap|write-command-not-registered:incrby|src/network/sub_reactor.cpp:118 白名单含 incrby，CommandFactory 无此注册
+gap|write-command-not-registered:decrby|src/network/sub_reactor.cpp:118 白名单含 decrby，CommandFactory 无此注册
+
+# 已注册、但既不在写白名单也不在读清单里的命令 —— 副本可以本地执行它且主节点不复制，
+# 对应"RESTORE 不在复制表中导致主从发散"这条缺陷。
+gap|unclassified-command:restore|src/command/command_factory.cpp:82 注册了 restore，但 sub_reactor.cpp:116-126 的写白名单没有它
+
+# 这些测试源文件照着旧 API/旧可见性写的，接进构建只会得到编译错误，
+# 需要先重写而不是接线；重写一个删一行。
+legacy-file|test/command_test/command_test.cpp|调用已不存在的 CommandFactory(storage)/create_command()
+legacy-file|test/cluster_test/cluster_replication_test.cpp|调用 private 的 ReplicationMgr::add_to_replication_buffer()
+legacy-file|test/cluster_test/cluster_strict_test.cpp|同上，另在 Debug 下触发 cluster_state.cpp:94 的 assert
+legacy-file|test/atomic_test/atomic_first_test.cpp|历史复现脚本，与 atomic_correctness_test.cpp 的 main() 互斥
+legacy-file|test/atomic_test/atomic_minimal_test.cpp|历史复现脚本，退出码恒 0
+legacy-file|test/atomic_test/atomic_multi_test.cpp|历史复现脚本，与 atomic_correctness_test.cpp 的 main() 互斥
+legacy-file|test/atomic_test/atomic_progressive_test.cpp|历史复现脚本，与 atomic_correctness_test.cpp 的 main() 互斥
+legacy-file|test/atomic_test/atomic_memory_order_test.cpp|历史复现脚本，与 atomic_correctness_test.cpp 的 main() 互斥
+
+# 配置文件里存在、但代码从未读取的键（配了不生效）。
+config-warn|max_entries|淘汰只按条数上限、未接内存口径，见 set_max_entries 无调用方
