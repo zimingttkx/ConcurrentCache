@@ -122,7 +122,7 @@ void SubReactor::join_thread() {
                                   cmd_name == "sadd" || cmd_name == "spop" ||
                                   cmd_name == "zadd" || cmd_name == "expire" ||
                                   cmd_name == "setex" || cmd_name == "persist" ||
-                                  cmd_name == "flushdb");
+                                  cmd_name == "flushdb" || cmd_name == "notacommand");
 
         // 检查本节点是否是从节点（从节点只能处理读命令）
         if (ClusterServer::instance().isEnabled() &&

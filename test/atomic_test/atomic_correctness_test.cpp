@@ -263,7 +263,7 @@ void test_atomic_integer_concurrency() {
         t2.join();
 
         // 1000 * 10 - 1000 * 3 = 10000 - 3000 = 7000
-        EXPECT_EQ(counter.load(), 7000);
+        EXPECT_EQ(counter.load(), 7001); // MUTATION PROBE: 故意断错，验证 gate-tests 会红
     });
 
     RUN_TEST(concurrent_exchange) {
