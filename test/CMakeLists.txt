@@ -51,10 +51,6 @@ add_executable(concurrentcache-v3-tests
     datatype_test/object_test.cpp
     persistence_test/rdb_test.cpp
     storage_test/storage_v3_test.cpp
-    # command_test.cpp 只提供 run_all_command_tests()，没有 main()，所以它是
-    # 编进这个 target 而不是单独成可执行文件；test_v3_main.cpp 里的调用暂时
-    # 还是注释状态（语义接线留到下一轮），这里先拿到编译覆盖。
-    command_test/command_test.cpp
 )
 
 # Atomic 测试
@@ -256,5 +252,8 @@ set_tests_properties(NetworkStressTest PROPERTIES
     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
 
-# command_test.cpp 不在这里注册：它没有 main()，作为 concurrentcache-v3-tests
-# 的源文件参与编译，调用点在 test_v3_main.cpp 里仍是注释状态。
+# command_test/command_test.cpp 故意不接入任何 target：它已和产品 API 脱节
+# （构造 CommandFactory(storage)、调用 create_command()，而现在只有 instance()
+# 与 create()；且用局部 GlobalStorage 而不是 GlobalStorage::instance()），并且
+# 框架的 expect_eq 是单模板参数，EXPECT_EQ(std::string, "字面量") 推导不出来。
+# 要恢复命令层覆盖必须先重写这个文件，属于缺陷队列而不是接线工作。
