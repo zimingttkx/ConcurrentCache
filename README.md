@@ -4,8 +4,8 @@
 
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Build](https://img.shields.io/github/actions/workflow/status/dingziming/ConcurrentCache/ci.yml?style=flat-square)](https://github.com/dingziming/ConcurrentCache/actions)
-[![Docker](https://img.shields.io/badge/Docker-ghcr.io-blue.svg)](https://github.com/dingziming/ConcurrentCache/pkgs/container/concurrentcache)
+[![Build](https://img.shields.io/github/actions/workflow/status/zimingttkx/ConcurrentCache/ci.yml?style=flat-square)](https://github.com/zimingttkx/ConcurrentCache/actions)
+[![Docker](https://img.shields.io/badge/Docker-ghcr.io-blue.svg)](https://github.com/zimingttkx/ConcurrentCache/pkgs/container/concurrentcache)
 
 ## 简介
 
@@ -21,7 +21,7 @@ ConcurrentCache 是纯 C++20 实现的内存对象缓存系统，兼容 Redis RE
 | 线程安全存储 | 64 分片分段锁哈希表，降低锁竞争 |
 | 高效内存管理 | ThreadCache（无锁）→ CentralCache（细粒度锁）→ PageCache 三层架构 |
 | 协议兼容 | 支持 STRING/LIST/HASH/SET/ZSET 五种数据类型 |
-| 持久化 | RDB 快照，Fork/COW 机制，服务重启自动恢复 |
+| 持久化 | RDB 快照（进程内后台线程，非 fork/COW），原子落盘 tmp→fsync→rename，服务重启自动恢复 |
 | 集群支持 | V4.0 支持哈希槽分片、Gossip 协议、主从复制 |
 
 ## 技术规格
@@ -74,7 +74,7 @@ ConcurrentCache 是纯 C++20 实现的内存对象缓存系统，兼容 Redis RE
 | | PageCache | 页缓存，与系统交互 |
 | 命令层 | CommandFactory | 命令统一管理 |
 | 持久化层 | RDB | 快照持久化 |
-| | RDBScheduler | Fork/COW 快照调度 |
+| | RDBScheduler | 后台线程快照调度（间隔 + 脏键阈值触发） |
 
 ## 支持的命令
 
@@ -153,7 +153,7 @@ ConcurrentCache 是纯 C++20 实现的内存对象缓存系统，兼容 Redis RE
 ### 编译
 
 ```bash
-git clone https://github.com/dingziming/ConcurrentCache.git
+git clone https://github.com/zimingttkx/ConcurrentCache.git
 cd ConcurrentCache
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
@@ -337,10 +337,15 @@ src/
 
 ## 测试
 
+CI 分两层：`ci.yml` 是每次 PR 必须通过的快门禁，`daily.yml` 是夜间重档（sanitizer、长压测、e2e、与真 Redis 的对比、多架构）。测试按 ctest LABELS 分成 `gate`（必过）、`contract`（可见但不拦）、`slow`（只在夜间跑），详见 [docs/testing.md](docs/testing.md)。
+
 ### 运行测试
 
 ```bash
-ctest --test-dir build --output-on-failure
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure        # 全部
+ctest --test-dir build -L gate -j1                # 只跑必过门禁那一层
 ```
 
 ### 单独测试

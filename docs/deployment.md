@@ -2,7 +2,7 @@
 
 > **目标平台**：Linux x86_64（推荐 Ubuntu 24.04 / Debian 12）
 > **部署方式**：源码编译 / Docker / Docker Compose
-> **默认端口**：`16379`（客户端）+ `26379`（集群总线，`port + 10000`）
+> **默认端口**：`6379`（客户端）+ `16379`（集群总线，`port + 10000`）
 > **前置依赖**：仅 ZLIB（系统库）
 
 ## 1. 编译选项
@@ -93,7 +93,7 @@ nohup ./concurrentcache-server > server.log 2>&1 &
 sudo systemctl start concurrentcache
 ```
 
-> 当前启动方式固定读取 `conf/concurrentcache.conf`，不支持 `--port` 或 `--config` 命令行参数。如需修改端口，编辑配置文件后重启。
+> 端口与配置文件都可用命令行覆盖：`--config <path>`、`--port <n>`；`--help` 列出全部选项。显式指定的 `--config` 读不到会以退出码 1 失败，而不显式指定时默认路径缺失则回落到内置默认值（从 `build/` 目录直接启动是受支持的用法）。
 
 ### 3.2 启动顺序（main.cpp 实现）
 
@@ -127,7 +127,7 @@ sudo systemctl start concurrentcache
 
 | Key | 默认 | 说明 |
 |-----|------|------|
-| `port` | `6379`（程序内置）/ `16379`（仓库 conf 值） | 客户端监听端口 |
+| `port` | `6379` | 客户端监听端口（程序内置默认与仓库 conf 一致） |
 | `log_level` | `1`（DEBUG） | `0`=TRACE … `5`=FATAL，**数值越大越不详细**；conf 中的 `4` 表示只输出 ERROR/FATAL |
 | `reactor_count` | CPU 核数 | SubReactor 数量 |
 | `thread_pool_size` | CPU 核数 | 通用 ThreadPool 数量 |
@@ -165,16 +165,16 @@ cluster_node_timeout = 5000
 ### 5.1 使用预构建镜像
 
 ```bash
-docker pull ghcr.io/dingziming/concurrentcache:latest
+docker pull ghcr.io/zimingttkx/concurrentcache:latest
 docker run -d \
   --name concurrentcache \
-  -p 16379:16379 \
+  -p 6379:6379 \
   -v $(pwd)/data:/app/data \
   -v $(pwd)/conf/concurrentcache.conf:/app/conf/concurrentcache.conf:ro \
   --restart unless-stopped \
-  ghcr.io/dingziming/concurrentcache:latest
+  ghcr.io/zimingttkx/concurrentcache:latest
 
-docker exec concurrentcache redis-cli -p 16379 PING
+docker exec concurrentcache redis-cli -p 6379 PING
 # PONG
 ```
 
@@ -182,9 +182,8 @@ docker exec concurrentcache redis-cli -p 16379 PING
 
 - 非 root 用户（`appuser`）
 - 内置 `redis-tools`（用于健康检查）
-- 镜像内 `EXPOSE 6379` + 健康检查 `redis-cli -p 6379 PING`（每 30s）——Dockerfile 假定容器内端口为 **6379**。上面 `-p 16379:16379` 的映射要求挂载的 conf 中 `port = 16379`；若用镜像默认 conf（`port = 16379`），命令应为 `-p 16379:16379`；若未挂载 conf，则映射 `-p 16379:6379`
-- 默认 ENTRYPOINT：`/app/concurrentcache-server`
-- 注意：Dockerfile 的 `CMD ["--config", ...]` 参数**会被忽略**——服务器不解析 argv，固定读取 `conf/concurrentcache.conf` 相对路径
+- 镜像内 `EXPOSE 6379` + 健康检查 `redis-cli -p 6379 PING`（每 30s），与仓库默认 `conf` 的 `port = 6379` 一致。这三处（conf / `EXPOSE` / `HEALTHCHECK`）由 `scripts/ci/check_consistency.py` 强制对齐，改一处不改其余会直接让 CI 变红
+- 默认 ENTRYPOINT：`/app/concurrentcache-server`，`CMD ["--config", "/app/conf/concurrentcache.conf"]` 现在真的生效（`main.cpp` 解析 `--config` / `--port` / `--help`）
 
 ### 5.2 本地构建镜像
 

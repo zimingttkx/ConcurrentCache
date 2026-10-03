@@ -31,9 +31,36 @@
 | `long-running-stress-test` | `stress_test/long_running_stress_test.cpp` | 长时间稳定性（数小时） |
 | `load-limit-test` | `stress_test/load_limit_test.cpp` | 逐步加压找性能拐点 |
 | `network-stress-test` | `network_test/network_stress_test_main.cpp` + `network_stress_test.cpp` | SubReactorPool 大连接并发 |
-| `cluster-tests` | `cluster_test/cluster_test.cpp`（`cluster_replication_test.cpp`、`cluster_strict_test.cpp` 有独立 `main()`，**未接入构建**） | 集群 Gossip / 复制 / 槽位 |
+| `cluster-tests` | `cluster_test/cluster_test.cpp` | 集群 Gossip / 复制 / 槽位（纯对象级，不起 socket） |
+| `cluster-replication-tests` / `cluster-strict-tests` | **未接入构建** | 见下方说明 |
+| `lock-stress-tests` | `lock_test/lock_stress_test.cpp` | 锁的高强度混压（`slow`，只在 daily 跑） |
+| `concurrency-tests` | `test_main.cpp` + `tests.cpp` | 线程池 / 分片锁 / 内存池三层一致性 |
+| `command-table-probe` | `tools/command_table_probe.cpp` | 不是用例：给 CI 的一致性检查当运行时注册表（`CommandFactory::create()`） |
 
-> **注意**：`command_test/` 目录源码已就绪但**当前 `test_v3_main.cpp` 中禁用**。启用方法见 § 7。
+> **有源码但故意不接入构建**（`ci/known-failures.txt` 里逐条登记，脚本会检查"test/ 下的 .cpp 必须属于某个 target 或在名单里"，所以新增孤儿文件会当场红）：
+>
+> | 文件 | 不接入的原因 |
+> |------|--------------|
+> | `command_test/command_test.cpp` | 调用已不存在的 `CommandFactory(GlobalStorage&)` 与 `create_command()`；且框架 `expect_eq` 是单模板参数，`EXPECT_EQ(std::string, "字面量")` 推导不出来 |
+> | `cluster_test/cluster_replication_test.cpp` | 调用 `ReplicationMgr::add_to_replication_buffer()`，而它在 `replication_mgr.h:128` 之后是 private |
+> | `cluster_test/cluster_strict_test.cpp` | 同上；另有 `getNodeByIpPort("", 6379)` 会在 Debug 触发 `cluster_state.cpp:94` 的 assert |
+> | `atomic_test/atomic_{first,minimal,multi,progressive,memory_order}_test.cpp` | 各自带 `main()` 的历史复现脚本，与已接入的 `atomic_correctness_test.cpp` 互斥 |
+>
+> 这些文件需要**重写**而不是"接线"，属于缺陷队列。
+
+## 2.1 CI 分层与基线棘轮
+
+| LABEL | 跑在哪 | 拦不拦合并 |
+|-------|--------|------------|
+| `gate` | `ci.yml` 的 `gate-tests`、`asan-smoke` | 拦（required status check） |
+| `contract` | `ci.yml` 的 `contract-tests`（`continue-on-error`） | 不拦，但必须可见 |
+| `slow` | `daily.yml` | 不拦 |
+
+收紧只有一个动作：某项在 `contract` 里连续绿，就把 `test/CMakeLists.txt` 注册表里它的标签改成 `gate`。反向不成立——把一个会红的用例放进 `gate` 会立刻拦停 PR。
+
+`ci/known-failures.txt` 是基线名单，规则是**每一项都必须当前真的失败**，否则脚本报"已经不再触发，请删掉这一行"。所以名单只能变短，把缺陷修掉的证据就是名单少一行。
+
+`scripts/ci/check_consistency.py` 检查四件事：命令注册表与复制写白名单是否互相自洽（注册表由 `command-table-probe` 在运行时回答，不信正则）、`test/` 下每个 `.cpp` 是否属于某个 target 或在名单里、`conf` 里的键是否真被代码读取、端口在 conf / Dockerfile / README 之间是否一致。
 
 ## 3. 快速运行
 
@@ -51,7 +78,7 @@ cmake --build . --parallel
 ctest --test-dir build --output-on-failure
 ```
 
-> 当前 CTest 注册项：`AtomicTests`、`LockCorrectnessTests`、`LockDeadlockTests`、`LockRaceTests`、`ClusterTests`。其他可执行文件需手动运行。
+> 全部 16 个用例都已注册进 CTest（`enable_testing()` 在根 `CMakeLists.txt`），每个都带 `TIMEOUT` 与 LABELS。`command-table-probe` 是工具不是用例，不注册。
 
 ### 3.3 单独跑 V3 综合测试
 
