@@ -35,6 +35,14 @@ set(COMMON_SOURCES
     ${CMAKE_SOURCE_DIR}/src/cluster/cluster_bus.cpp
     ${CMAKE_SOURCE_DIR}/src/command/cluster_cmd.cpp
     ${CMAKE_SOURCE_DIR}/src/command/restore_cmd.cpp
+    # tests.cpp 的 MemoryPool 一致性/压力/边界用例需要这三层的实现；此前
+    # COMMON_SOURCES 缺整个 memorypool，所以 tests.cpp 就算接线也链接不上。
+    ${CMAKE_SOURCE_DIR}/src/memorypool/central_cache.cpp
+    ${CMAKE_SOURCE_DIR}/src/memorypool/free_list.cpp
+    ${CMAKE_SOURCE_DIR}/src/memorypool/page_cache.cpp
+    ${CMAKE_SOURCE_DIR}/src/memorypool/size_class.cpp
+    ${CMAKE_SOURCE_DIR}/src/memorypool/span.cpp
+    ${CMAKE_SOURCE_DIR}/src/memorypool/thread_cache.cpp
 )
 
 # 包含目录
@@ -117,6 +125,17 @@ add_executable(lock-stress-tests
     lock_test/lock_stress_test.cpp
 )
 
+# 并发 + 内存池测试：test_main.cpp 提供 main()，tests.cpp 提供
+# run_thread_pool_tests / run_lock_tests / run_memory_pool_tests，两者是一对，
+# 此前一起被漏在构建外。
+# 注意它的判定强度：tests.cpp 只打印统计并依赖 assert()，没有走 EXPECT_ 宏，
+# 而 CI 的 Release 构建会编译掉 assert —— 所以这里的"通过"只代表没抛异常、
+# 没 abort，内存池的真实正确性要靠 daily 的 Debug/ASAN 跑它才算有牙齿。
+add_executable(concurrency-tests
+    test_main.cpp
+    tests.cpp
+)
+
 # 所有测试可执行文件。链接、包含目录、编译选项、sanitizer 与 ctest 注册
 # 全部从这里派生，避免六份手写清单各自漂移。
 set(CC_TEST_TARGETS
@@ -133,6 +152,7 @@ set(CC_TEST_TARGETS
     load-limit-test
     network-stress-test
     cluster-tests
+    concurrency-tests
 )
 
 # ========== 链接公共源文件 ==========
@@ -205,6 +225,7 @@ set(CC_TESTS
     "LockRaceTests|lock-race-tests|contract|120"
     "LockBoundaryTests|lock-boundary-tests|contract|120"
     "V3Tests|concurrentcache-v3-tests|contract|600"
+    "ConcurrencyTests|concurrency-tests|contract|300"
     "LockStressTests|lock-stress-tests|slow|300"
     "StressTest|stress-test|slow|1800"
     "LoadLimitTest|load-limit-test|slow|3600"
