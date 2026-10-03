@@ -136,6 +136,12 @@ add_executable(concurrency-tests
     tests.cpp
 )
 
+# 命令表探针（scripts/ci/check_consistency.py 用）：它是工具不是用例，所以进
+# CC_TEST_TARGETS 拿到编译/链接参数，但不注册进 ctest。
+add_executable(command-table-probe
+    tools/command_table_probe.cpp
+)
+
 # 所有测试可执行文件。链接、包含目录、编译选项、sanitizer 与 ctest 注册
 # 全部从这里派生，避免六份手写清单各自漂移。
 set(CC_TEST_TARGETS
@@ -153,6 +159,7 @@ set(CC_TEST_TARGETS
     network-stress-test
     cluster-tests
     concurrency-tests
+    command-table-probe
 )
 
 # ========== 链接公共源文件 ==========
