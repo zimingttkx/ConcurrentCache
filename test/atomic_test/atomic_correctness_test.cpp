@@ -262,6 +262,12 @@ void test_atomic_integer_concurrency() {
         t1.join();
         t2.join();
 
+        // MUTATION PROBE: 挂死自己，验证 ctest 的 TIMEOUT 会杀掉用例而不是烧满 6 小时
+        volatile bool never_set = false;
+        while (!never_set) {
+            std::this_thread::yield();
+        }
+
         // 1000 * 10 - 1000 * 3 = 10000 - 3000 = 7000
         EXPECT_EQ(counter.load(), 7000);
     });
