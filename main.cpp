@@ -1,5 +1,6 @@
 #include <iostream>
 #include <csignal>
+#include <string>
 #include <thread>
 #include <chrono>
 #include <atomic>
@@ -43,7 +44,59 @@ void signal_handler(int sig) {
     }
 }
 
-int main() {
+namespace {
+
+void print_usage(const char* prog) {
+    std::cout << "用法: " << prog << " [选项]\n"
+              << "  --config <path>   配置文件路径（默认 conf/concurrentcache.conf）\n"
+              << "  --port <n>        覆盖配置文件里的监听端口\n"
+              << "  --help, -h        显示本帮助\n";
+}
+
+} // namespace
+
+int main(int argc, char* argv[]) {
+    const char* config_path = "conf/concurrentcache.conf";
+    bool config_explicit = false;
+    int port_override = 0;
+
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--help" || arg == "-h") {
+            print_usage(argv[0]);
+            return 0;
+        } else if (arg == "--config") {
+            if (i + 1 >= argc) {
+                std::cerr << "[主线程] --config 缺少路径参数" << std::endl;
+                return 1;
+            }
+            config_path = argv[++i];
+            config_explicit = true;
+        } else if (arg == "--port") {
+            if (i + 1 >= argc) {
+                std::cerr << "[主线程] --port 缺少端口参数" << std::endl;
+                return 1;
+            }
+            const std::string value = argv[++i];
+            try {
+                size_t consumed = 0;
+                const int parsed = std::stoi(value, &consumed);
+                if (consumed != value.size() || parsed < 1 || parsed > 65535) {
+                    std::cerr << "[主线程] 非法端口: " << value << std::endl;
+                    return 1;
+                }
+                port_override = parsed;
+            } catch (const std::exception&) {
+                std::cerr << "[主线程] 非法端口: " << value << std::endl;
+                return 1;
+            }
+        } else {
+            std::cerr << "[主线程] 未知参数: " << arg << std::endl;
+            print_usage(argv[0]);
+            return 1;
+        }
+    }
+
     // 0. 提升文件描述符上限（高并发必须）
     struct rlimit rl;
     if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
@@ -65,8 +118,14 @@ int main() {
     std::cout << "[主线程] 信号系统初始化完成" << std::endl;
 
     // 2. 加载配置文件
-    if (!Config::instance().load("conf/concurrentcache.conf")) {
-        std::cerr << "[主线程] 配置文件加载失败，使用默认配置" << std::endl;
+    if (!Config::instance().load(config_path)) {
+        if (config_explicit) {
+            // 用户点名了配置文件却读不到，静默退回默认值是错的
+            std::cerr << "[主线程] 配置文件加载失败: " << config_path << std::endl;
+            return 1;
+        }
+        // 默认路径不存在则继续：从 build/ 目录启动（没有 conf/）是受支持的用法
+        std::cout << "[主线程] 未找到配置文件 " << config_path << "，使用默认配置" << std::endl;
     }
     std::cout << "[主线程] 配置系统初始化完成" << std::endl;
 
@@ -77,6 +136,9 @@ int main() {
 
     // 4. 获取配置参数（默认使用 CPU 核心数）
     int port = Config::instance().getInt("port", 6379);
+    if (port_override > 0) {
+        port = port_override;
+    }
     int reactor_count = Config::instance().getInt("reactor_count",
         static_cast<int>(std::thread::hardware_concurrency()));
     int thread_pool_size = Config::instance().getInt("thread_pool_size",
@@ -111,12 +173,16 @@ int main() {
     // 8. 初始化 MainReactor（单线程处理 accept）
     MainReactor main_reactor;
     if (!main_reactor.init(port)) {
-        std::cerr << "[主线程] MainReactor 初始化失败" << std::endl;
-        g_running = false;
-    } else {
-        g_main_reactor = &main_reactor;
-        std::cout << "[主线程] MainReactor 初始化完成，监听端口 " << port << std::endl;
+        // 监听失败必须让进程以非 0 退出：旧代码只把 g_running 置 false，然后
+        // 照样启动过期检查器、RDB 调度器和集群，最后 return 0 —— systemd/docker
+        // 看到的是“进程健康”，实际一个客户端都连不上。
+        std::cerr << "[主线程] MainReactor 初始化失败，监听端口 " << port
+                  << " 可能已被占用" << std::endl;
+        SubReactorPool::instance().stop();
+        return 1;
     }
+    g_main_reactor = &main_reactor;
+    std::cout << "[主线程] MainReactor 初始化完成，监听端口 " << port << std::endl;
 
     // 9. 加载 RDB 持久化文件（必须在 ExpirationChecker 启动之前，避免并发访问）
     auto& rdb = RdbPersistence::instance();
@@ -152,7 +218,7 @@ int main() {
     rdb_scheduler.start();
     std::cout << "[主线程] RDB 自动保存调度器已启动 (间隔: " << rdb_save_interval << "s, 脏键阈值: " << rdb_dirty_threshold << ")" << std::endl;
 
-    // 只有 MainReactor 初始化成功时才显示服务器启动信息
+    // 走到这里说明已经在监听；g_running 为 false 只可能是启动期间就收到退出信号
     if (g_running) {
         std::cout << "========================================" << std::endl;
         std::cout << "   服务器启动成功！等待客户端连接...     " << std::endl;

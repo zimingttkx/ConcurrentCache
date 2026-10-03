@@ -101,7 +101,7 @@ private:
     Config();
 
     // 内部加载配置（被 load 和 reload 调用）
-    void loadInternal();
+    bool loadInternal();
 
     // 去除字符串首尾的空白字符
     void trim(std::string& s);
