@@ -139,4 +139,9 @@ if(ENABLE_UBSAN)
 endif()
 
 # ========== 测试子目录 ==========
-add_subdirectory(test)
+# 测试 target 是 CI 门禁的载体，但源码树可能不含 test/（例如 docker 构建的
+# .dockerignore 排除了它），因此这里必须允许缺席而不是 configure 失败。
+option(BUILD_TESTING "Build the test targets" ON)
+if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test/CMakeLists.txt")
+    add_subdirectory(test)
+endif()
