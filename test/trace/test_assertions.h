@@ -449,8 +449,10 @@ private:
 #define TEST_SUITE(suite_name) \
     cc_server::testing::TestSuite suite_instance(suite_name)
 
+// [&] 而不是 []：lambda 由 run() 同步执行，按引用捕获是安全的；没有捕获时
+// 测试函数里的局部变量（端口、fixture 等）根本进不来。
 #define RUN_TEST(test_name) \
-    suite_instance.run(#test_name, []()
+    suite_instance.run(#test_name, [&]()
 
 } // namespace testing
 } // namespace cc_server
