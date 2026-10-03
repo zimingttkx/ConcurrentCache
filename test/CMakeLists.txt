@@ -106,17 +106,13 @@ add_executable(cluster-tests
     cluster_test/cluster_test.cpp
 )
 
-# Cluster 复制测试（此前有独立 main() 但从未进入任何 target）
-add_executable(cluster-replication-tests
-    cluster_test/cluster_replication_test.cpp
-)
-
-# Cluster 严格断言测试（同上）
-add_executable(cluster-strict-tests
-    cluster_test/cluster_strict_test.cpp
-)
-
-# Lock 压力测试（同上）
+# Cluster 复制 / 严格断言测试**不接入**：两者都调用
+# ReplicationMgr::add_to_replication_buffer()，而它在 replication_mgr.h:128 之后
+# 是 private（cluster_replication_test.cpp:118/123/140/167、
+# cluster_strict_test.cpp 同源）。把它们改成能编译需要动产品可见性或重写测试，
+# 都不属于"接线"这一步。
+#
+# Lock 压力测试（自带 main 且退出码正确）
 add_executable(lock-stress-tests
     lock_test/lock_stress_test.cpp
 )
@@ -137,8 +133,6 @@ set(CC_TEST_TARGETS
     load-limit-test
     network-stress-test
     cluster-tests
-    cluster-replication-tests
-    cluster-strict-tests
 )
 
 # ========== 链接公共源文件 ==========
@@ -211,8 +205,6 @@ set(CC_TESTS
     "LockRaceTests|lock-race-tests|contract|120"
     "LockBoundaryTests|lock-boundary-tests|contract|120"
     "V3Tests|concurrentcache-v3-tests|contract|600"
-    "ClusterReplicationTests|cluster-replication-tests|contract|120"
-    "ClusterStrictTests|cluster-strict-tests|contract|120"
     "LockStressTests|lock-stress-tests|slow|300"
     "StressTest|stress-test|slow|1800"
     "LoadLimitTest|load-limit-test|slow|3600"
