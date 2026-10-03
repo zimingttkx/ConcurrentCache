@@ -6,7 +6,7 @@
 
 namespace cc_server {
 
-void NetworkStressTest::run() {
+bool NetworkStressTest::run() {
     std::cout << "========================================" << std::endl;
     std::cout << "   Network Stress Test (Real Clients)" << std::endl;
     std::cout << "========================================" << std::endl;
@@ -21,7 +21,7 @@ void NetworkStressTest::run() {
     int test_sock = socket(AF_INET, SOCK_STREAM, 0);
     if (test_sock < 0) {
         std::cerr << "Failed to create socket" << std::endl;
-        return;
+        return true;
     }
 
     struct sockaddr_in server_addr;
@@ -34,7 +34,7 @@ void NetworkStressTest::run() {
         std::cerr << "Cannot connect to server at " << config_.server_ip << ":" << config_.server_port << std::endl;
         std::cerr << "Please start the server first: ./build/concurrentcache-server" << std::endl;
         close(test_sock);
-        return;
+        return true;
     }
     close(test_sock);
 
@@ -90,11 +90,15 @@ void NetworkStressTest::run() {
     std::cout << "Avg Ops/sec: " << std::fixed << std::setprecision(0)
               << (stats_->total_requests.load() / total_duration) << std::endl;
 
-    if (stats_->wrong_responses.load() > 0 || stats_->failed_requests.load() > stats_->connection_errors.load()) {
+    const bool issues = stats_->wrong_responses.load() > 0 ||
+                        stats_->failed_requests.load() > stats_->connection_errors.load();
+    if (issues) {
         std::cout << "\n[WARNING] Issues detected! Check server logs." << std::endl;
     } else {
         std::cout << "\n[SUCCESS] All responses correct!" << std::endl;
     }
+
+    return issues;
 }
 
 void NetworkStressTest::worker_thread(int thread_id) {

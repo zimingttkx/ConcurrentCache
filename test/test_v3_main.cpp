@@ -1,6 +1,8 @@
 #include <iostream>
 #include <string>
 
+#include "trace/test_assertions.h"
+
 namespace cc_server {
 namespace testing {
 
@@ -71,13 +73,19 @@ int main(int argc, char* argv[]) {
         //     cc_server::testing::run_all_command_tests();
         // }
 
+        const int failed = cc_server::testing::g_test_stats().failed_tests.load();
+
         std::cout << "\n";
         std::cout << "========================================\n";
-        std::cout << "✓ All V3 Tests Passed Successfully!\n";
+        if (failed == 0) {
+            std::cout << "✓ All V3 Tests Passed Successfully!\n";
+        } else {
+            std::cout << "✗ " << failed << " V3 assertion(s) failed.\n";
+        }
         std::cout << "========================================\n";
         std::cout << "\n";
 
-        return 0;
+        return failed > 0 ? 1 : 0;
     } catch (const std::exception& e) {
         std::cerr << "\n";
         std::cerr << "========================================\n";

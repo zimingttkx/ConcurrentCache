@@ -21,17 +21,24 @@ enum class TestResult {
 };
 
 // 测试统计信息
+// 断言经常在 std::thread 里执行，所以计数器必须是原子的：普通 int 自增既是
+// 数据竞争（TSAN 会先红在框架自己身上），也会丢计数从而把失败说成通过。
 struct TestStats {
-    int total_tests = 0;
-    int passed_tests = 0;
-    int failed_tests = 0;
-    int skipped_tests = 0;
+    std::atomic<int> total_tests{0};
+    std::atomic<int> passed_tests{0};
+    std::atomic<int> failed_tests{0};
+    std::atomic<int> skipped_tests{0};
 
-    void reset() {
-        total_tests = 0;
-        passed_tests = 0;
-        failed_tests = 0;
-        skipped_tests = 0;
+    struct Snapshot {
+        int total;
+        int passed;
+        int failed;
+        int skipped;
+    };
+
+    Snapshot snapshot() const {
+        return Snapshot{total_tests.load(), passed_tests.load(),
+                        failed_tests.load(), skipped_tests.load()};
     }
 };
 
@@ -69,6 +76,9 @@ bool run_with_timeout(Func&& func, int timeout_ms) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
+    // 注意：超时后仍然 join，所以“超时”并不会真的超时——func() 卡住时这里会
+    // 一起卡住（死锁场景下表现为挂住而不是失败）。当前全仓无调用点，等真要
+    // 用它的时候再改成 detach + 轮询。
     if (worker.joinable()) {
         worker.join();
     }
@@ -396,20 +406,23 @@ inline void skip_test(const char* file, int line) {
 // 测试套件辅助类
 class TestSuite {
 public:
-    TestSuite(const std::string& name) : name_(name) {
+    TestSuite(const std::string& name) : name_(name), baseline_(g_test_stats().snapshot()) {
         std::cout << "\n" << yellow("========================================") << std::endl;
         std::cout << yellow("  Test Suite: ") << name_ << std::endl;
         std::cout << yellow("========================================") << std::endl;
-        g_test_stats().reset();
+        // 这里原来调用 g_test_stats().reset()：每个套件清零全局计数，导致一个
+        // 二进制只有最后一个套件的断言影响退出码（恒真的收尾套件就能让整个
+        // 可执行文件永远返回 0）。现在改为跨套件累积 + 打印本套件增量。
     }
 
     ~TestSuite() {
+        const TestStats::Snapshot now = g_test_stats().snapshot();
         std::cout << "\n" << yellow("----------------------------------------") << std::endl;
         std::cout << "Results for: " << name_ << std::endl;
-        std::cout << "  Total:  " << g_test_stats().total_tests << std::endl;
-        std::cout << green("  Passed: ") << g_test_stats().passed_tests << std::endl;
-        std::cout << red("  Failed: ") << g_test_stats().failed_tests << std::endl;
-        std::cout << yellow("  Skipped: ") << g_test_stats().skipped_tests << std::endl;
+        std::cout << "  Total:  " << (now.total - baseline_.total) << std::endl;
+        std::cout << green("  Passed: ") << (now.passed - baseline_.passed) << std::endl;
+        std::cout << red("  Failed: ") << (now.failed - baseline_.failed) << std::endl;
+        std::cout << yellow("  Skipped: ") << (now.skipped - baseline_.skipped) << std::endl;
         std::cout << yellow("----------------------------------------") << std::endl;
     }
 
@@ -429,6 +442,7 @@ public:
 
 private:
     std::string name_;
+    TestStats::Snapshot baseline_;
 };
 
 // 辅助宏：创建测试套件并运行测试

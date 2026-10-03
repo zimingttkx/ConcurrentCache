@@ -626,5 +626,7 @@ int main(int argc, char* argv[]) {
     }
 
     std::cout << "[Load Limit Test Completed]\n";
-    return 0;
+
+    // g_test_aborted 只由 SIGINT/SIGTERM 置位：被信号打断的运行不能算通过。
+    return g_test_aborted.load() ? 1 : 0;
 }

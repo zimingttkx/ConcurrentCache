@@ -1064,10 +1064,10 @@ int main(int argc, char* argv[]) {
     run_stress_test(num_threads, num_ops_per_thread, key_range);
 
     // 数据完整性测试
-    data_integrity_test();
+    const bool integrity_ok = data_integrity_test();
 
     // 持久化完整性测试
-    persistence_integrity_test();
+    const bool persistence_ok = persistence_integrity_test();
 
     // 报告存储状态
     std::cout << "\n[Final Status]\n";
@@ -1079,7 +1079,13 @@ int main(int argc, char* argv[]) {
     std::cout << "  RDB total saves: " << stats.total_bgsave_calls.load() << "\n";
     std::cout << "  RDB total saved keys: " << stats.total_rdb_saved_keys.load() << "\n";
 
-    std::cout << "\n[Stress Test Completed Successfully]\n";
+    if (integrity_ok && persistence_ok) {
+        std::cout << "\n[Stress Test Completed Successfully]\n";
+        return 0;
+    }
 
-    return 0;
+    std::cout << "\n[Stress Test FAILED]"
+              << " data_integrity=" << (integrity_ok ? "ok" : "failed")
+              << " persistence_integrity=" << (persistence_ok ? "ok" : "failed") << "\n";
+    return 1;
 }
