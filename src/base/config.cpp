@@ -20,11 +20,13 @@ Config& Config::instance() {
 
 // 配置加载
 
-void Config::loadInternal() {
+bool Config::loadInternal() {
     std::ifstream file(config_file_);
     if (!file.is_open()) {
-        // 文件不存在，配置为空字典，稍后会用默认值
-        return;
+        // 打不开就是打不开，交给调用方决定是致命错误还是退回默认值——
+        // 旧代码在这里静默返回、load() 再恒返回 true，导致 main 里
+        // “配置文件加载失败”的分支永远走不到，拼错路径等于没配。
+        return false;
     }
 
     std::string line;
@@ -46,6 +48,7 @@ void Config::loadInternal() {
         }
     }
     file.close();
+    return true;
 }
 
 bool Config::load(const std::string& filename) {
@@ -54,7 +57,7 @@ bool Config::load(const std::string& filename) {
     config_file_ = filename;
     config_data_.clear();
 
-    loadInternal();
+    const bool loaded = loadInternal();
 
     // 设置日志默认值
     // 如果配置文件中没有指定，使用这些默认值
@@ -71,7 +74,7 @@ bool Config::load(const std::string& filename) {
         config_data_["log_max_files"] = "5";
     }
 
-    return true;
+    return loaded;
 }
 
 void Config::reload() {
