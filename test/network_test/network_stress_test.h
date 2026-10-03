@@ -38,7 +38,8 @@ public:
 
     NetworkStressTest(const Config& config) : config_(config), stats_(std::make_shared<Stats>()) {}
 
-    void run();
+    // 返回是否检测到响应错误或超出连接错误配额的失败请求，供调用方决定退出码。
+    bool run();
 
 private:
     void worker_thread(int thread_id);

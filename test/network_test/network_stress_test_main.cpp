@@ -117,12 +117,12 @@ int main(int argc, char* argv[]) {
 
     // Run the network stress test
     NetworkStressTest test(config);
-    test.run();
+    const bool issues = test.run();
 
     if (start_server_embedded) {
         stop_server(server_pid);
     }
 
     std::cout << "\nTest completed." << std::endl;
-    return 0;
+    return issues ? 1 : 0;
 }

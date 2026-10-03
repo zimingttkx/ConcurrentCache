@@ -51,6 +51,10 @@ add_executable(concurrentcache-v3-tests
     datatype_test/object_test.cpp
     persistence_test/rdb_test.cpp
     storage_test/storage_v3_test.cpp
+    # command_test.cpp 只提供 run_all_command_tests()，没有 main()，所以它是
+    # 编进这个 target 而不是单独成可执行文件；test_v3_main.cpp 里的调用暂时
+    # 还是注释状态（语义接线留到下一轮），这里先拿到编译覆盖。
+    command_test/command_test.cpp
 )
 
 # Atomic 测试
@@ -106,52 +110,66 @@ add_executable(cluster-tests
     cluster_test/cluster_test.cpp
 )
 
+# Cluster 复制测试（此前有独立 main() 但从未进入任何 target）
+add_executable(cluster-replication-tests
+    cluster_test/cluster_replication_test.cpp
+)
+
+# Cluster 严格断言测试（同上）
+add_executable(cluster-strict-tests
+    cluster_test/cluster_strict_test.cpp
+)
+
+# Lock 压力测试（同上）
+add_executable(lock-stress-tests
+    lock_test/lock_stress_test.cpp
+)
+
+# 所有测试可执行文件。链接、包含目录、编译选项、sanitizer 与 ctest 注册
+# 全部从这里派生，避免六份手写清单各自漂移。
+set(CC_TEST_TARGETS
+    concurrentcache-v3-tests
+    atomic-tests
+    lock-correctness-tests
+    lock-deadlock-tests
+    lock-race-tests
+    lock-boundary-tests
+    lock-stress-tests
+    sync-primitives-tests
+    stress-test
+    long-running-stress-test
+    load-limit-test
+    network-stress-test
+    cluster-tests
+    cluster-replication-tests
+    cluster-strict-tests
+)
+
 # ========== 链接公共源文件 ==========
-foreach(test_target concurrentcache-v3-tests atomic-tests lock-correctness-tests lock-deadlock-tests
-                  lock-race-tests lock-boundary-tests sync-primitives-tests
-                  stress-test long-running-stress-test load-limit-test network-stress-test
-                  cluster-tests)
+foreach(test_target ${CC_TEST_TARGETS})
     target_sources(${test_target} PRIVATE ${COMMON_SOURCES})
 endforeach()
 
 # ========== 设置包含目录 ==========
-foreach(test_target concurrentcache-v3-tests atomic-tests lock-correctness-tests
-                  lock-deadlock-tests lock-race-tests lock-boundary-tests
-                  sync-primitives-tests stress-test long-running-stress-test
-                  load-limit-test network-stress-test cluster-tests)
+foreach(test_target ${CC_TEST_TARGETS})
     target_include_directories(${test_target} PRIVATE ${TEST_INCLUDE_DIRS})
 endforeach()
 
 # ========== 链接库 ==========
 if(UNIX)
     find_package(ZLIB REQUIRED)
-    target_link_libraries(concurrentcache-v3-tests pthread ZLIB::ZLIB)
-    target_link_libraries(atomic-tests pthread ZLIB::ZLIB)
-    target_link_libraries(lock-correctness-tests pthread ZLIB::ZLIB)
-    target_link_libraries(lock-deadlock-tests pthread ZLIB::ZLIB)
-    target_link_libraries(lock-race-tests pthread ZLIB::ZLIB)
-    target_link_libraries(lock-boundary-tests pthread ZLIB::ZLIB)
-    target_link_libraries(sync-primitives-tests pthread ZLIB::ZLIB)
-    target_link_libraries(stress-test pthread ZLIB::ZLIB)
-    target_link_libraries(long-running-stress-test pthread ZLIB::ZLIB)
-    target_link_libraries(load-limit-test pthread ZLIB::ZLIB)
-    target_link_libraries(network-stress-test pthread ZLIB::ZLIB)
-    target_link_libraries(cluster-tests pthread ZLIB::ZLIB)
+    foreach(test_target ${CC_TEST_TARGETS})
+        target_link_libraries(${test_target} pthread ZLIB::ZLIB)
+    endforeach()
 endif()
 
 # ========== 编译选项 ==========
 if(MSVC)
-    foreach(test_target concurrentcache-v3-tests atomic-tests lock-correctness-tests
-                      lock-deadlock-tests lock-race-tests lock-boundary-tests
-                      sync-primitives-tests stress-test long-running-stress-test
-                      load-limit-test network-stress-test cluster-tests)
+    foreach(test_target ${CC_TEST_TARGETS})
         target_compile_options(${test_target} PRIVATE /W4)
     endforeach()
 else()
-    foreach(test_target concurrentcache-v3-tests atomic-tests lock-correctness-tests
-                      lock-deadlock-tests lock-race-tests lock-boundary-tests
-                      sync-primitives-tests stress-test long-running-stress-test
-                      load-limit-test network-stress-test cluster-tests)
+    foreach(test_target ${CC_TEST_TARGETS})
         target_compile_options(${test_target} PRIVATE
             -Wall -Wextra
             -Wconversion -Wshadow -Wsign-conversion -Wdouble-promotion)
@@ -160,39 +178,83 @@ endif()
 
 # ========== Sanitizer 标志 ==========
 if(ENABLE_ASAN)
-    foreach(test_target concurrentcache-v3-tests atomic-tests lock-correctness-tests
-                      lock-deadlock-tests lock-race-tests lock-boundary-tests
-                      sync-primitives-tests stress-test long-running-stress-test
-                      load-limit-test network-stress-test cluster-tests)
+    foreach(test_target ${CC_TEST_TARGETS})
         target_compile_options(${test_target} PRIVATE -fsanitize=address -fno-omit-frame-pointer)
         target_link_options(${test_target} PRIVATE -fsanitize=address -fno-omit-frame-pointer)
     endforeach()
 endif()
 
 if(ENABLE_TSAN)
-    foreach(test_target concurrentcache-v3-tests atomic-tests lock-correctness-tests
-                      lock-deadlock-tests lock-race-tests lock-boundary-tests
-                      sync-primitives-tests stress-test long-running-stress-test
-                      load-limit-test network-stress-test cluster-tests)
+    foreach(test_target ${CC_TEST_TARGETS})
         target_compile_options(${test_target} PRIVATE -fsanitize=thread -fno-omit-frame-pointer)
         target_link_options(${test_target} PRIVATE -fsanitize=thread -fno-omit-frame-pointer)
     endforeach()
 endif()
 
 if(ENABLE_UBSAN)
-    foreach(test_target concurrentcache-v3-tests atomic-tests lock-correctness-tests
-                      lock-deadlock-tests lock-race-tests lock-boundary-tests
-                      sync-primitives-tests stress-test long-running-stress-test
-                      load-limit-test network-stress-test cluster-tests)
+    foreach(test_target ${CC_TEST_TARGETS})
         target_compile_options(${test_target} PRIVATE -fsanitize=undefined -fno-omit-frame-pointer)
         target_link_options(${test_target} PRIVATE -fsanitize=undefined -fno-omit-frame-pointer)
     endforeach()
 endif()
 
 # ========== 测试 ==========
-enable_testing()
-add_test(NAME AtomicTests COMMAND atomic-tests)
-add_test(NAME LockCorrectnessTests COMMAND lock-correctness-tests)
-add_test(NAME LockDeadlockTests COMMAND lock-deadlock-tests)
-add_test(NAME LockRaceTests COMMAND lock-race-tests)
-add_test(NAME ClusterTests COMMAND cluster-tests)
+# enable_testing() 在根 CMakeLists.txt，否则 ctest --test-dir build 找不到测试。
+#
+# 注册表格式：名称|target|ctest LABELS|TIMEOUT(秒)
+#   gate     —— 必过门禁（ci.yml: ctest -L gate）
+#   contract —— 结果未知或断言正确语义，失败可见但不拦合并
+#   slow     —— 只在 daily.yml 跑
+# TIMEOUT 是硬要求：没有它的用例会一直挂到 GitHub 的 6 小时上限。
+set(CC_TESTS
+    "AtomicTests|atomic-tests|gate|60"
+    "SyncPrimitivesTests|sync-primitives-tests|gate|120"
+    "ClusterTests|cluster-tests|gate|60"
+    "LockCorrectnessTests|lock-correctness-tests|contract|120"
+    "LockDeadlockTests|lock-deadlock-tests|contract|120"
+    "LockRaceTests|lock-race-tests|contract|120"
+    "LockBoundaryTests|lock-boundary-tests|contract|120"
+    "V3Tests|concurrentcache-v3-tests|contract|600"
+    "ClusterReplicationTests|cluster-replication-tests|contract|120"
+    "ClusterStrictTests|cluster-strict-tests|contract|120"
+    "LockStressTests|lock-stress-tests|slow|300"
+    "StressTest|stress-test|slow|1800"
+    "LoadLimitTest|load-limit-test|slow|3600"
+    "LongRunningStressTest|long-running-stress-test|slow|7200"
+    "NetworkStressTest|network-stress-test|slow|900"
+)
+
+# 每个用例在自己的空目录里跑：stress 类会往工作目录写 persistence_test.rdb /
+# bgsave_dump.rdb，而仓库里已经有被跟踪的 dump.rdb，隔离后才能用 git diff
+# 检查测试有没有污染源码树。
+set(CC_TEST_RUN_DIR "${CMAKE_CURRENT_BINARY_DIR}/run")
+
+foreach(spec ${CC_TESTS})
+    string(REPLACE "|" ";" parts "${spec}")
+    list(GET parts 0 test_name)
+    list(GET parts 1 test_target)
+    list(GET parts 2 test_labels)
+    list(GET parts 3 test_timeout)
+
+    set(test_run_dir "${CC_TEST_RUN_DIR}/${test_name}")
+    file(MAKE_DIRECTORY "${test_run_dir}")
+
+    add_test(NAME ${test_name} COMMAND ${test_target})
+    set_tests_properties(${test_name} PROPERTIES
+        LABELS "${test_labels}"
+        TIMEOUT ${test_timeout}
+        WORKING_DIRECTORY "${test_run_dir}"
+    )
+endforeach()
+
+# network-stress-test 自己 fork 出并发服务器并占端口，不与其它用例并行。
+# 它用 execl("./concurrentcache-server") 相对工作目录找可执行文件，所以这里
+# 把它的 WORKING_DIRECTORY 指回 build/（该目录下没有 conf/，服务器会落到
+# main.cpp 的默认端口 6379，与 network_stress_test.h 的探测端口一致）。
+set_tests_properties(NetworkStressTest PROPERTIES
+    RESOURCE_LOCK "cc_server_port"
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+)
+
+# command_test.cpp 不在这里注册：它没有 main()，作为 concurrentcache-v3-tests
+# 的源文件参与编译，调用点在 test_v3_main.cpp 里仍是注释状态。

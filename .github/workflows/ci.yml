@@ -42,6 +42,68 @@ jobs:
           path: build/concurrentcache-server
           retention-days: 1
 
+  # 每个 job 自己 configure + build（Redis 的 ci.yml 也是这个形状）：用
+  # artifact 传 16 个测试二进制比重编更脆，而且墙钟时间差别不大。
+  gate:
+    name: gate-tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential zlib1g-dev
+
+      - name: Configure and build
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+          cmake --build build --target atomic-tests sync-primitives-tests cluster-tests --parallel "$(nproc)"
+
+      # -j1：rdb_test 用固定的 /tmp/test_rdb_*.rdb，且 GlobalStorage /
+      # RdbPersistence / ClusterServer 都是单例，并行必互踩。
+      - name: Run gate tests
+        run: ctest --test-dir build -L gate --output-on-failure -j1
+
+  contract:
+    name: contract-tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential zlib1g-dev
+
+      - name: Configure and build
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+          cmake --build build --parallel "$(nproc)"
+
+      # 不拦合并：这一层跑的是"结果还没人知道"的测试，第一次跑才知道真相。
+      # pipefail 保证 ctest 的失败不被 tee 吞掉，作业状态才是真的。
+      - name: Run contract tests
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          ctest --test-dir build -L contract --output-on-failure -j1 | tee contract.log
+
+      - name: Summarize
+        run: |
+          {
+            echo "### contract 层（可见不拦）"
+            grep -E "tests passed|tests failed" contract.log || echo "见上方日志"
+            echo
+            echo "某项连续绿之后，把 test/CMakeLists.txt 注册表里它的标签改成 gate 即完成收紧。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # .dockerignore 排除了 test/，而 add_subdirectory(test) 曾是无条件的，
   # 导致 docker build 在 configure 阶段失败。这个 job 就是那条回归的哨兵。
   docker:
