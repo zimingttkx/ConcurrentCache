@@ -8,6 +8,7 @@
 #include <future>
 #include <sstream>
 #include <string>
+#include <utility>
 
 #include "trace/trace_logger.h"
 #include "trace/trace_analyzer.h"
@@ -530,7 +531,10 @@ public:
 
 private:
     void thread_loop(int thread_id) {
-        std::vector<void*> allocations;
+        // (ptr, size) 成对记录：MemoryPool 靠 size 反推 size class，用
+        // deallocate(ptr, 128) 释放 size∈[8,256] 的块会把小对象挂进 128 的
+        // 空闲链，下一次按 128 交付出去就是越界写。
+        std::vector<std::pair<void*, size_t>> allocations;
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_int_distribution<> size_dist(8, 256);
@@ -540,14 +544,14 @@ private:
             void* ptr = MemoryPool::allocate(size);
 
             if (ptr != nullptr) {
-                allocations.push_back(ptr);
+                allocations.emplace_back(ptr, size);
                 total_allocated_++;
                 active_allocs_++;
             }
         }
 
-        for (void* ptr : allocations) {
-            MemoryPool::deallocate(ptr, 128);
+        for (const auto& alloc : allocations) {
+            MemoryPool::deallocate(alloc.first, alloc.second);
             total_freed_++;
             active_allocs_--;
         }
@@ -595,7 +599,8 @@ public:
 
 private:
     void stress_loop(int thread_id) {
-        std::vector<void*> allocations;
+        // 同上：释放必须带回分配时的 size。
+        std::vector<std::pair<void*, size_t>> allocations;
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_int_distribution<> size_dist(8, 1024);
@@ -608,16 +613,16 @@ private:
                 size_t size = size_dist(gen);
                 void* ptr = MemoryPool::allocate(size);
                 if (ptr) {
-                    allocations.push_back(ptr);
+                    allocations.emplace_back(ptr, size);
                     alloc_count_++;
                     live_count_++;
                 }
             } else {
                 size_t idx = allocations.size() - 1;
-                void* ptr = allocations[idx];
+                const auto alloc = allocations[idx];
                 allocations.pop_back();
 
-                MemoryPool::deallocate(ptr, 128);
+                MemoryPool::deallocate(alloc.first, alloc.second);
                 free_count_++;
                 live_count_--;
             }
@@ -625,8 +630,8 @@ private:
             std::this_thread::sleep_for(std::chrono::microseconds(100));
         }
 
-        for (void* ptr : allocations) {
-            MemoryPool::deallocate(ptr, 128);
+        for (const auto& alloc : allocations) {
+            MemoryPool::deallocate(alloc.first, alloc.second);
             free_count_++;
             live_count_--;
         }

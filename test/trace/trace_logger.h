@@ -11,6 +11,7 @@
 #include <iomanip>
 #include <functional>
 #include <thread>
+#include <unordered_map>
 
 namespace cc_server {
 namespace testing {
