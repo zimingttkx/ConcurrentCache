@@ -179,8 +179,8 @@ inline void expect_false(bool condition, const char* condition_str,
     }
 }
 
-template<typename T>
-void expect_eq(const T& actual, const T& expected,
+template<typename A, typename B>
+void expect_eq(const A& actual, const B& expected,
                const char* actual_str, const char* expected_str,
                const char* file, int line) {
     cc_server::testing::g_test_stats().total_tests++;
@@ -197,8 +197,8 @@ void expect_eq(const T& actual, const T& expected,
     }
 }
 
-template<typename T>
-void expect_ne(const T& actual, const T& expected,
+template<typename A, typename B>
+void expect_ne(const A& actual, const B& expected,
                const char* actual_str, const char* expected_str,
                const char* file, int line) {
     cc_server::testing::g_test_stats().total_tests++;
@@ -214,8 +214,8 @@ void expect_ne(const T& actual, const T& expected,
     }
 }
 
-template<typename T>
-void expect_lt(const T& actual, const T& expected,
+template<typename A, typename B>
+void expect_lt(const A& actual, const B& expected,
                const char* actual_str, const char* expected_str,
                const char* file, int line) {
     cc_server::testing::g_test_stats().total_tests++;
@@ -232,8 +232,8 @@ void expect_lt(const T& actual, const T& expected,
     }
 }
 
-template<typename T>
-void expect_gt(const T& actual, const T& expected,
+template<typename A, typename B>
+void expect_gt(const A& actual, const B& expected,
                const char* actual_str, const char* expected_str,
                const char* file, int line) {
     cc_server::testing::g_test_stats().total_tests++;
@@ -250,8 +250,8 @@ void expect_gt(const T& actual, const T& expected,
     }
 }
 
-template<typename T>
-void expect_le(const T& actual, const T& expected,
+template<typename A, typename B>
+void expect_le(const A& actual, const B& expected,
                const char* actual_str, const char* expected_str,
                const char* file, int line) {
     cc_server::testing::g_test_stats().total_tests++;
@@ -268,8 +268,8 @@ void expect_le(const T& actual, const T& expected,
     }
 }
 
-template<typename T>
-void expect_ge(const T& actual, const T& expected,
+template<typename A, typename B>
+void expect_ge(const A& actual, const B& expected,
                const char* actual_str, const char* expected_str,
                const char* file, int line) {
     cc_server::testing::g_test_stats().total_tests++;
@@ -355,8 +355,8 @@ inline bool assert_false(bool condition, const char* condition_str,
     }
 }
 
-template<typename T>
-bool assert_eq(const T& actual, const T& expected,
+template<typename A, typename B>
+bool assert_eq(const A& actual, const B& expected,
                const char* actual_str, const char* expected_str,
                const char* file, int line) {
     cc_server::testing::g_test_stats().total_tests++;
@@ -376,8 +376,8 @@ bool assert_eq(const T& actual, const T& expected,
     }
 }
 
-template<typename T>
-bool assert_ne(const T& actual, const T& expected,
+template<typename A, typename B>
+bool assert_ne(const A& actual, const B& expected,
                const char* actual_str, const char* expected_str,
                const char* file, int line) {
     cc_server::testing::g_test_stats().total_tests++;
@@ -449,8 +449,10 @@ private:
 #define TEST_SUITE(suite_name) \
     cc_server::testing::TestSuite suite_instance(suite_name)
 
+// [&] 而不是 []：lambda 由 run() 同步执行，按引用捕获是安全的；没有捕获时
+// 测试函数里的局部变量（端口、fixture 等）根本进不来。
 #define RUN_TEST(test_name) \
-    suite_instance.run(#test_name, []()
+    suite_instance.run(#test_name, [&]()
 
 } // namespace testing
 } // namespace cc_server
