@@ -53,7 +53,7 @@
 | LABEL | 跑在哪 | 拦不拦合并 |
 |-------|--------|------------|
 | `gate` | `ci.yml` 的 `gate-tests`、`asan-smoke` | 拦（required status check） |
-| `contract` | `ci.yml` 的 `contract-tests`（`continue-on-error`） | 不拦，但必须可见 |
+| `contract` | `ci.yml` 的 `contract-tests`（不在 required 列表里） | 不拦，但必须可见 |
 | `slow` | `daily.yml` | 不拦 |
 
 收紧只有一个动作：某项在 `contract` 里连续绿，就把 `test/CMakeLists.txt` 注册表里它的标签改成 `gate`。反向不成立——把一个会红的用例放进 `gate` 会立刻拦停 PR。

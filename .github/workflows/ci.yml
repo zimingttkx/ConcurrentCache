@@ -96,6 +96,9 @@ jobs:
         run: ctest --test-dir build -L gate --output-on-failure -j1
 
   # 不拦合并：这一层跑"结果还没人知道"或"断言正确语义而产品尚不满足"的用例。
+  # 拦不拦由分支保护规则决定（这个 job 不在 required 列表里），不靠 workflow 里
+  # 写 continue-on-error —— 那样 check 名永远显示 pass，这一层唯一的存在意义（把红
+  # 显示出来）就没了。#19 那轮 ctest 退出码 8、3 个用例失败，check 却报 pass。
   # pipefail 保证 ctest 的失败不被 tee 吞掉。
   contract:
     name: contract-tests
@@ -117,12 +120,12 @@ jobs:
           cmake --build build --parallel "$(nproc)"
 
       - name: Run contract tests
-        continue-on-error: true
         run: |
           set -o pipefail
           ctest --test-dir build -L contract --output-on-failure -j1 | tee contract.log
 
       - name: Summarize
+        if: always()
         run: |
           {
             echo "### contract 层（可见不拦）"
