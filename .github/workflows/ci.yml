@@ -88,7 +88,14 @@ jobs:
       - name: Configure and build
         run: |
           cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
-          cmake --build build --target atomic-tests sync-primitives-tests cluster-tests --parallel "$(nproc)"
+          # 构建全部 target，不要退回"只列几个测试二进制"。
+          #
+          # 这里以前写死 `--target atomic-tests sync-primitives-tests cluster-tests`，
+          # 而用例归属哪个层是 test/CMakeLists.txt 里的 CC_TESTS 注册表决定的：把
+          # V3Tests / Lock* 从 contract 收紧到 gate 之后，这个 job 根本没有编译它们，
+          # ctest -L gate 就报 "***Not Run"、退出码 8（#41 第一次跑就是这样红的）。
+          # 一份知识不能有两处真相：labels 是唯一事实来源，构建步骤跟着它走。
+          cmake --build build --parallel "$(nproc)"
 
       # -j1：rdb_test 用固定的 /tmp/test_rdb_*.rdb，且 GlobalStorage /
       # RdbPersistence / ClusterServer 都是单例，并行必互踩。
