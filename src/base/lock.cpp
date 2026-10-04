@@ -572,7 +572,14 @@ int CountDownLatch::count() const {
 
 // CyclicBarrier 实现
 CyclicBarrier::CyclicBarrier(int parties)
-    : parties_(parties), count_(parties), generation_(0) {}
+    : parties_(parties < 1 ? 1 : parties),
+      count_(parties < 1 ? 1 : parties),
+      generation_(0) {
+    // parties <= 0 不是合法参数。以前直接照存，于是 count_ 起点是 0 或负数，
+    // wait() 里 --count_ 得到 -1（或更小），"index == 0" 永远不成立，
+    // 所有参与者一起挂在 cv 上 —— 一个构造参数就能造出无法诊断的死锁。
+    // 夹到 1：单方栅栏的语义就是"到了就走"。
+}
 
 int CyclicBarrier::wait() {
     std::unique_lock<std::mutex> lock(mutex_);
@@ -607,7 +614,11 @@ int CyclicBarrier::waiting() const {
 // ShardedLock 实现
 template<typename LockType>
 ShardedLock<LockType>::ShardedLock(size_t num_shards)
-    : shards_(num_shards), num_shards_(num_shards) {}
+    : shards_(num_shards == 0 ? 1 : num_shards),
+      num_shards_(num_shards == 0 ? 1 : num_shards) {
+    // num_shards == 0 时 get_shard() 要算 hash % 0（整数除零 → SIGFPE），
+    // 而且 shards_ 是空的，取任何下标都越界。一个构造参数就能崩进程。
+}
 
 template<typename LockType>
 LockType& ShardedLock<LockType>::get_shard(const std::string& key) {
@@ -636,7 +647,8 @@ template class ShardedLock<Mutex>;
 
 // ShardedRWLock 实现
 ShardedRWLock::ShardedRWLock(size_t num_shards)
-    : shards_(num_shards), num_shards_(num_shards) {}
+    : shards_(num_shards == 0 ? 1 : num_shards),
+      num_shards_(num_shards == 0 ? 1 : num_shards) {}
 
 RWLock& ShardedRWLock::get_shard(const std::string& key) {
     size_t hash = std::hash<std::string>{}(key);

@@ -737,10 +737,47 @@ void run_thread_pool_tests() {
     TraceLogger::instance().flush_and_close();
 }
 
+// 构造参数不该把进程搞崩：0 分片会让 get_shard() 算 hash % 0（整数除零是
+// SIGFPE），parties <= 0 的 CyclicBarrier 因为 --count_ 得到 -1 而永远不触发，
+// 所有参与者一起挂在条件变量上。
+static void test_lock_construction_edge_cases() {
+    TEST_SUITE("锁原语构造边界");
+
+    ShardedLock<Mutex> one(0);
+    EXPECT_EQ(one.num_shards(), static_cast<size_t>(1));
+    EXPECT_EQ(&one.get_shard(std::string("edge_key")), &one.get_shard(std::string("edge_key")));
+    {
+        std::lock_guard<Mutex> guard(one.get_shard(std::string("edge_key")));
+    }
+
+    ShardedRWLock rw(0);
+    EXPECT_EQ(rw.num_shards(), static_cast<size_t>(1));
+    EXPECT_EQ(&rw.get_shard(std::string("k")), &rw.get_shard(std::string("k")));
+
+    // 修之前这两行会永久阻塞（ctest 靠 TIMEOUT 判失败，本地靠 timeout 包装）
+    CyclicBarrier zero_party(0);
+    EXPECT_EQ(zero_party.wait(), 0);
+    CyclicBarrier negative(-3);
+    EXPECT_EQ(negative.wait(), 0);
+
+    // 夹到 1 之后正常语义必须还在：两方栅栏要等第二方到达才返回
+    CyclicBarrier two(2);
+    std::atomic<int> returned{0};
+    std::thread a([&]() { two.wait(); returned.fetch_add(1); });
+    std::thread b([&]() { two.wait(); returned.fetch_add(1); });
+    a.join();
+    b.join();
+    EXPECT_EQ(returned.load(), 2);
+}
+
 void run_lock_tests() {
     std::cout << "\n========================================\n";
     std::cout << "          Lock Concurrency Tests\n";
     std::cout << "========================================\n\n";
+
+    std::cout << "[Test 0] Lock construction edge cases\n";
+    test_lock_construction_edge_cases();
+    std::cout << "\n";
 
     TraceLogger::instance().initialize("lock_test");
 
