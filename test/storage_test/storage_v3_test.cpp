@@ -540,6 +540,31 @@ void test_log_sink_path_is_not_a_shell_command() {
     std::remove(marker.c_str());
 }
 
+// log_level 的两种词法：conf 里是数字，热加载回调以前只认名字。
+// 两边读同一个键，就必须用同一个解析器，且认不出来要说出来而不是默默沿用旧值。
+void test_log_level_parsing() {
+    TEST_SUITE("log_level 词法");
+
+    LogLevel lvl = LogLevel::INFO;
+    EXPECT_TRUE(parse_log_level("4", lvl));
+    EXPECT_TRUE(lvl == LogLevel::ERROR);
+    EXPECT_TRUE(parse_log_level("0", lvl));
+    EXPECT_TRUE(lvl == LogLevel::TRACE);
+    EXPECT_TRUE(parse_log_level("5", lvl));
+    EXPECT_TRUE(lvl == LogLevel::FATAL);
+
+    EXPECT_TRUE(parse_log_level("info", lvl));
+    EXPECT_TRUE(lvl == LogLevel::INFO);
+    EXPECT_TRUE(parse_log_level(" WARN ", lvl));   // 大小写与空白
+    EXPECT_TRUE(lvl == LogLevel::WARN);
+
+    // 认不出来的必须报 false，而不是悄悄退回某个默认值
+    EXPECT_TRUE(!parse_log_level("9", lvl));       // 越界
+    EXPECT_TRUE(!parse_log_level("3x", lvl));      // 半截数字
+    EXPECT_TRUE(!parse_log_level("verbose", lvl)); // 不是这六个名字
+    EXPECT_TRUE(!parse_log_level("", lvl));
+}
+
 void run_all_storage_tests() {
     std::cout << "\n========================================\n";
     std::cout << "Running GlobalStorage V3 Tests\n";
@@ -559,6 +584,7 @@ void run_all_storage_tests() {
     test_storage_multiple_datatypes();
     test_storage_get_all_objects();
     test_log_sink_path_is_not_a_shell_command();
+    test_log_level_parsing();
 
     std::cout << "\n========================================\n";
     std::cout << "All GlobalStorage V3 Tests Passed!\n";

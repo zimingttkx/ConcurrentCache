@@ -130,9 +130,28 @@ int main(int argc, char* argv[]) {
     std::cout << "[主线程] 配置系统初始化完成" << std::endl;
 
     // 3. 初始化日志系统
-    int log_level = Config::instance().getInt("log_level", 1);
-    Logger::instance().setLevel(static_cast<LogLevel>(log_level));
-    std::cout << "[主线程] 日志系统初始化完成 (级别: " << log_level << ")" << std::endl;
+    // log_level 这个词法必须和热加载路径一致：Config 里存的是字符串，conf 写的是
+    // 数字（log_level = 4），以前 main 用 getInt 读、onConfigChange 只认名字，
+    // 两边读同一个键却互不兼容。
+    LogLevel log_level = LogLevel::DEBUG;
+    const std::string level_text = Config::instance().getString("log_level", "1");
+    if (!parse_log_level(level_text, log_level)) {
+        std::cerr << "[主线程] 无法识别的 log_level: \"" << level_text
+                  << "\"，退回默认级别 DEBUG" << std::endl;
+    }
+    Logger::instance().setLevel(log_level);
+
+    // Config 早就把 log_file 的默认值塞进配置表了，但 Logger::setFile() 从来没被
+    // 调用过 —— 配置文件承诺写文件日志，实际只出控制台，setFile/rotate/cleanup
+    // 一整条路径都是死代码。这里接上。
+    const std::string log_file = Config::instance().getString("log_file", "");
+    if (!log_file.empty()) {
+        const long long max_bytes = Config::instance().getInt("log_max_size", 104857600);
+        Logger::instance().setRotation(max_bytes > 0 ? static_cast<size_t>(max_bytes) : 104857600, 5);
+        Logger::instance().setFile(log_file);
+    }
+    std::cout << "[主线程] 日志系统初始化完成 (级别: " << level_text << ", 输出: "
+              << (log_file.empty() ? "仅控制台" : log_file) << ")" << std::endl;
 
     // 4. 获取配置参数（默认使用 CPU 核心数）
     int port = Config::instance().getInt("port", 6379);

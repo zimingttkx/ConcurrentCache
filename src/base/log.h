@@ -185,6 +185,17 @@ enum class LogLevel {
     FATAL   // 新增：致命错误
 };
 
+/**
+ * @brief 解析 log_level 的取值：六个名字（大小写不敏感）或 0..5 的数字
+ *
+ * conf 里这个键历史上写的是数字（log_level = 4），main.cpp 用 getInt 读；而热加载
+ * 回调 onConfigChange 只认名字。同一个键两套词法，结果是热加载时对 "4" 一声不响
+ * 地什么都不做。
+ *
+ * @return false 表示无法识别，调用方应保留原级别并告警，不能静默按默认值走。
+ */
+bool parse_log_level(const std::string& text, LogLevel& out);
+
 // Logger 主类
 /**
  * @brief Logger 类 - 全局日志记录器（单例模式）
