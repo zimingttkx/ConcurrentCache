@@ -225,7 +225,8 @@ endif()
 
 if(ENABLE_UBSAN)
     foreach(test_target ${CC_TEST_TARGETS})
-        target_compile_options(${test_target} PRIVATE -fsanitize=undefined -fno-omit-frame-pointer)
+        # 与顶层一致：可恢复的 UBSan 只打印、进程退 0，测试全绿也说明不了什么。
+        target_compile_options(${test_target} PRIVATE -fsanitize=undefined -fno-omit-frame-pointer -fno-sanitize-recover=all)
         target_link_options(${test_target} PRIVATE -fsanitize=undefined -fno-omit-frame-pointer)
     endforeach()
 endif()

@@ -134,7 +134,9 @@ if(ENABLE_TSAN)
 endif()
 
 if(ENABLE_UBSAN)
-    target_compile_options(concurrentcache-server PRIVATE -fsanitize=undefined -fno-omit-frame-pointer)
+    # -fno-sanitize-recover=all：UBSan 默认是"打印后继续"，进程照样退 0，于是
+    # daily 的 sanitizer-undefined 矩阵项只能靠崩溃变红——未定义行为发生了也绿。
+    target_compile_options(concurrentcache-server PRIVATE -fsanitize=undefined -fno-omit-frame-pointer -fno-sanitize-recover=all)
     target_link_options(concurrentcache-server PRIVATE -fsanitize=undefined -fno-omit-frame-pointer)
 endif()
 

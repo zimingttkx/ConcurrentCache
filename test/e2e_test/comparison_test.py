@@ -1444,10 +1444,21 @@ async def main():
         report.memory = await mem_tester.run()
 
         # ── 生成最终报告 ──
-        _generate_final_report(report)
+        cc_func_deviations = _generate_final_report(report)
 
     finally:
         server_mgr.stop_all()
+
+    # 报告里每条 ✓/✗ 都只是打印。退出码恒为 0 的话，daily 的 "Compare against
+    # Redis" 就永远绿，行为真的偏离 Redis 也看不出区别。
+    #
+    # 只把"功能正确性"这一组当硬约束：极限/鲁棒那组量的是吞吐与错误率，随机器
+    # 负载浮动，把它做成红等于重演 #49 里"把排程巧合当不变量"的错误。
+    if cc_func_deviations:
+        print(f"\n  ✗ 与 Redis 行为不符的功能用例 {len(cc_func_deviations)} 条：")
+        for _name in cc_func_deviations:
+            print(f"      - {_name}")
+        return 1
 
     return 0
 
@@ -1551,6 +1562,10 @@ def _generate_final_report(report: ComparisonReport):
     }
     report_path.write_text(json.dumps(report_data, indent=2, ensure_ascii=False))
     print(f"\n  详细 JSON 报告: {report_path}")
+
+    # 把"我们这边行为不符"的功能用例交回给 main 去决定退出码。报告里的 ✓/✗
+    # 只是打印，谁都看不到。
+    return [t.name for t in func_tests if not t.cc_pass]
 
 
 if __name__ == "__main__":
