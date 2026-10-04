@@ -422,8 +422,10 @@ void ClusterConnection::unregister_link_from_loop(ClusterLink* link) {
         return;
     }
 
-    int fd = link->fd();
-
+    // 必须用 registered_fd()：这条路径是在 ClusterLink::disconnect_and_notify 的断开
+    // 回调里跑的，那时 fd_ 已经被置成 -1，拿 -1 去 find 永远不命中，Channel 就既不
+    // 从 epoll 摘除也不 delete。
+    int fd = link->registered_fd();
     Channel* channel = nullptr;
     {
         std::lock_guard<std::mutex> lock(channel_mutex_);

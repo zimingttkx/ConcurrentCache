@@ -277,7 +277,8 @@ void ClusterBus::remove_link(const std::string& node_name) {
         auto it = links_.find(node_name);
         if (it != links_.end()) {
             // 先保存 fd，但不要获取 link 指针（因为马上要销毁）
-            fd_to_remove = it->second->fd();
+            // registered_fd() 而不是 fd()：本函数由断开回调触发，那时 fd_ 已经是 -1
+            fd_to_remove = it->second->registered_fd();
             links_.erase(it);
             // ClusterLink 在这里被销毁
         }
@@ -350,7 +351,7 @@ void ClusterBus::unregister_link_from_loop(ClusterLink* link) {
         return;
     }
 
-    int fd = link->fd();
+    int fd = link->registered_fd();  // 同上：断开回调里 fd_ 已是 -1
     Channel* channel = nullptr;
 
     // Find and remove channel from our map

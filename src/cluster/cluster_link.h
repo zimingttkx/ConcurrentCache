@@ -78,7 +78,7 @@ public:
     // 连接管理
     bool connect();                      // 主动连接对端
     void disconnect();                   // 断开连接
-    void set_fd(int fd) { fd_ = fd; connected_.store(true); }  // 直接设置fd（入站连接用）
+    void set_fd(int fd) { fd_ = fd; registered_fd_ = fd; connected_.store(true); }  // 直接设置fd（入站连接用）
     [[nodiscard]] bool is_connected() const { return connected_.load(); }
 
     // 断开并通知（修复 P0-2 UAF）：
@@ -109,6 +109,16 @@ public:
     [[nodiscard]] int port() const { return port_; }
     [[nodiscard]] int fd() const { return fd_; }
 
+    /// @brief 这条链路当初登记进 EventLoop 时用的 fd，断开后仍然有效。
+    ///
+    /// Channel 是按"注册那一刻的 fd"存进 link_channels_ 的，而 disconnect 会把
+    /// fd_ 置成 -1。断开回调里注销 Channel 时如果再去读 link->fd()，拿到的是 -1，
+    /// `link_channels_.find(-1)` 必然未命中 —— 那条 Channel 既不会从 epoll 摘除，
+    /// 也不会被 delete：留在 EventLoop::channels_ 里指向一个已经关掉的 fd，并且等
+    /// 这个号码被下一条链路复用时，update_channel 走 EPOLL_CTL_MOD 拿到 ENOENT，
+    /// 新链路就永远进不了 epoll，那个节点的 gossip/复制静默停摆。
+    [[nodiscard]] int registered_fd() const { return registered_fd_; }
+
     // 回调设置
     void set_msg_callback(MsgCallback cb) { msg_callback_ = std::move(cb); }
     void set_disconnect_callback(DisconnectCallback cb) { disconnect_callback_ = std::move(cb); }
@@ -117,10 +127,15 @@ public:
     void update_last_recv_time();
     [[nodiscard]] int64_t last_recv_time() const { return last_recv_time_.load(); }
 
-    // 半帧停留检测（滴包防护，理由见 kPartialFrameTimeoutMs 的注释）。
-    // 时钟由调用方传入，测试可以自己推进。
-    [[nodiscard]] bool partial_frame_stale(uint64_t now_ms) const;
+    // 半帧停留检测（滴包防护，理由见 kPartialFrameGraceMs 的注释）。
+    // 记账与判过期是同一个函数，production（handle_read）与测试走的是同一条路，
+    // 所以"超时真的会把链路断掉"这件事是可证的；时钟由调用方传入。
+    bool partial_frame_expired(uint32_t declared_len, size_t buffered, uint64_t now_ms);
     [[nodiscard]] static uint64_t steady_now_ms();
+
+    /// @brief 测试接缝：把这一帧的起算时刻往前挪，用来在没有真实几百秒的情况下
+    /// 驱动 handle_read 里的超时断链分支（与 set_fd 同一性质）。
+    void set_partial_frame_start_for_test(uint64_t started_ms);
 
 private:
     // 完整读取一个消息
@@ -160,17 +175,34 @@ private:
     /// 并不存在的长度去读参数区。
     bool frame_invalid_ = false;
 
-    /// @brief 一帧从"第一次出现残缺"起允许停留多久，超时即断链。
+    /// @brief 半帧允许停留多久：固定宽限 + 按声明长度折算的最低传输速率。
     ///
     /// 空闲检测（last_recv_time_ + ping_timeout）挡不住滴包：对端先送一个 length =
     /// kMaxPacketBytes-1 的合法帧头，之后每 10 秒滴 1 个字节——每个字节都会刷新
     /// last_recv_time_，于是超时永远不触发，而这条链路的接收缓冲一路涨到接近 256MB，
-    /// 总线链路数又不设上限，是一个不做认证的远程内存放大。这里量的是同一帧停留了
-    /// 多久，与流量无关，滴包照样在 30 秒后被切断。
-    static constexpr uint64_t kPartialFrameTimeoutMs = 30000;
+    /// 总线链路数又不设上限。
+    ///
+    /// 只给一个固定值（比如 30 秒）会误杀慢链路：kMaxPacketBytes 之所以留那么大，
+    /// 就是因为大 value 的复制帧走的是同一条总线（见上面的注释）。所以期限里加上
+    /// "按声明长度折算的时间"，下限速率取 1MB/s——任何真实链路都比它快，而"每 10 秒
+    /// 滴 1 字节"要凑完 256MB 需要几十年，一定超。
+    static constexpr uint64_t kPartialFrameGraceMs = 10000;
+    static constexpr uint64_t kPartialFrameMinBytesPerSec = 1024ull * 1024ull;
 
-    /// @brief 当前这帧第一次残缺的时刻（steady_clock 毫秒），0 表示没有半帧挂着。
+    /// @brief 当前半帧第一次出现/最近一次进展的时刻（steady_clock 毫秒），0 表示没有半帧挂着。
     uint64_t partial_frame_since_ms_ = 0;
+
+    /// @brief 上次记账时缓冲里已有多少字节，用来区分"换了一帧"与"同一帧还在长"。
+    size_t partial_frame_bytes_ = 0;
+
+    /// @brief 上次记账时那一帧声明的长度；变了就说明是另一条帧，重新起算。
+    uint32_t partial_frame_declared_ = 0;
+
+    /// @brief 清掉半帧记账（帧凑齐、帧换了、或没有半帧挂着时）。
+    void reset_partial_frame_accounting();
+
+    /// @brief 这条链路当初登记进 EventLoop 的 fd；断开后 fd_ 变 -1，它仍然有效。
+    int registered_fd_ = -1;
 };
 
 } // namespace cc_server
