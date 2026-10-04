@@ -12,12 +12,8 @@
 
 # 复制写白名单里有、但 CommandFactory 并没有注册的命令。
 # 对应产品缺陷：INCRBY/DECRBY 实际不存在，白名单是死条目。
-gap|write-command-not-registered:incrby|src/network/sub_reactor.cpp:118 白名单含 incrby，CommandFactory 无此注册
-gap|write-command-not-registered:decrby|src/network/sub_reactor.cpp:118 白名单含 decrby，CommandFactory 无此注册
-
-# 已注册、但既不在写白名单也不在读清单里的命令 —— 副本可以本地执行它且主节点不复制，
-# 对应"RESTORE 不在复制表中导致主从发散"这条缺陷。
-gap|unclassified-command:restore|src/command/command_factory.cpp:82 注册了 restore，但 sub_reactor.cpp:116-126 的写白名单没有它
+# 已修复：INCRBY/DECRBY 现在真的注册了（src/command/string_cmd.h 的
+# IncrbyCommand/DecrbyCommand），RESTORE 已归入写白名单。棘轮在这里少了两行。
 
 # 这些测试源文件照着旧 API/旧可见性写的，接进构建只会得到编译错误，
 # 需要先重写而不是接线；重写一个删一行。

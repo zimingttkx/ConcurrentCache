@@ -117,6 +117,42 @@ void run_type_contract_tests(int port) {
         EXPECT_TRUE(!reply.nil);
         EXPECT_EQ(reply.str, std::string("keepme"));
     });
+
+    // INCRBY / DECRBY 在这之前只存在于复制写白名单里，CommandFactory 从来没注册
+    // 它们 —— 客户端发过去得到的是 "unknown command"。
+    RUN_TEST(incrby_and_decrby_behave_like_redis) {
+        RespClient client = connected_client(port);
+        Reply reply;
+
+        EXPECT_TRUE(do_cmd(client, {"DEL", "ib_key"}, reply));
+        // 键不存在时从 0 起算
+        EXPECT_TRUE(do_cmd(client, {"INCRBY", "ib_key", "7"}, reply));
+        EXPECT_EQ(reply.integer, 7LL);
+        EXPECT_TRUE(do_cmd(client, {"INCRBY", "ib_key", "-2"}, reply));
+        EXPECT_EQ(reply.integer, 5LL);
+        EXPECT_TRUE(do_cmd(client, {"DECRBY", "ib_key", "3"}, reply));
+        EXPECT_EQ(reply.integer, 2LL);
+
+        // delta 不是整数 → 报错，且不能把键改成 0
+        EXPECT_TRUE(do_cmd(client, {"SET", "ib_key", "42"}, reply));
+        EXPECT_TRUE(do_cmd(client, {"INCRBY", "ib_key", "not_a_number"}, reply));
+        EXPECT_TRUE(reply.is_error());
+        EXPECT_TRUE(do_cmd(client, {"GET", "ib_key"}, reply));
+        EXPECT_EQ(reply.str, std::string("42"));
+
+        // 值是字符串但不是整数 → not an integer，而不是 WRONGTYPE
+        EXPECT_TRUE(do_cmd(client, {"SET", "sb_key", "abc"}, reply));
+        EXPECT_TRUE(do_cmd(client, {"INCRBY", "sb_key", "1"}, reply));
+        EXPECT_TRUE(reply.is_error());
+        EXPECT_TRUE(!reply.starts_with("WRONGTYPE"));
+
+        // 哈希键 → WRONGTYPE，且哈希不能被毁掉
+        EXPECT_TRUE(do_cmd(client, {"HSET", "hb_key", "f", "keepme"}, reply));
+        EXPECT_TRUE(do_cmd(client, {"INCRBY", "hb_key", "1"}, reply));
+        EXPECT_TRUE(reply.starts_with("WRONGTYPE"));
+        EXPECT_TRUE(do_cmd(client, {"HGET", "hb_key", "f"}, reply));
+        EXPECT_EQ(reply.str, std::string("keepme"));
+    });
 }
 
 // TTL 契约：EXPIRE/PERSIST 必须真的改写那份唯一真相源

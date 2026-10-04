@@ -28,6 +28,8 @@ namespace cc_server {
         register_command("del", std::make_unique<DelCommand>());
         register_command("incr", std::make_unique<IncrCommand>());
         register_command("decr", std::make_unique<DecrCommand>());
+        register_command("incrby", std::make_unique<IncrbyCommand>());
+        register_command("decrby", std::make_unique<DecrbyCommand>());
         register_command("exists", std::make_unique<ExistsCommand>());
         register_command("ping", std::make_unique<PingCommand>());
         register_command("expire", std::make_unique<ExpireCommand>());

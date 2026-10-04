@@ -113,6 +113,9 @@ void SubReactor::join_thread() {
                        [](unsigned char c){ return std::tolower(c); });
 
         // 检查是否是写命令
+        // 这份名单必须覆盖所有会改数据的注册命令：漏一条，主节点就不会把它推进
+        // 复制缓冲区，副本从此与主节点发散（consistency 作业会比对
+        // command-table-probe 给出的真实注册集，漏了就直接红）。
         bool is_write_command = (cmd_name == "set" || cmd_name == "del" ||
                                   cmd_name == "incr" || cmd_name == "decr" ||
                                   cmd_name == "incrby" || cmd_name == "decrby" ||
@@ -122,6 +125,7 @@ void SubReactor::join_thread() {
                                   cmd_name == "sadd" || cmd_name == "spop" ||
                                   cmd_name == "zadd" || cmd_name == "expire" ||
                                   cmd_name == "setex" || cmd_name == "persist" ||
+                                  cmd_name == "restore" ||
                                   cmd_name == "flushdb");
 
         // 检查本节点是否是从节点（从节点只能处理读命令）
@@ -141,7 +145,10 @@ void SubReactor::join_thread() {
             // 判断是否是键命令，并提取 key
             if (cmd_name == "get" || cmd_name == "set" || cmd_name == "del" ||
                 cmd_name == "exists" || cmd_name == "expire" || cmd_name == "ttl" ||
-                cmd_name == "pttl" || cmd_name == "persist" || cmd_name == "setex") {
+                cmd_name == "pttl" || cmd_name == "persist" || cmd_name == "setex" ||
+                cmd_name == "incr" || cmd_name == "decr" ||
+                cmd_name == "incrby" || cmd_name == "decrby" ||
+                cmd_name == "restore") {
                 is_key_command = true;
                 if (args.size() >= 2) {
                     key = args[1];

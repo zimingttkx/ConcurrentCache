@@ -6,6 +6,7 @@
 #include "protocol/resp.h"
 #include "datatype/object.h"
 #include <chrono>
+#include <limits>
 #include <random>
 
 #include "persistence/rdb.h"
@@ -123,6 +124,29 @@ namespace cc_server {
      * 语法：INCR key
      * 返回：递增后的整数值
      */
+    // INCR / DECR / INCRBY / DECRBY 共用一条路径。
+    // storage.incrby 在分片独占锁内做原子读-改-写；返回 nullopt 时再取一次值，
+    // 用来区分"是字符串但不是整数"和"根本不是字符串"这两种不同的错误。
+    inline std::string apply_incrby(const std::string& key, int64_t delta) {
+        auto& storage = GlobalStorage::instance();
+        auto result = storage.incrby(key, delta);
+        if (result.has_value()) {
+            return RespEncoder::encode_integer(result.value());
+        }
+
+        auto opt = storage.get(key);
+        if (opt.has_value() && opt.value().get_string().has_value()) {
+            try {
+                std::stoll(opt.value().get_string().value());
+            } catch (...) {
+                return RespEncoder::encode_error("ERR value is not an integer");
+            }
+            return RespEncoder::encode_error("ERR increment or decrement would overflow");
+        }
+        return RespEncoder::encode_error(
+            "WRONGTYPE Operation against a key holding the wrong kind of value");
+    }
+
     class IncrCommand : public Command {
     public:
         std::string execute(const std::vector<std::string>& args) override {
@@ -130,29 +154,7 @@ namespace cc_server {
                 return RespEncoder::encode_error("ERR wrong number of arguments for 'incr' command");
             }
 
-            const std::string& key = args[1];
-            auto& storage = GlobalStorage::instance();
-
-            // 原子读-改-写（在 shard 独占锁内完成，并发 INCR 不丢更新）
-            auto result = storage.incrby(key, 1);
-            if (!result.has_value()) {
-                // incrby 返回 nullopt 有三种原因，这里用 value 是否已存在区分
-                auto opt = storage.get(key);
-                if (opt.has_value() && opt.value().get_string().has_value()) {
-                    // 值是字符串但非整数
-                    try {
-                        std::stoll(opt.value().get_string().value());
-                    } catch (...) {
-                        return RespEncoder::encode_error("ERR value is not an integer");
-                    }
-                    // 是整数但溢出
-                    return RespEncoder::encode_error("ERR increment or decrement would overflow");
-                }
-                // 非字符串类型（列表/哈希等）
-                return RespEncoder::encode_error("WRONGTYPE Operation against a key holding the wrong kind of value");
-            }
-
-            return RespEncoder::encode_integer(result.value());
+            return apply_incrby(args[1], 1);
         }
 
         [[nodiscard]] std::unique_ptr<Command> clone() const override {
@@ -174,29 +176,67 @@ namespace cc_server {
                 return RespEncoder::encode_error("ERR wrong number of arguments for 'decr' command");
             }
 
-            const std::string& key = args[1];
-            auto& storage = GlobalStorage::instance();
-
-            // 原子读-改-写（在 shard 独占锁内完成，并发 DECR 不丢更新）
-            auto result = storage.incrby(key, -1);
-            if (!result.has_value()) {
-                auto opt = storage.get(key);
-                if (opt.has_value() && opt.value().get_string().has_value()) {
-                    try {
-                        std::stoll(opt.value().get_string().value());
-                    } catch (...) {
-                        return RespEncoder::encode_error("ERR value is not an integer");
-                    }
-                    return RespEncoder::encode_error("ERR increment or decrement would overflow");
-                }
-                return RespEncoder::encode_error("WRONGTYPE Operation against a key holding the wrong kind of value");
-            }
-
-            return RespEncoder::encode_integer(result.value());
+            return apply_incrby(args[1], -1);
         }
 
         [[nodiscard]] std::unique_ptr<Command> clone() const override {
             return std::make_unique<DecrCommand>(*this);
+        }
+    };
+
+    /**
+     * @brief IncrbyCommand - INCRBY 命令实现
+     *
+     * INCRBY key delta
+     */
+    class IncrbyCommand : public Command {
+    public:
+        std::string execute(const std::vector<std::string>& args) override {
+            if (args.size() != 3) {
+                return RespEncoder::encode_error("ERR wrong number of arguments for 'incrby' command");
+            }
+
+            long long delta = 0;
+            try {
+                delta = std::stoll(args[2]);
+            } catch (...) {
+                return RespEncoder::encode_error("ERR value is not an integer or out of range");
+            }
+            return apply_incrby(args[1], delta);
+        }
+
+        [[nodiscard]] std::unique_ptr<Command> clone() const override {
+            return std::make_unique<IncrbyCommand>(*this);
+        }
+    };
+
+    /**
+     * @brief DecrbyCommand - DECRBY 命令实现
+     *
+     * DECRBY key delta
+     */
+    class DecrbyCommand : public Command {
+    public:
+        std::string execute(const std::vector<std::string>& args) override {
+            if (args.size() != 3) {
+                return RespEncoder::encode_error("ERR wrong number of arguments for 'decrby' command");
+            }
+
+            long long delta = 0;
+            try {
+                delta = std::stoll(args[2]);
+            } catch (...) {
+                return RespEncoder::encode_error("ERR value is not an integer or out of range");
+            }
+            if (delta == std::numeric_limits<long long>::min()) {
+                // 取负会溢出；而"减去 -2^63"本身就等于加 2^63，超出行范围
+                return RespEncoder::encode_error("ERR value is not an integer or out of range");
+            }
+            return apply_incrby(args[1], -delta);
+        }
+
+        [[nodiscard]] std::unique_ptr<Command> clone() const override {
+            return std::make_unique<DecrbyCommand>(*this);
         }
     };
 
