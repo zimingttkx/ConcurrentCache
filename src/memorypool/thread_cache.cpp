@@ -31,7 +31,7 @@ ThreadCache::~ThreadCache() {
     for (size_t i = 0; i < free_lists_.size(); ++i) {
         FreeList& free_list = free_lists_[i];
         if (free_list.empty()) continue;
-        return_to_central(i);
+        return_to_central(i, true);
     }
 }
 
@@ -79,8 +79,15 @@ void ThreadCache::deallocate(void* obj, size_t size) {
     // 阈值：FreeList大小超过一定数量时归还
     // 这样可以避免一个线程占用太多内存
     if (free_list.size() > 32) {
-        return_to_central(class_index);
+        return_to_central(class_index, false);
     }
+}
+
+size_t ThreadCache::cached_object_count(const size_t class_index) const {
+    if (class_index >= free_lists_.size()) {
+        return 0;
+    }
+    return free_lists_[class_index].size();
 }
 
 void ThreadCache::fetch_from_central(size_t class_index) {
@@ -103,25 +110,28 @@ void ThreadCache::fetch_from_central(size_t class_index) {
     }
 }
 
-void ThreadCache::return_to_central(size_t class_index) {
+void ThreadCache::return_to_central(const size_t class_index, const bool return_all) {
     FreeList& free_list = free_lists_[class_index];
 
-    // 归还一半（析构场景下 free_list 全部对象也会被一次性归还：见 ~ThreadCache）
-    size_t return_count = free_list.size() / 2;
-    if (return_count == 0) return_count = 1;
+    // 普通释放路径只归还一半：剩下的继续留在本地，吸收后面的 deallocate。
+    // 此前 return_count 算出来了却没人用，循环把 FreeList 整个清空，于是
+    // "超过 32 就归还" 变成 "超过 32 就清零"：下一次 allocate 又只能去
+    // CentralCache 抢锁批量取，线程缓存等于没有。
+    size_t target = return_all ? free_list.size() : free_list.size() / 2;
+    if (target == 0) return;
 
-    // pop_batch 单次最多 256 个，循环归还避免一次 pop 超限
-    while (free_list.size() > 0) {
-        size_t batch = std::min<size_t>(free_list.size(), 256);
+    // pop_batch 单次最多 256 个，分批归还避免一次 pop 超限
+    while (target > 0) {
+        const size_t batch = std::min(target, static_cast<size_t>(256));
         void* objs[256];
-        size_t actual_count = free_list.pop_batch(objs, batch);
+        const size_t actual_count = free_list.pop_batch(objs, batch);
+        if (actual_count == 0) break;
 
         for (size_t i = 0; i < actual_count; ++i) {
             CentralCache::get_instance().deallocate(objs[i], class_index);
         }
 
-        // 若实际归还数量小于请求数量，说明已无更多对象，避免死循环
-        if (actual_count < batch) break;
+        target -= actual_count;
     }
 }
 
