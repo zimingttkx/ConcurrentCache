@@ -53,6 +53,10 @@ private:
     void register_link_to_loop(ClusterLink* link);
     void unregister_link_from_loop(ClusterLink* link);
     void unregister_link_from_loop_fd(int fd);  // 通过 fd 注销（用于避免 UAF）
+    // 把某条链路的 Channel 从 epoll 与 link_channels_ 摘掉但**不 delete**，交回指针
+    // 给调用方处置。断开常常发生在 Channel::handle_event 的栈里，当场 delete 就是
+    // 释放正在执行的那个对象，所以销毁时机必须由调用方决定（见 remove_link）。
+    Channel* detach_link_channel(int fd);
 
     EventLoop* event_loop_ = nullptr;           // EventLoop pointer
     int listen_fd_ = -1;                        // Listen socket fd

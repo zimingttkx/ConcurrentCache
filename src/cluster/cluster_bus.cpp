@@ -267,33 +267,46 @@ ClusterLink* ClusterBus::create_link(int fd, const std::string& node_name, const
 }
 
 void ClusterBus::remove_link(const std::string& node_name) {
-    // 注意：此函数由 ClusterLink::disconnect_and_notify 的断开回调触发，
-    // 调用时 link 尚未销毁（this 仍有效），但回调返回后 link 就会死亡。
+    // 注意：此函数由 ClusterLink::disconnect_and_notify 的断开回调触发，也就是说
+    // 调用栈还在 Channel::handle_event() -> read_cb -> ClusterLink::handle_read() 里。
+    // 所以这里既不能当场析构 link，也不能当场 delete 它的 Channel：
+    //   - handle_event 拷出的 write_cb 捕获的是同一个 link 裸指针，而链路登记时就
+    //     enable_writing()，EPOLLIN 与 EPOLLOUT 几乎总在同一条事件里回来 ——
+    //     read_cb 返回后还会再调一次 write_cb，对象没了就是 heap-use-after-free；
+    //   - delete Channel 更是直接释放正在执行的那个栈帧所属的对象。
+    // 做法照 SubReactor::remove_connection 的既有模式：两者都交给 loop 线程，在下一
+    // 轮分发之前的任务队列里回收。队列载体是 std::function，要求可拷贝，所以
+    // unique_ptr 先转 shared_ptr 再捕获（C++20 还没有 move_only_function）。
 
     int fd_to_remove = -1;
+    std::unique_ptr<ClusterLink> dying;
 
     {
         std::unique_lock<std::shared_mutex> lock(links_mutex_);
         auto it = links_.find(node_name);
         if (it != links_.end()) {
-            // 先保存 fd，但不要获取 link 指针（因为马上要销毁）
             // registered_fd() 而不是 fd()：本函数由断开回调触发，那时 fd_ 已经是 -1
             fd_to_remove = it->second->registered_fd();
+            dying = std::move(it->second);
             links_.erase(it);
-            // ClusterLink 在这里被销毁
         }
     }
 
+    // Channel 先从 epoll 与映射里摘掉（这一步必须立即做，否则本轮之后还可能再有事件
+    // 打到这条已断的链路），对象本身连同 link 一起延后销毁。
+    Channel* detached = (fd_to_remove >= 0) ? detach_link_channel(fd_to_remove) : nullptr;
+
+    if (event_loop_ != nullptr && (detached != nullptr || dying != nullptr)) {
+        std::shared_ptr<ClusterLink> keeper(std::move(dying));
+        event_loop_->queue_in_loop([keeper, detached]() { delete detached; });
+    } else {
+        // 没有 loop 可用（理论上只在启动失败的路径上）：当场释放，不留泄漏
+        delete detached;
+    }
+
     if (fd_to_remove >= 0) {
-        // 关键（修复 P0-2/UAF-3）：必须在 link 销毁后、事件再次到来前，
-        // 把这条链路的 Channel 从 EventLoop 注销并删除。
-        // 旧代码只清理 ClusterBus 自己注册的 channel 之外的路径，
-        // 导致 Channel 泄漏并继续留在 epoll 中，其回调捕获已析构的
-        // ClusterLink* —— fd 复用后同 fd 事件会调用已释放对象。
-        if (event_loop_) {
-            unregister_link_from_loop_fd(fd_to_remove);
-        }
-        LOG_INFO(CLUSTER, "ClusterBus: removed link for %s", node_name.c_str());
+        LOG_INFO(CLUSTER, "ClusterBus: removed link for %s (fd=%d)",
+                 node_name.c_str(), fd_to_remove);
     }
 }
 
@@ -372,14 +385,12 @@ void ClusterBus::unregister_link_from_loop(ClusterLink* link) {
     }
 }
 
-void ClusterBus::unregister_link_from_loop_fd(int fd) {
+Channel* ClusterBus::detach_link_channel(int fd) {
     if (!event_loop_ || fd < 0) {
-        return;
+        return nullptr;
     }
 
     Channel* channel = nullptr;
-
-    // Find and remove channel from our map
     {
         std::lock_guard<std::mutex> lock(channel_mutex_);
         auto it = link_channels_.find(fd);
@@ -389,12 +400,16 @@ void ClusterBus::unregister_link_from_loop_fd(int fd) {
         }
     }
 
-    // Remove from EventLoop and delete
     if (channel) {
+        // 只从 epoll 与 channels_ 里摘掉；对象本身交给调用方处置（见 remove_link
+        // 为什么要延后销毁）。
         event_loop_->remove_channel(channel);
-        delete channel;
-        LOG_DEBUG(CLUSTER, "ClusterBus: unregistered link from loop (fd): fd=%d", fd);
     }
+    return channel;
+}
+
+void ClusterBus::unregister_link_from_loop_fd(int fd) {
+    delete detach_link_channel(fd);
 }
 
 } // namespace cc_server

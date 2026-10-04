@@ -359,9 +359,20 @@ void ClusterConnection::on_node_disconnected(const std::string& node_name, Clust
         unregister_link_from_loop(link);
     }
 
+    std::shared_ptr<ClusterLink> dying;
     {
         std::unique_lock<std::shared_mutex> lock(links_mutex_);
-        links_.erase(node_name);
+        auto it = links_.find(node_name);
+        if (it != links_.end()) {
+            dying = std::move(it->second);
+            links_.erase(it);
+        }
+    }
+
+    // 同样不当场析构：上面 unregister 已经把这条链路的 Channel 交给 loop 回收，
+    // link 必须活得比那一轮分发久，否则 write_cb 依旧会碰到已释放的对象。
+    if (dying && event_loop_) {
+        event_loop_->queue_in_loop([dying]() {});
     }
 
     LOG_INFO(CLUSTER, "Node disconnected: %s", node_name.c_str());
@@ -438,7 +449,12 @@ void ClusterConnection::unregister_link_from_loop(ClusterLink* link) {
 
     if (channel) {
         event_loop_->remove_channel(channel);
-        delete channel;
+        // 不能当场 delete：断开回调跑在 Channel::handle_event 的栈里（read_cb ->
+        // handle_read -> disconnect_and_notify -> 这里），而同一批事件里通常还带着
+        // EPOLLOUT（链路登记时就 enable_writing），handle_event 返回前还会再调一次
+        // 捕获同一个 link 裸指针的 write_cb。与 ClusterBus::remove_link 同一套做法：
+        // 交给 loop 线程在下一次分发之前回收。
+        event_loop_->queue_in_loop([channel]() { delete channel; });
         LOG_INFO(CLUSTER, "Unregistered ClusterLink from EventLoop: fd=%d", fd);
     }
 }
