@@ -124,6 +124,11 @@ namespace cc_server {
 
             check_config_reload();
 
+            // 先执行别的线程投递过来的任务，再分发本轮事件。放在这里而不是
+            // handle_wakeup() 里，是因为 epoll_wait 超时（n == 0）时会直接
+            // continue，那样排在队列里的连接登记就永远没人做。
+            drain_pending_tasks();
+
             // 处理返回值
             if (n < 0) {
                 if (errno == EINTR) {
@@ -247,6 +252,28 @@ namespace cc_server {
             epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
             // 从映射表移除
             channels_.erase(it);
+        }
+    }
+
+    void EventLoop::queue_in_loop(std::function<void()> task) {
+        if (!task) return;
+        {
+            std::lock_guard<std::mutex> lock(pending_tasks_mutex_);
+            pending_tasks_.push_back(std::move(task));
+        }
+        wakeup();
+    }
+
+    void EventLoop::drain_pending_tasks() {
+        // swap 出本地副本再执行：任务里可能又 queue_in_loop 新任务，
+        // 持锁执行会自锁，也会让新任务排到已被取走的队列里等下一轮。
+        std::deque<std::function<void()>> tasks;
+        {
+            std::lock_guard<std::mutex> lock(pending_tasks_mutex_);
+            tasks.swap(pending_tasks_);
+        }
+        for (auto& task : tasks) {
+            task();
         }
     }
 

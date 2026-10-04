@@ -8,6 +8,7 @@
 #include "protocol/resp.h"
 #include "cluster/cluster_server.h"
 #include "cluster/replication_mgr.h"
+#include <unistd.h>
 #include <algorithm>
 #include <cctype>
 
@@ -81,7 +82,25 @@ void SubReactor::join_thread() {
     }
 }
 
-    void SubReactor::add_connection(int client_fd) {
+void SubReactor::add_connection(int client_fd) {
+    // 登记的活儿交给 loop 线程自己做。以前是 accept 线程就地执行，于是
+    // "把 fd 加进 epoll"和"把 Connection 放进 connections_"发生在 A 线程，而
+    // loop 线程可能在这两步之间就收到这个 fd 的事件：
+    //   - 那次事件若走到关闭，remove_connection 在 connections_ 里找不到表项，
+    //     erase 扑空，accept 线程随后又把一个 fd 已关闭的 Connection 塞进 map，
+    //     留下一条永不回收的僵尸表项；
+    //   - register 末尾还会跨线程调 update_channel() 改 channels_。
+    // 投递到 loop 线程之后这两条时序都不存在了，accept 线程也不再碰 epoll。
+    if (loop_->is_quitting()) {
+        // 循环已经不跑了，没人接手这个 fd；不关掉就是一次 fd 泄漏。
+        LOG_WARN(NETWORK, "SubReactor loop already quitting, dropping accepted fd=%d", client_fd);
+        ::close(client_fd);
+        return;
+    }
+    loop_->queue_in_loop([this, client_fd]() { register_connection(client_fd); });
+}
+
+void SubReactor::register_connection(int client_fd) {
     auto conn = std::make_unique<Connection>(client_fd, loop_.get());
 
     conn->set_read_callback([conn_ptr = conn.get()]() {
@@ -92,8 +111,10 @@ void SubReactor::join_thread() {
         handle_write(conn_ptr);
     });
 
-    conn->set_close_callback([this, conn_ptr = conn.get()]() {
-        handle_close(conn_ptr);
+    // fd 由回调自己带上：Connection::close() 先关掉 fd 才触发这里，那时
+    // conn->fd() 已经是 -1，拿它当 key 去 erase 永远删不掉（P0-4 的教训）。
+    conn->set_close_callback([this, client_fd]() {
+        handle_close(client_fd);
     });
 
     // 步骤3：设置命令处理回调
@@ -233,26 +254,37 @@ void SubReactor::handle_write(Connection* conn) {
     conn->handle_write();
 }
 
-void SubReactor::handle_close(Connection* conn) {
-    // 客户端主动关闭连接，或者发生错误
-    LOG_INFO(NETWORK, "SubReactor connection closed, fd=%d", conn->fd());
-    remove_connection(conn);
+void SubReactor::handle_close(int fd) {
+    LOG_INFO(NETWORK, "SubReactor connection closed, fd=%d", fd);
+    remove_connection(fd);
 }
 
-void SubReactor::remove_connection(Connection* conn) {
-    int fd = conn->fd();
-
-    // Connection::close() 已调用过 remove_channel，这里不重复调用
-
-    // 从connections_中移除
+void SubReactor::remove_connection(int fd) {
+    std::unique_ptr<Connection> dying;
     {
         std::unique_lock<std::shared_mutex> lock(connections_mutex_);
-        connections_.erase(fd);
+        auto it = connections_.find(fd);
+        if (it == connections_.end()) {
+            // 表项已被摘走（同一 fd 号复用后重新登记过），不重复计数
+            return;
+        }
+        dying = std::move(it->second);
+        connections_.erase(it);
     }
 
     connection_count_.fetch_sub(1, std::memory_order_relaxed);
 
-    // Connection的析构函数会关闭fd
+    // 不在这里析构 dying：调用链是 Channel::handle_event() → read/write 回调 →
+    // Connection::close() → 本函数，而 close_callback_ 本身也住在这个 Connection
+    // 里，当场析构等于把正在执行的栈帧和它的 Channel 一起释放掉。
+    // fd 已经在 Connection::close() 里关过了，所以把对象交给 loop 线程在下一次
+    // 迭代开头的任务队列回收——那时上一轮分发的栈帧早就退干净了。
+    //
+    // 这里转成 shared_ptr 再捕获：任务队列的载体是 std::function，它要求目标可拷贝
+    // 构造，直接捕获 unique_ptr 编译不过（项目是 C++20，std::move_only_function 还
+    // 用不了）。此时 map 里那份是唯一所有者，转成 shared_ptr 只是多一个控制块。
+    std::shared_ptr<Connection> keeper(std::move(dying));
+    loop_->queue_in_loop([keeper]() {});
 }
 
 } // namespace cc_server

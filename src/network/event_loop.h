@@ -6,6 +6,8 @@
 #include <fcntl.h> // fcntl F_GETFL F_SETFL O_NONBLOCK
 #include <vector> // 动态分配避免频繁拷贝
 #include <unordered_map> // O(1)查找fd对应的Channel
+#include <deque>     // pending_tasks_：跨线程投递到 loop 线程执行的任务
+#include <functional> // queue_in_loop 的任务类型
 #include <cstring>
 #include <cerrno>
 #include <mutex>
@@ -73,6 +75,10 @@ namespace cc_server {
            */
           std::unordered_map<int, Channel*> channels_;
           std::mutex channels_mutex_;  // 保护 channels_ map 的线程安全
+
+          // queue_in_loop 投递进来的任务，由 loop 线程在下一次分发事件前执行
+          std::deque<std::function<void()>> pending_tasks_;
+          std::mutex pending_tasks_mutex_;
 
           time_t last_config_check_time_; // 上次检查配置文件的时间戳（秒级） 用于定时检查配置文件是否修改
           const int config_check_interval_ = 10; // 默认10秒检测一次
@@ -175,7 +181,30 @@ namespace cc_server {
         // 公开的wakeup方法，用于从信号处理中唤醒EventLoop
         void wakeup_for_shutdown() { wakeup(); }
 
+        /**
+         * @brief 把任务投递到 loop 线程执行（调用方不在 loop 线程时用）
+         *
+         * 为什么需要它：
+         * - 客户端连接的建立涉及 epoll_ctl 登记、channels_/connections_ 两张表的
+         *   插入，以及"登记完立刻就有第一个事件"（客户端连上就发数据，甚至马上
+         *   断开）。这些如果由 accept 线程代做，事件就可能跑到登记完成之前，
+         *   或者关闭路径删掉一个还没进表的连接、留下已经关掉的僵尸表项。
+         * - 把整段逻辑交给 loop 线程自己执行，同一条时间线上不再有交叉窗口。
+         *
+         * 实现：加锁入队 + wakeup()。任务在 epoll_wait 返回后、分发事件之前执行，
+         * 所以即使多个 wakeup 在管道里合并成一个字节，队列也会被完整消费一次。
+         */
+        void queue_in_loop(std::function<void()> task);
+
+        /// @brief loop 是否已经收到退出信号（投递方据此避免把 fd 交给不会跑的队列）
+        [[nodiscard]] bool is_quitting() const {
+            return quit_.load(std::memory_order_acquire);
+        }
+
     private:
+        /// @brief 执行并清空 pending_tasks_（只由 loop 线程调用）
+        void drain_pending_tasks();
+
         /**
            * @brief 处理wakeup事件（消费pipe中的数据）
            *

@@ -28,8 +28,10 @@ private:
     SubReactor();
     static void handle_read(Connection* conn);
     static void handle_write(Connection* conn);
-    void handle_close(Connection* conn);
-    void remove_connection(Connection* conn);
+    void handle_close(int fd);
+    void remove_connection(int fd);
+    // add_connection 的实体，只在 loop 线程上执行（由 EventLoop::queue_in_loop 投递）
+    void register_connection(int client_fd);
     std::unique_ptr<EventLoop> loop_;
     std::atomic<std::thread*> thread_{nullptr};
     std::unordered_map<int, std::unique_ptr<Connection>> connections_;
