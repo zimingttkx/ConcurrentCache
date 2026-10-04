@@ -11,6 +11,7 @@ void run_all_datatype_tests();
 void run_all_rdb_tests();
 void run_all_storage_tests();
 void run_all_connection_tests();
+void run_all_cluster_bus_framing_tests();
 // void run_all_command_tests();  // 暂时禁用
 
 }  // namespace testing
@@ -72,6 +73,7 @@ int main(int argc, char* argv[]) {
 
         if (run_all) {
             cc_server::testing::run_all_connection_tests();
+            cc_server::testing::run_all_cluster_bus_framing_tests();
         }
 
         // if (run_all || run_command) {  // 暂时禁用

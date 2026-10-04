@@ -140,6 +140,13 @@ private:
 
     static constexpr uint32_t kMsgMagic = 0x43;  // 'C'
     static constexpr size_t kHeaderSize = sizeof(ClusterMsgHeader);
+    /// @brief 单帧上限，对齐 Redis 的 CLUSTER_BUS_MAX_PACKET_SIZE（2MB）
+    static constexpr uint32_t kMaxPacketBytes = 2u * 1024 * 1024;
+
+    /// @brief 收到畸形帧（length 装不下 header，或超过单帧上限）时置位。
+    /// 必须由 handle_read 单独判断并断链：不能让 decode_msg 拿着一个缓冲区里
+    /// 并不存在的长度去读参数区。
+    bool frame_invalid_ = false;
 };
 
 } // namespace cc_server

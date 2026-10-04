@@ -125,7 +125,6 @@ bool ClusterLink::send_msg(const ClusterMsg& msg) {
     // 构建消息头 + 内容
     ClusterMsgHeader header = msg.header;
     header.type = static_cast<uint16_t>(msg.header.type);
-    header.length = static_cast<uint32_t>(sizeof(header));
 
     // 如果 sender_name 未设置，从 ClusterServer 获取本节点名称
     if (header.sender_name[0] == '\0') {
@@ -135,10 +134,22 @@ bool ClusterLink::send_msg(const ClusterMsg& msg) {
         }
     }
 
-    // 计算参数总长度（uint32，修复 P0-1：uint16 截断导致 >64KB 消息错位）
+    // 计算总长度（header + 每个参数再加 1 字节的 \xC0 分隔符）。
+    // 用 size_t 累加后再校验，不能像原来那样直接 += 到 uint32 的 header.length 上：
+    // 参数够多时它会回绕成一个小值，接收端于是提前判定"帧读完了"、后续字节流永久错位
+    // ——那正是 P0-1 从 uint16 换成 uint32 时没有根治的那一半。
+    // 上限与接收端 read_complete() 的 kMaxPacketBytes 对称：自己不能发出会被对端
+    // 判为畸形并断链的帧。
+    size_t frame_bytes = sizeof(ClusterMsgHeader);
     for (const auto& arg : msg.args) {
-        header.length += static_cast<uint32_t>(arg.size() + 1);  // +1 for separator
+        frame_bytes += arg.size() + 1;
     }
+    if (frame_bytes > kMaxPacketBytes) {
+        LOG_ERROR(CLUSTER, "Refusing to send frame of %zu bytes to %s: exceeds bus limit %u",
+                  frame_bytes, node_name_.c_str(), kMaxPacketBytes);
+        return false;
+    }
+    header.length = static_cast<uint32_t>(frame_bytes);
 
     // 添加诊断日志（仅在非心跳消息时）
     if (header.type != 1 && header.type != 2) {
@@ -276,7 +287,10 @@ void ClusterLink::handle_read() {
         update_last_recv_time();
 
         // 处理接收到的数据
-        while (read_complete()) {
+        while (!frame_invalid_) {
+            if (!read_complete()) {
+                break;
+            }
             if (!decode_msg()) {
                 // 协议错误（含非法 length 帧，见 read_complete）：
                 // 必须断开，否则滞留的坏字节会让这条链路永久失效
@@ -285,6 +299,17 @@ void ClusterLink::handle_read() {
                 disconnect_and_notify();
                 return;  // 回调可能已销毁 this，不得再访问成员
             }
+        }
+
+        // 畸形帧（length 装不下 header，或超过单帧上限）由 frame_invalid_ 单独表达，
+        // 不能再"借道" read_complete() == true 去叫 decode_msg() 解析：那条路径会照
+        // 声明长度去读参数区，而缓冲区里根本没有那么多字节。一个 2KB 的头写
+        // length=0xFFFFFFFF，旧实现就会越过 recv_buffer_ 结尾读 4GB，进程直接段错误
+        // ——而集群总线端口是不认证的输入面。现在这里统一断链。
+        if (frame_invalid_) {
+            LOG_ERROR(CLUSTER, "Malformed frame from %s, disconnecting", node_name_.c_str());
+            disconnect_and_notify();
+            return;  // 回调可能已销毁 this，不得再访问成员
         }
     } else if (n == 0) {
         // 对端关闭连接
@@ -382,17 +407,26 @@ bool ClusterLink::read_complete() {
     // 旧代码 length 可为 0..kHeaderSize-1：read_complete 返回 true 而 decode_msg
     // 消费 0 字节（retrieve(0)），handle_read 的 while(read_complete()) 永不退出
     // → EventLoop 线程 100% CPU 死循环，整台服务器失去响应。
-    // 此处返回 true 让调用方走 decode_msg 失败 → 断链路径清理。
+    //
+    // 这里用 frame_invalid_ 表达"畸形"，而不是继续返回 true 让 decode_msg 去失败：
+    // decode_msg 一旦被叫起来，就会按 header.length 读参数区，而缓冲区里没有那些字节。
     if (msg_len < kHeaderSize) {
         LOG_ERROR(CLUSTER, "Malformed frame from %s: length=%u < header_size=%zu",
                   node_name_.c_str(), msg_len, kHeaderSize);
-        return true;
+        frame_invalid_ = true;
+        return false;
     }
 
-    // 单帧上限 256MB：防御恶意超大长度（避免 recv_buffer_ 被撑爆前先拒绝）
-    if (msg_len > (256u << 20)) {
-        LOG_ERROR(CLUSTER, "Oversized frame from %s: length=%u", node_name_.c_str(), msg_len);
-        return true;  // 走断链
+    // 单帧上限对齐 Redis 的 CLUSTER_BUS_MAX_PACKET_SIZE（2MB）。
+    // 原来是 256MB：判断时机没问题（拿到 header 就能判，不用等正文到齐），但那个数字
+    // 本身就是攻击面——一条链路声明一个 200MB 的帧再慢慢滴，就要占 200MB 常驻，十来条
+    // 这样的链路足以把进程吃穿，而总线端口是不认证的输入。本仓库自己发的最大帧是
+    // header(2116B) + 节点列表参数，千节点量级也在几百 KB 内，2MB 留有余量。
+    if (msg_len > kMaxPacketBytes) {
+        LOG_ERROR(CLUSTER, "Oversized frame from %s: length=%u > limit=%u",
+                  node_name_.c_str(), msg_len, kMaxPacketBytes);
+        frame_invalid_ = true;
+        return false;
     }
 
     return len >= msg_len;
