@@ -311,6 +311,47 @@ void ClusterLink::handle_read() {
             disconnect_and_notify();
             return;  // 回调可能已销毁 this，不得再访问成员
         }
+
+        // 滴包防护。不能用 last_recv_time_ 代替：每滴一个字节都会刷新它，于是
+        // "帧头声明 256MB-1、之后每 10 秒送 1 字节" 永远不超时，而接收缓冲一路涨。
+        // 这里量的是同一帧从第一次残缺起停留了多久，与流量无关。
+        const uint64_t now = steady_now_ms();
+        const size_t pending = recv_buffer_.readable_bytes();
+        if (pending > kMaxPacketBytes) {
+            // 兜底：正常路径下 read_complete() 一拿到头就按声明长度拒了，能堆到这里的
+            // 是实打实收进来的字节。
+            LOG_ERROR(CLUSTER, "Recv buffer from %s holds %zu bytes, disconnecting",
+                      node_name_.c_str(), pending);
+            disconnect_and_notify();
+            return;  // 回调可能已销毁 this
+        }
+
+        bool frame_pending = false;
+        if (pending >= kHeaderSize) {
+            uint32_t magic = 0;
+            memcpy(&magic, recv_buffer_.peek(), sizeof(magic));
+            if (magic == kMsgMagic) {
+                uint32_t declared = 0;
+                memcpy(&declared, recv_buffer_.peek() + offsetof(ClusterMsgHeader, length),
+                            sizeof(declared));
+                frame_pending = static_cast<uint64_t>(declared) > pending;
+            }
+        }
+
+        if (frame_pending) {
+            if (partial_frame_since_ms_ == 0) {
+                partial_frame_since_ms_ = now;
+            } else if (now - partial_frame_since_ms_ >= kPartialFrameTimeoutMs) {
+                LOG_ERROR(CLUSTER,
+                          "Partial frame from %s dripping for %lu ms, disconnecting",
+                          node_name_.c_str(),
+                          static_cast<unsigned long>(now - partial_frame_since_ms_));
+                disconnect_and_notify();
+                return;  // 回调可能已销毁 this
+            }
+        } else {
+            partial_frame_since_ms_ = 0;
+        }
     } else if (n == 0) {
         // 对端关闭连接
         LOG_INFO(CLUSTER, "Connection closed by %s", node_name_.c_str());
@@ -485,11 +526,21 @@ bool ClusterLink::decode_msg() {
 }
 
 void ClusterLink::update_last_recv_time() {
-    last_recv_time_.store(
+    last_recv_time_.store(static_cast<int64_t>(steady_now_ms()));
+}
+
+uint64_t ClusterLink::steady_now_ms() {
+    return static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()
-        ).count()
-    );
+        ).count());
+}
+
+bool ClusterLink::partial_frame_stale(const uint64_t now_ms) const {
+    if (partial_frame_since_ms_ == 0) {
+        return false;  // 没有半帧挂着，谈不上超时
+    }
+    return now_ms - partial_frame_since_ms_ >= kPartialFrameTimeoutMs;
 }
 
 } // namespace cc_server

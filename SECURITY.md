@@ -45,8 +45,8 @@
 
 只有一条，而且它不是"文档里写着以后再说"就完事的：
 
-**集群总线报文没有真实性认证。** 端口 `port + 10000` 收到的报文不携带任何共享密钥衍生的签名，因此收到即被信任其内容。现有缓解是三道各自的门：帧长上界 256MB 且畸形帧直接断链（否则 `length` 会让接收端越界读最多 4GB）、报文自称的来源地址必须与实际链路地址一致、拒绝自称是本节点的报文。最后一点在同机多节点的部署下（本仓库 e2e 与 daily 的拓扑就是全 `127.0.0.1`）分不出真假——那时任何本机进程都能伪装成任意一个集群成员，而 `sender_name` 正是故障判定与 failover 法定人数的计票单位。
+**集群总线报文没有真实性认证。** 端口 `port + 10000` 收到的报文不携带任何共享密钥衍生的签名，因此收到即被信任其内容。现有缓解是四道各自的门：帧长上界 256MB 且畸形帧直接断链（否则 `length` 会让接收端越界读最多 4GB）、报文自称的来源地址必须与实际链路地址一致、拒绝自称是本节点的报文、一帧从第一次残缺起停留超过 30 秒即断链。最后那道堵的是滴包：对端先送一个声明 256MB-1 的合法帧头，之后每 10 秒送 1 个字节——每个字节都会刷新空闲时间戳，所以只靠 `last_recv_time_` 的超时永远不触发，而这条链路的接收缓冲一路涨到接近 256MB，总线链路数又不设上限。前面那两道地址门在同机多节点的部署下（本仓库 e2e 与 daily 的拓扑就是全 `127.0.0.1`）分不出真假——那时任何本机进程都能伪装成任意一个集群成员，而 `sender_name` 正是故障判定与 failover 法定人数的计票单位。
 
-要补的是签名本身，做法与 Redis 的 cluster 总线一致：用一个所有节点相同的共享密钥对帧做 HMAC-SHA256、截断 16 字节附在帧尾，接收端在解析之前用常量时间比较验完再动状态。这需要引入 OpenSSL（`find_package(OpenSSL)` 与全部构建环境的 `libssl-dev`），并把"没配密钥就拒绝总线"定成显式选项而不是静默放过——所以上面那三道门是当前的实际边界，别把它当成已经关闭的洞。
+要补的是签名本身，做法与 Redis 的 cluster 总线一致：用一个所有节点相同的共享密钥对帧做 HMAC-SHA256、截断 16 字节附在帧尾，接收端在解析之前用常量时间比较验完再动状态。这需要引入 OpenSSL（`find_package(OpenSSL)` 与全部构建环境的 `libssl-dev`），并把"没配密钥就拒绝总线"定成显式选项而不是静默放过——所以上面那四道门是当前的实际边界，别把它当成已经关闭的洞。
 
-历史上登记在同一处、如今已经修掉的：RESP 数组嵌套深度上限（`resp.{h,cpp}` 的 `kMaxNestingDepth` + `DepthGuard`）、客户端输入/输出缓冲上限与高水位断开（`Connection` 构造时读 `client_query_buffer_limit` / `client_output_buffer_limit`，超限即断链）、总线帧长上界、总线自称来源校验。其中三条有会红的用例守着：缓冲高水位在 `V3Tests`（`test/network_test/connection_lifetime_test.cpp`），帧长边界与来源对账在 `ClusterTests`（`test/cluster_test/cluster_link_framing_test.cpp`），都在 `gate` 层，改回去就挡住合并。嵌套深度那条目前没有专门用例，只有实现里的上限在起作用。
+历史上登记在同一处、如今已经修掉的：RESP 数组嵌套深度上限（`resp.{h,cpp}` 的 `kMaxNestingDepth` + `DepthGuard`）、客户端输入/输出缓冲上限与高水位断开（`Connection` 构造时读 `client_query_buffer_limit` / `client_output_buffer_limit`，超限即断链）、总线帧长上界、总线自称来源校验、总线半帧滴包。其中四条有会红的用例守着：缓冲高水位在 `V3Tests`（`test/network_test/connection_lifetime_test.cpp`），帧长边界、来源对账与滴包停留都在 `ClusterTests`（`test/cluster_test/cluster_link_framing_test.cpp`），都在 `gate` 层，改回去就挡住合并。嵌套深度那条目前没有专门用例，只有实现里的上限在起作用。
