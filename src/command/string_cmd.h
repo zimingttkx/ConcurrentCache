@@ -6,6 +6,7 @@
 #include "protocol/resp.h"
 #include "datatype/object.h"
 #include <chrono>
+#include <cmath>
 #include <limits>
 #include <random>
 
@@ -952,9 +953,23 @@ namespace cc_server {
             for (size_t i = 2; i < args.size(); i += 2) {
                 double score;
                 try {
-                    score = std::stod(args[i]);
+                    size_t consumed = 0;
+                    score = std::stod(args[i], &consumed);
+                    // std::stod 读前缀就返回："1.5abc" 给 1.5 且不抛。Redis 的
+                    // string2d 要求整个串都被吃掉，否则就是把客户端的拼写错误
+                    // 静默收成一个并不存在的数。
+                    if (consumed != args[i].size()) {
+                        return RespEncoder::encode_error("ERR value is not a valid float");
+                    }
                 } catch (...) {
-                    return RespEncoder::encode_error("ERR invalid score");
+                    // 完全读不出来，或者超范围（1e400 → out_of_range）
+                    return RespEncoder::encode_error("ERR value is not a valid float");
+                }
+                // nan / inf 是合法浮点字面量，stod 照收。Redis 明确拒绝：sorted
+                // set 靠分数排全序，NaN 跟谁比都不成立，收进来之后这张表的顺序
+                // 就不再确定（而且回复里会出现一个再也读不回同值的字符串）。
+                if (std::isnan(score) || std::isinf(score)) {
+                    return RespEncoder::encode_error("ERR value is NaN or Infinity");
                 }
                 entries.emplace_back(args[i + 1], score);
             }

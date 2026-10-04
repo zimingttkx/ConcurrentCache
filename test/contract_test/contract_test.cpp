@@ -416,6 +416,83 @@ void run_capacity_contract_tests(const std::string& binary) {
     std::remove(log_path.c_str());
 }
 
+// ZADD 的分数入参契约：Redis 拒的必须拒，而且不许"半收"。
+//
+// 三段各管一件事：
+//  - nan / inf：std::stod 认这些字面量。收进来之后 sorted set 的全序不再确定
+//    （NaN 跟谁比都不成立），Redis 直接回 "value is NaN or Infinity"。
+//  - 尾巴塞字符：std::stod("1.5abc") 返回 1.5 且不抛，于是客户端的拼写错误被
+//    静默收成一个它并没有写的数；Redis 要求整个串都被吃掉。
+//  - 被拒之后键不能留下：解析本来就在改库之前，这一条把它钉住，防止以后有人
+//    把校验挪进 mutate 回调里。
+//
+// 最后一条顺便把 #80 的分数文本形态放进合并门禁：以前只有单元层直接调
+// format_double，以及夜间档跟真 Redis 比；中间"真服务器 + 真 RESP"这一层是空的。
+void run_zadd_score_contract_tests(int port) {
+    TEST_SUITE("ZADD 分数入参契约");
+
+    RUN_TEST(zadd_rejects_nan) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client, {"ZADD", "zc_nan", "nan", "m"}, reply));
+        std::cout << "  ZADD nan 返回: " << reply_text(reply) << "\n";
+        EXPECT_TRUE(reply.is_error());
+        EXPECT_TRUE(do_cmd(client, {"EXISTS", "zc_nan"}, reply));
+        EXPECT_EQ(reply.integer, 0);
+    });
+
+    RUN_TEST(zadd_rejects_infinity) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client, {"ZADD", "zc_inf", "inf", "m"}, reply));
+        std::cout << "  ZADD inf 返回: " << reply_text(reply) << "\n";
+        EXPECT_TRUE(reply.is_error());
+        EXPECT_TRUE(do_cmd(client, {"ZADD", "zc_inf", "-infinity", "m"}, reply));
+        EXPECT_TRUE(reply.is_error());
+        EXPECT_TRUE(do_cmd(client, {"EXISTS", "zc_inf"}, reply));
+        EXPECT_EQ(reply.integer, 0);
+    });
+
+    RUN_TEST(zadd_rejects_trailing_garbage) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client, {"ZADD", "zc_garbage", "1.5abc", "m"}, reply));
+        std::cout << "  ZADD 1.5abc 返回: " << reply_text(reply) << "\n";
+        EXPECT_TRUE(reply.is_error());
+        EXPECT_TRUE(do_cmd(client, {"EXISTS", "zc_garbage"}, reply));
+        EXPECT_EQ(reply.integer, 0);
+    });
+
+    RUN_TEST(zadd_rejects_out_of_range_without_creating_the_key) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client, {"ZADD", "zc_huge", "1e400", "m"}, reply));
+        std::cout << "  ZADD 1e400 返回: " << reply_text(reply) << "\n";
+        EXPECT_TRUE(reply.is_error());
+        EXPECT_TRUE(do_cmd(client, {"EXISTS", "zc_huge"}, reply));
+        EXPECT_EQ(reply.integer, 0);
+    });
+
+    RUN_TEST(zadd_accepts_legal_scores_and_echoes_them_like_redis) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client,
+                           {"ZADD", "zc_fmt", "2.0", "a", "-0.5", "b", "1e-7", "c"},
+                           reply));
+        EXPECT_EQ(reply.integer, 3);
+
+        EXPECT_TRUE(do_cmd(client, {"ZSCORE", "zc_fmt", "a"}, reply));
+        std::cout << "  ZSCORE(a) 返回: " << reply_text(reply) << "\n";
+        EXPECT_EQ(reply.str, std::string("2"));
+
+        EXPECT_TRUE(do_cmd(client, {"ZSCORE", "zc_fmt", "b"}, reply));
+        EXPECT_EQ(reply.str, std::string("-0.5"));
+
+        EXPECT_TRUE(do_cmd(client, {"ZSCORE", "zc_fmt", "c"}, reply));
+        EXPECT_EQ(reply.str, std::string("0.0000001"));
+    });
+}
+
 void run_all_contract_tests() {
     const char* server_bin = std::getenv("CC_SERVER_BIN");
     // 环境变量没传来说明 CMake 接线断了，那必须是失败而不是跳过——
@@ -447,6 +524,7 @@ void run_all_contract_tests() {
     run_ttl_contract_tests(port);
     run_atomicity_contract_tests(port);
     run_protocol_limit_tests(port);
+    run_zadd_score_contract_tests(port);
     run_capacity_contract_tests(binary);
 
     // 红了要能就地解释。WNOHANG 先问一次：服务器是自己死了还是还活着，决定了
