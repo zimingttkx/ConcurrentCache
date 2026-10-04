@@ -123,6 +123,12 @@ public:
     void register_link_to_loop(ClusterLink* link);
     void unregister_link_from_loop(ClusterLink* link);
 
+    /// @brief 锁内只抄一份 shared_ptr，发送在锁外做（避免共享锁里回调再要独占锁）
+    [[nodiscard]] std::vector<std::shared_ptr<ClusterLink>> snapshot_links() const;
+
+    /// @brief 按节点名取一条链路的 shared_ptr 副本；找不到返回空
+    [[nodiscard]] std::shared_ptr<ClusterLink> find_link(const std::string& node_name) const;
+
 private:
     // 定时任务
     void check_connections();
@@ -136,7 +142,10 @@ private:
     ClusterState* state_ = nullptr;  // 集群状态
     EventLoop* event_loop_ = nullptr;  // EventLoop 指针
 
-    std::unordered_map<std::string, std::unique_ptr<ClusterLink>> links_;  // 节点连接
+    // 出站链路的所有权用 shared_ptr：广播/发送这类路径必须**在锁外**调用
+    // ClusterLink::send_*（见 .cpp 里 snapshot_links 的注释），而锁外持有的裸指针
+    // 可能在对端擦除表项时被销毁。持有 shared_ptr 副本才能让对象活到自己发完。
+    std::unordered_map<std::string, std::shared_ptr<ClusterLink>> links_;  // 节点连接
     mutable std::shared_mutex links_mutex_;  // 保护 links_
 
     // ClusterLink fd 到 Channel 的映射（用于 EventLoop 注销）
