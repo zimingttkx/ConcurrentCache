@@ -186,24 +186,49 @@ void test_bus_send_still_allows_large_replicated_value() {
 void test_bus_sender_identity_predicate() {
     TEST_SUITE("Cluster Bus Sender Identity");
 
-    // 一致 → 接受
-    EXPECT_TRUE(bus_sender_ip_matches_peer("127.0.0.1", "127.0.0.1"));
-    EXPECT_TRUE(bus_sender_ip_matches_peer("10.0.3.7", "10.0.3.7"));
+    using enum BusMsgPlane;
 
-    // 不一致 → 拒。这就是伪造集群成员身份的形状：报文里自称另一个节点
-    //（身份 key 与 PFAIL 计票单位），但包是从别的地址进来的
-    EXPECT_TRUE(!bus_sender_ip_matches_peer("10.0.0.9", "127.0.0.1"));
-    EXPECT_TRUE(!bus_sender_ip_matches_peer("127.0.0.1", "10.0.0.9"));
+    // ── 控制面 ──
+    // 两侧都是字面地址且一致 → 接受
+    EXPECT_TRUE(bus_sender_identity_accepted("127.0.0.1", "127.0.0.1", false, kControl));
+    EXPECT_TRUE(bus_sender_identity_accepted("10.0.3.7", "10.0.3.7", true, kControl));
 
-    // 带尾空格/大小写不同的写法也不放过：身份 key 必须精确匹配，
+    // 两侧都是字面地址但不一致 → 拒。这就是伪造集群成员身份的形状：报文里自称
+    // 另一个节点（身份 key 与 PFAIL 计票单位），但包是从别的地址进来的
+    EXPECT_TRUE(!bus_sender_identity_accepted("10.0.0.9", "127.0.0.1", false, kControl));
+    EXPECT_TRUE(!bus_sender_identity_accepted("127.0.0.1", "10.0.0.9", true, kControl));
+    EXPECT_TRUE(!bus_sender_identity_accepted("127.0.0.2", "127.0.0.1", false, kControl));
+
+    // 任一侧是主机名 → 不做地址比对。#45 原来在这里也要求逐字相等，于是 hostname /
+    // Docker service-name / NAT 之后的部署里"对端自报是谁"与"链路在哪"永远不等：
+    // 用主机名敲的那条 CLUSTER MEET 组不起集群，而且连带把复制数据面一起拦掉。
+    EXPECT_TRUE(bus_sender_identity_accepted("127.0.0.1", "localhost", false, kControl));
+    EXPECT_TRUE(bus_sender_identity_accepted("node-1", "10.0.0.5", false, kControl));
+    EXPECT_TRUE(bus_sender_identity_accepted("db.internal", "db.internal", false, kControl));
+
+    // 带尾空格/纯数字这类既不是地址也不是名字的写法一律拒：身份 key 必须精确匹配，
     // 否则 "127.0.0.1 " 就能绕过等值比较
-    EXPECT_TRUE(!bus_sender_ip_matches_peer("127.0.0.1 ", "127.0.0.1"));
-    EXPECT_TRUE(!bus_sender_ip_matches_peer("127.0.0.2", "127.0.0.1"));
+    EXPECT_TRUE(!bus_sender_identity_accepted("127.0.0.1 ", "127.0.0.1", true, kControl));
+    EXPECT_TRUE(!bus_sender_identity_accepted("42", "42", true, kControl));
+    EXPECT_TRUE(!bus_sender_identity_accepted("bad_name", "127.0.0.1", true, kControl));
 
     // 任何一侧为空都不通过：观察不到来源不等于免检
-    EXPECT_TRUE(!bus_sender_ip_matches_peer("", ""));
-    EXPECT_TRUE(!bus_sender_ip_matches_peer("127.0.0.1", ""));
-    EXPECT_TRUE(!bus_sender_ip_matches_peer("", "127.0.0.1"));
+    EXPECT_TRUE(!bus_sender_identity_accepted("", "", false, kControl));
+    EXPECT_TRUE(!bus_sender_identity_accepted("127.0.0.1", "", false, kControl));
+    EXPECT_TRUE(!bus_sender_identity_accepted("", "127.0.0.1", true, kControl));
+
+    // ── 数据面（复制命令 / REPLSYNC）──
+    // 地址不作为凭据，看的是"这个名字在不在成员表里"。已在表里的成员即使隔着 NAT
+    // 也必须放行——旧实现在这里会静默丢掉复制数据，而且协议面上看不出任何东西。
+    EXPECT_TRUE(bus_sender_identity_accepted("10.0.0.9", "127.0.0.1", true, kData));
+    EXPECT_TRUE(bus_sender_identity_accepted("node-1", "10.0.0.5", true, kData));
+    // 不在表里的名字想直接推复制命令进来：拒（握手阶段不会发数据面报文，所以
+    // "先认识"这个前提成立）
+    EXPECT_TRUE(!bus_sender_identity_accepted("127.0.0.1", "127.0.0.1", false, kData));
+    EXPECT_TRUE(!bus_sender_identity_accepted("10.0.0.9", "127.0.0.1", false, kData));
+    // 就算名字在表里，畸形写法也不能过
+    EXPECT_TRUE(!bus_sender_identity_accepted("127.0.0.1 ", "127.0.0.1", true, kData));
+    EXPECT_TRUE(!bus_sender_identity_accepted("", "127.0.0.1", true, kData));
 }
 
 // 滴包防护的可观测口径：一帧挂着多久才算过期。

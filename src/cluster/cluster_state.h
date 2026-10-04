@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <unordered_map>
 #include <unordered_set>
+#include <atomic>
 #include <memory>
 #include <shared_mutex>
 #include <vector>
@@ -23,6 +24,15 @@ public:
     [[nodiscard]] std::shared_ptr<ClusterNode> getNodeByIpPort(const std::string& ip, int port) const;
     [[nodiscard]] std::vector<std::shared_ptr<ClusterNode>> getAllNodes() const;
     [[nodiscard]] size_t size() const;
+
+    // 总线身份对账的拒绝计数。
+    //
+    // 这个端口不认证，"拒绝一个来路不明的报文"是常事；但拒了多少、有没有在涨，
+    // 以前只有一条 WARN 日志——复制数据被静默丢掉时，运维从 CLUSTER INFO 上看不出来
+    // 任何东西。计数器是那条"可诊断"说法的唯一凭据。
+    /// @brief 记一笔拒绝，并返回累计值（测试与日志采样要用它，不另外加接口）
+    uint64_t note_bus_identity_rejection();
+    [[nodiscard]] uint64_t bus_identity_rejections() const;
 
     // 槽管理（存储 shared_ptr 避免二次查找）
     void setNodeForSlot(int slot, std::shared_ptr<ClusterNode> node);
@@ -64,6 +74,7 @@ public:
     void clearPfailReports(const std::string& node_name);
 
 private:
+    std::atomic<uint64_t> bus_identity_rejections_{0};  // 总线身份对账拒绝数
     std::string my_node_name_;                                               // 本节点名称
     std::unordered_map<std::string, std::shared_ptr<ClusterNode>> nodes_;    // 节点列表
     std::unordered_map<int, std::shared_ptr<ClusterNode>> slots_;            // 槽映射表（存指针避免二次查找）

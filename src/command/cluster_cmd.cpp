@@ -246,6 +246,9 @@ std::string ClusterCommand::handleInfo(const std::vector<std::string>& args) {
     result += "cluster_replica_nodes:" + std::to_string(replica_count) + "\n";
     result += "cluster_handshake_nodes:" + std::to_string(handshake_count) + "\n";
     result += "cluster_connected_nodes:" + std::to_string(connected_count) + "\n";
+    // 总线身份对账拒了多少条。没有这个数，"复制被静默丢掉"和"什么都没发生"在
+    // 协议面上长得一模一样。
+    result += "cluster_bus_identity_rejected:" + std::to_string(state->bus_identity_rejections()) + "\n";
     result += "cluster_slots_assigned:" + std::to_string(slot_owner_count) + "\n";
     result += "cluster_my_node:" + my_node->getName() + "\n";
     int64_t epoch = my_node->getInfo().config_epoch;
