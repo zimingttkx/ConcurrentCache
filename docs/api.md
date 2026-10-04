@@ -66,7 +66,7 @@ PING [message]
 
 | 命令 | 语法 | 返回 |
 |------|------|------|
-| `EXPIRE` | `EXPIRE key seconds` | `:1\r\n`（成功）/ `:0\r\n`（key 不存在或 seconds≤0） |
+| `EXPIRE` | `EXPIRE key seconds` | `:1\r\n`（成功，或 seconds≤0 时按"立即过期"删掉该键）/ `:0\r\n`（key 不存在） |
 | `TTL` | `TTL key` | 剩余秒数；`-1`=永不过期；`-2`=不存在 |
 | `PTTL` | `PTTL key` | 剩余毫秒数；语义同上 |
 | `PERSIST` | `PERSIST key` | `:1\r\n` / `:0\r\n`（成功/无过期或不存在） |

@@ -49,8 +49,20 @@ public:
         try {
             int64_t seconds = std::stoll(seconds_str);
             if (seconds <= 0) {
-                LOG_WARN(EXPIRE, "EXPIRE - invalid seconds <= 0: %ld for key=%s", seconds, key.c_str());
-                return RespEncoder::encode_integer(0);
+                // Redis 的 expireGenericCommand 先问键在不在（不在 → 0），再问
+                // "这个时间是不是已经过去"（checkAlreadyExpired：when <= now）；
+                // 成立就直接删键并回 **1**。这里原来回 0 且不删 —— 0 在客户端
+                // 眼里是"没设成功"，它不会重试，于是 `EXPIRE k 0`（拿过期当删除
+                // 的常见写法）留下一个永存的键。
+                auto& storage_now = GlobalStorage::instance();
+                if (!storage_now.exist(key)) {
+                    LOG_DEBUG(EXPIRE, "EXPIRE - key not found: %s", key.c_str());
+                    return RespEncoder::encode_integer(0);
+                }
+                storage_now.del(key);
+                LOG_INFO(EXPIRE, "EXPIRE - key=%s 立即过期（seconds=%ld），已删除",
+                         key.c_str(), seconds);
+                return RespEncoder::encode_integer(1);
             }
 
             // 检查键是否存在
