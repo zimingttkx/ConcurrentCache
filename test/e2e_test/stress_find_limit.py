@@ -263,14 +263,38 @@ max_entries = 2000000
 
     print("\n  启动服务器...")
     env = os.environ.copy()
+    hard_failures: List[str] = []
+
+    # 日志落文件：以前 stdout/stderr 一起丢进 DEVNULL，服务器要是起不来，报告里
+    # 只能看到"错误率 100%"，看不到它为什么起不来。
+    log_path = Path(tmp_dir) / "server.log"
+    log_file = open(log_path, "wb")
     proc = subprocess.Popen(
         [str(server_bin)],
         cwd=tmp_dir,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
         env=env,
     )
-    time.sleep(2.0)
+    proc.cc_log_path = str(log_path)   # type: ignore[attr-defined]
+    log_file.close()
+
+    # "起没起来"要去问它本人：连得上、PING 回 PONG 才算活着。
+    # 以前这里是固定 sleep(2.0) 然后直接开压——进程哪怕当场就退了，后面的
+    # 阶梯照样跑完，最后 return 0。
+    alive = False
+    for _ in range(20):
+        if proc.poll() is not None:
+            break
+        probe = RespClient(port=16379)
+        if await probe.connect():
+            alive = (await probe.execute("PING")) == "PONG"
+            await probe.close()
+        if alive:
+            break
+        await asyncio.sleep(0.5)
+    if not alive:
+        hard_failures.append(f"服务器没起来（连不上或 PING 不回 PONG），returncode={proc.poll()}")
 
     # 预热
     print("  预热 (1000 SETs)...")
@@ -279,6 +303,8 @@ max_entries = 2000000
         for i in range(1000):
             await warmup.execute("SET", f"warmup:{i}", f"val_{i}")
         await warmup.close()
+    else:
+        hard_failures.append("预热阶段连不上服务器")
     print("  预热完成\n")
 
     tester = StressTest(port=16379)
@@ -303,6 +329,17 @@ max_entries = 2000000
         all_attempts = result.total_ops + result.connect_fails
         error_rate = (result.failed_ops + result.connect_fails) / max(all_attempts, 1) * 100
 
+        # 进程半路没了，那不叫"找到破防点"，那叫崩溃
+        rc = proc.poll()
+        if rc is not None:
+            hard_failures.append(f"服务器在 {tier} 并发这一档中途退出（returncode={rc}）")
+            break
+
+        # 最低一档就是这套压测自己的基线：50 并发都不干净，后面每个结论都没有意义
+        if tier == tiers[0] and (result.success_ops == 0 or error_rate > 5):
+            hard_failures.append(
+                f"基线档位 {tier} 并发就跑不干净（成功 {result.success_ops} ops，错误率 {error_rate:.1f}%）")
+
         if (error_rate > 5 or result.p999_ms > 1000) and breaking_point is None:
             breaking_point = tier
             print(f"\n  >>> 破防点检测: {tier} 并发 (错误率={error_rate:.1f}%, p999={result.p999_ms:.1f}ms) <<<")
@@ -318,16 +355,46 @@ max_entries = 2000000
     print(f"  长期稳定性验证: {stable_concurrent} 并发, 4x30s")
     print(f"{'-'*70}")
     for phase in range(4):
-        await tester.run_tier(stable_concurrent, duration_sec=30, read_ratio=0.7)
+        if proc.poll() is not None:
+            break
+        stab = await tester.run_tier(stable_concurrent, duration_sec=30, read_ratio=0.7)
+        rc = proc.poll()
+        if rc is not None:
+            hard_failures.append(f"稳定性阶段 {phase + 1}/4 期间服务器退出（returncode={rc}）")
+            break
+        # 以前这 4 个阶段的结果是整个丢掉的：名字叫"长期稳定性验证"，但里面
+        # 发生什么都不影响退出码。
+        # 阈值取 50% 而不是阶梯那一条的 5%：这一档是破防点的 0.7 倍，本来就
+        # 贴在噪声区边上，硬卡 5% 会把"压得很紧但没坏"报成故障。
+        stab_err = (stab.failed_ops + stab.connect_fails) / max(stab.total_ops + stab.connect_fails, 1) * 100
+        if stab.success_ops == 0 or stab_err > 50:
+            hard_failures.append(
+                f"稳定性阶段 {phase + 1}/4 不合格（{stable_concurrent} 并发，"
+                f"成功 {stab.success_ops} ops，错误率 {stab_err:.1f}%）")
         await asyncio.sleep(2.0)
 
     # 停止服务器
     print(f"\n  停止服务器...")
     proc.send_signal(signal.SIGTERM)
     try:
-        proc.wait(timeout=10)
+        shutdown_rc = proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
         proc.kill()
+        shutdown_rc = None
+        hard_failures.append("SIGTERM 之后 10 秒内没有退出")
+    # 只判 returncode < 0（被信号打死 = 关停在半路崩了）。正数不拦：这条脚本
+    # 跑的是 release 构建，正常收尾是否严格退 0 不是这里要钉的东西。
+    if shutdown_rc is not None and shutdown_rc < 0:
+        hard_failures.append(f"关闭过程被信号打死（returncode={shutdown_rc}）")
+
+    if hard_failures:
+        print("\n  ── 服务器日志尾部 ──")
+        try:
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+            for line in text.strip().splitlines()[-40:]:
+                print(f"    | {line}")
+        except OSError as exc:
+            print(f"    读不到日志 {log_path}: {exc}")
     shutil.rmtree(tmp_dir, ignore_errors=True)
 
     # ─── 报告 ───
@@ -372,9 +439,18 @@ max_entries = 2000000
             for r in tester.results
         ],
     }
+    report["hard_failures"] = hard_failures
     report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False))
     print(f"\n  详细报告: {report_path}")
 
+    # 这条脚本的定位是"找极限"，所以找到破防点本身不算失败。但下面这几类必须红：
+    # 服务器压根没起来、跑中途死了、稳定性阶段没在干活、收尾被信号打死。
+    # 以前它无条件 return 0，daily.yml 里这一档于是不管发生什么都不会红。
+    if hard_failures:
+        print("\n  ── 硬失败 ──")
+        for msg in hard_failures:
+            print(f"    [FAIL] {msg}")
+        return 1
     return 0
 
 
