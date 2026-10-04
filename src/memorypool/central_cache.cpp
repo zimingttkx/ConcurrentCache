@@ -36,21 +36,23 @@ void* CentralCache::allocate(size_t class_index) {
 
     SpanList& span_list = span_lists_[class_index];
 
-    // 步骤1：从SpanList获取对象
-    if (!span_list.empty()) {
-        Span* span = span_list.front();
-
-        if (span->free_count_ > 0) {
-            // Span还有空闲对象，取出一个
-            void* obj = span->free_list_;
-            span->free_list_ = *reinterpret_cast<void**>(span->free_list_);
-            span->free_count_--;
+    // 步骤1：从链表里找一个还有空闲对象的 Span。
+    // front 是最近切出来的，多数时候就是它；但要扫全表，因为被取空过的 Span
+    // 之后还会有对象还回来。
+    //
+    // 关键：取空的 Span 绝对不能从链表里摘掉。deallocate 只能靠"页号落在
+    // [page_id_, page_id_+num_pages_) 里"来认对象属于哪个 Span，摘掉就等于把
+    // 这批还在使用的地址从可识别集合里删了 —— 归还时找不到归属，旧代码接着
+    // 就走出链表末尾去读野内存（CI 上 ConcurrencyTests 的 SEGFAULT，以及 ASan
+    // 报的 heap-buffer-overflow）。
+    for (auto& span_obj : span_list) {
+        if (span_obj.free_count_ > 0) {
+            void* obj = span_obj.free_list_;
+            span_obj.free_list_ = *reinterpret_cast<void**>(span_obj.free_list_);
+            span_obj.free_count_--;
 
             return obj;
         }
-
-        // Span没有空闲对象了（但还在链表里），需要获取新的Span
-        span_list.remove(span);
     }
 
     // 步骤2：从PageCache获取新Span
