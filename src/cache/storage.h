@@ -3,6 +3,7 @@
 
 #include <optional>
 #include <string>
+#include <functional>
 #include <unordered_map>
 #include <shared_mutex>
 #include <vector>
@@ -77,6 +78,21 @@ namespace cc_server {
      * - 单例模式：全局只有一个存储实例
      * - O(1) 平均查找复杂度
      */
+    // mutate() 里回调要表达的意图
+    enum class StoreOp {
+        kNoop,   // 什么都没改，原样留着
+        kWrite,  // 写回改动后的对象
+        kErase,  // 对象空了，删掉整个键（Redis 语义：空容器不存在）
+    };
+
+    // 键当前是 STRING 时，mutate() 是让容器操作把它接管成容器（LPUSH/HSET 走的
+    // 就是这条，本项目一贯如此），还是照 Redis 那样回 WRONGTYPE（弹出类命令只
+    // 改已经存在的容器，不该顺手把字符串变成容器）。
+    enum class StringPromotion {
+        kAllow,
+        kReject,
+    };
+
     class GlobalStorage {
     public:
         /** @brief 获取单例实例（线程安全） */
@@ -87,6 +103,25 @@ namespace cc_server {
 
         /** @brief 设置键值对，键已存在则更新 */
         void set(const std::string& key, const CacheObject& value);
+
+        /**
+         * @brief 在该分片的独占锁内完成"取出对象 → 改动 → 写回"
+         *
+         * 容器命令原本是 get() 拿一份副本、改完再 set() 整体覆盖。两步之间别的
+         * 线程已经写过的值会被这一份旧副本盖掉 —— 8 线程各 50 次 LPUSH 只活下来
+         * 212 个元素就是这么来的。incrby 早就有原子版本，这里是容器版的同一件事。
+         *
+         * fn 收到 want_type 的对象（键不存在时是新建的空对象，容器操作会接管它）；
+         * 命令自己要的结果（弹出的元素、新长度）写进 fn 捕获的引用里。
+         *
+         * @return false 表示键存在且类型既不是 want_type 也不是可被接管的 STRING，
+         *         调用方据此回 WRONGTYPE；true 表示 fn 已执行。
+         * @note kWrite 只替换 value，不动 expire_dict_，所以 LPUSH 不会清掉 TTL
+         *       （走 set() 的话会）。
+         */
+        bool mutate(const std::string& key, ObjectType want_type,
+                    const std::function<StoreOp(CacheObject&)>& fn,
+                    StringPromotion promote = StringPromotion::kAllow);
 
         /** @brief 删除键值对，返回是否删除成功 */
         bool del(const std::string& key);
