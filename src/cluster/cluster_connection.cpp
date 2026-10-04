@@ -110,7 +110,7 @@ bool ClusterConnection::connect_to_node(const std::string& node_name,
     // 添加到连接列表
     {
         std::unique_lock<std::shared_mutex> lock(links_mutex_);
-        links_[node_name] = std::move(link);
+        links_[node_name] = std::shared_ptr<ClusterLink>(std::move(link));
     }
 
     // 注册到 EventLoop（如果有）
@@ -197,6 +197,22 @@ void ClusterConnection::disconnect_all() {
     LOG_INFO(CLUSTER, "Disconnected from all nodes");
 }
 
+std::vector<std::shared_ptr<ClusterLink>> ClusterConnection::snapshot_links() const {
+    std::shared_lock<std::shared_mutex> lock(links_mutex_);
+    std::vector<std::shared_ptr<ClusterLink>> out;
+    out.reserve(links_.size());
+    for (const auto& [name, link] : links_) {
+        out.push_back(link);
+    }
+    return out;
+}
+
+std::shared_ptr<ClusterLink> ClusterConnection::find_link(const std::string& node_name) const {
+    std::shared_lock<std::shared_mutex> lock(links_mutex_);
+    auto it = links_.find(node_name);
+    return it != links_.end() ? it->second : std::shared_ptr<ClusterLink>();
+}
+
 ClusterLink* ClusterConnection::get_link(const std::string& node_name) {
     std::shared_lock<std::shared_mutex> lock(links_mutex_);
 
@@ -255,7 +271,8 @@ bool ClusterConnection::meet_node(const std::string& node_name,
 
 bool ClusterConnection::send_command_to_node(const std::string& node_name,
                                            const std::vector<std::string>& args) {
-    auto* link = get_link(node_name);
+    // shared_ptr 副本而不是裸指针：发送可能触发断开回调并让表项被擦除（见 broadcast_*）
+    auto link = find_link(node_name);
     if (!link) {
         LOG_WARN(CLUSTER, "No link to node for command: %s", node_name.c_str());
         return false;
@@ -272,7 +289,7 @@ bool ClusterConnection::send_command_to_node(const std::string& node_name,
 
 bool ClusterConnection::send_raw_to_node(const std::string& node_name,
                                          const std::string& data) {
-    auto* link = get_link(node_name);
+    auto link = find_link(node_name);
     if (!link) {
         LOG_WARN(CLUSTER, "No link to node for raw data: %s", node_name.c_str());
         return false;
@@ -281,9 +298,12 @@ bool ClusterConnection::send_raw_to_node(const std::string& node_name,
 }
 
 void ClusterConnection::broadcast_ping() {
-    std::shared_lock<std::shared_mutex> lock(links_mutex_);
-
-    for (auto& [name, link] : links_) {
+    // 锁内只抄指针，发送一律在锁外做。原来是在 shared_lock 里直接 send_*：某条链路
+    // 一旦写失败，ClusterLink::disconnect_and_notify 会回调 on_node_disconnected，
+    // 那里要拿 links_mutex_ 的**独占**锁；std::shared_mutex 既不可重入也不支持
+    // 锁升级，同一线程持有共享锁再要独占锁就永久停在这里 —— 而这个线程往往是
+    // SubReactor 或总线线程，于是整台服务器不再应答任何客户端。
+    for (auto& link : snapshot_links()) {
         if (link->is_connected()) {
             link->send_ping();
         }
@@ -291,9 +311,7 @@ void ClusterConnection::broadcast_ping() {
 }
 
 void ClusterConnection::broadcast_pong() {
-    std::shared_lock<std::shared_mutex> lock(links_mutex_);
-
-    for (auto& [name, link] : links_) {
+    for (auto& link : snapshot_links()) {
         if (link->is_connected()) {
             link->send_pong();
         }
@@ -301,9 +319,10 @@ void ClusterConnection::broadcast_pong() {
 }
 
 void ClusterConnection::broadcast_gossip(const GossipMsg& msg) {
-    std::shared_lock<std::shared_mutex> lock(links_mutex_);
-
-    for (auto& [name, link] : links_) {
+    // 同 broadcast_ping：不能在持有 links_mutex_ 共享锁时发送。这条路是
+    // CLUSTER FAIL 与故障广播的必经路径，一次对端写失败就能把调用它的线程
+    // （通常是处理该客户端命令的 SubReactor）永久挂住。
+    for (auto& link : snapshot_links()) {
         if (link->is_connected()) {
             link->send_gossip(msg);
         }
