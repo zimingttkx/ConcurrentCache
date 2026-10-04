@@ -3,6 +3,7 @@
 #include <thread>
 #include <chrono>
 #include <vector>
+#include <limits>
 #include "../trace/test_assertions.h"
 #include "cache/storage.h"
 #include "datatype/object.h"
@@ -156,6 +157,34 @@ void test_storage_persist() {
     EXPECT_TRUE(result.has_value());
 
     std::cout << "✓ Storage persist test passed\n";
+}
+
+// ============================================================================
+// 极大 TTL 不能溢出成"立刻就过期"
+// ============================================================================
+
+void test_storage_huge_ttl_does_not_overflow() {
+    TEST_SUITE("GlobalStorage Huge TTL");
+
+    GlobalStorage storage;
+    CacheObject obj;
+    obj.set_string("survive");
+
+    // EXPIRE/SETEX 传极大的秒数时，用户要的是"实际上永不过期"。
+    // 溢出会把它变成负数绝对时间戳，键在下一次读就被惰性删除。
+    storage.set_with_expire("huge1", obj, std::numeric_limits<int64_t>::max());
+    EXPECT_FALSE(storage.is_expired("huge1"));
+    EXPECT_TRUE(storage.exist("huge1"));
+    EXPECT_TRUE(storage.get("huge1").has_value());
+
+    // 一个仍然很大但不会触发饱和的 TTL，确认常规路径没被改动带坏
+    storage.set_with_expire("big2", obj, 3600LL * 1000 * 24 * 365);  // 一年
+    EXPECT_FALSE(storage.is_expired("big2"));
+    EXPECT_TRUE(storage.get("big2").has_value());
+    const int64_t ttl = storage.expire_dict().get_ttl("big2");
+    EXPECT_TRUE(ttl > 3600LL * 1000 * 24 * 364);
+
+    std::cout << "✓ Storage huge TTL saturation test passed\n";
 }
 
 // ============================================================================
@@ -425,6 +454,7 @@ void run_all_storage_tests() {
     test_storage_set_expire_time();
     test_storage_set_with_expire();
     test_storage_persist();
+    test_storage_huge_ttl_does_not_overflow();
     test_storage_dirty_counter();
     test_storage_concurrent_read_write();
     test_storage_sharding_performance();
