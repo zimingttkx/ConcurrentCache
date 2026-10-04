@@ -206,13 +206,38 @@ void test_bus_sender_identity_predicate() {
     EXPECT_TRUE(!bus_sender_ip_matches_peer("", "127.0.0.1"));
 }
 
-// 滴包防护：帧头声明 200MB（合法，没超 kMaxPacketBytes），正文一直不齐。
+// 滴包防护的可观测口径：一帧挂着多久才算过期。
 //
-// 空闲超时挡不住这种打法——每滴一个字节都会把 last_recv_time_ 刷新，于是
-// ping_timeout 永远不触发，而这条链路的接收缓冲一路往 256MB 涨；总线链路数又
-// 不设上限，就是一个不做认证的远程内存放大。所以要量的是"同一帧停留了多久"。
-// 测试不真的等 30 秒：partial_frame_stale 的时钟由调用方给。
-void test_bus_partial_frame_drip_becomes_stale() {
+// 空闲超时挡不住滴包——每滴一个字节都会刷新 last_recv_time_，于是超时永远不触发，
+// 而这条链路的接收缓冲一路往 kMaxPacketBytes(256MB) 涨；总线链路数不设上限，就是
+// 一个不做认证的远程内存放大。期限不能是一个固定值：kMaxPacketBytes 留那么大本来
+// 就是为了大 value 的复制帧（见 cluster_link.h 的注释），固定 30 秒会误杀慢链路。
+// 所以期限是"固定宽限 + 声明长度折算的时间"，下限速率 1MB/s。
+void test_bus_partial_frame_drip_times_out() {
+    TEST_SUITE("Cluster Bus Frame Bounds");
+
+    BusHarness h;
+    if (!h.ok()) {
+        EXPECT_TRUE(false);
+        return;
+    }
+
+    constexpr uint32_t kDeclared = 200u * 1024u * 1024u;
+    constexpr size_t kHead = sizeof(ClusterMsgHeader);
+    h.feed(make_header(kDeclared, static_cast<uint16_t>(ClusterMsgType::kPing)));
+    h.link.handle_read();  // 生产路径在这里起算
+    EXPECT_TRUE(!h.disconnected);
+    EXPECT_EQ(h.delivered, 0);
+
+    const uint64_t now = ClusterLink::steady_now_ms();
+    // 200MB / 1MBps = 200 秒，加 10 秒宽限。一分钟不算过期，慢链路不会被误杀。
+    EXPECT_TRUE(!h.link.partial_frame_expired(kDeclared, kHead + 1, now + 60000));
+    // 滴包（每 10 秒 1 字节）在 211 秒时必须过期。
+    EXPECT_TRUE(h.link.partial_frame_expired(kDeclared, kHead + 2, now + 211000));
+}
+
+// 过期之后必须真的把链路断掉——只判过期不断链等于没防护。
+void test_bus_partial_frame_timeout_disconnects() {
     TEST_SUITE("Cluster Bus Frame Bounds");
 
     BusHarness h;
@@ -224,35 +249,39 @@ void test_bus_partial_frame_drip_becomes_stale() {
     constexpr uint32_t kDeclared = 200u * 1024u * 1024u;
     h.feed(make_header(kDeclared, static_cast<uint16_t>(ClusterMsgType::kPing)));
     h.link.handle_read();
-
-    // 第一滴只登记起算时间：不断链、不投递
     EXPECT_TRUE(!h.disconnected);
-    EXPECT_EQ(h.delivered, 0);
 
-    const uint64_t now = ClusterLink::steady_now_ms();
-    EXPECT_TRUE(!h.link.partial_frame_stale(now));
-    EXPECT_TRUE(h.link.partial_frame_stale(now + 31000));
-
-    // 再滴一个字节，链路仍然活着（还没到停留上限）
+    // 不需要真等两百多秒：把这帧的起算时刻往前挪，再滴一个字节
+    h.link.set_partial_frame_start_for_test(ClusterLink::steady_now_ms() - 300000);
     EXPECT_EQ(::write(h.peer_fd, "x", 1), static_cast<ssize_t>(1));
     h.link.handle_read();
-    EXPECT_TRUE(!h.disconnected);
-    EXPECT_TRUE(h.link.partial_frame_stale(ClusterLink::steady_now_ms() + 31000));
 
-    // 反过来：长度正好凑齐的帧必须被投递，并且不留任何"半帧"状态——
-    // 否则正常流量会被误判成滴包而断掉。
-    BusHarness good;
-    if (!good.ok()) {
-        EXPECT_TRUE(false);
-        return;
-    }
-    good.feed(make_header(static_cast<uint32_t>(sizeof(ClusterMsgHeader)),
-                          static_cast<uint16_t>(ClusterMsgType::kPing)));
-    good.link.handle_read();
-    EXPECT_EQ(good.delivered, 1);
-    EXPECT_TRUE(!good.link.partial_frame_stale(ClusterLink::steady_now_ms() + 60000));
+    EXPECT_TRUE(h.disconnected);
+    EXPECT_EQ(h.delivered, 0);
 }
 
+// Channel 是按"登记那一刻的 fd"存进 link_channels_ 的。断开会把 fd_ 置成 -1，
+// 而注销发生在断开回调里——那里必须还能拿到原来那个号码，否则 find(-1) 不命中，
+// Channel 既不从 epoll 摘除也不 delete，fd 号被下一条链路复用后新链路根本进不了
+// epoll（EPOLL_CTL_MOD 报 ENOENT），该节点的 gossip/复制静默停摆。
+void test_disconnect_still_reports_the_registered_fd() {
+    TEST_SUITE("Cluster Bus Frame Bounds");
+
+    int sv[2] = {-1, -1};
+    EXPECT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+
+    ClusterLink link("peer-node", "127.0.0.1", 19000);
+    link.set_fd(sv[0]);
+    const int registered = link.fd();
+    EXPECT_TRUE(registered >= 0);
+    EXPECT_EQ(link.registered_fd(), registered);
+
+    link.disconnect_and_notify();
+    EXPECT_EQ(link.fd(), -1);              // 现在关掉了
+    EXPECT_EQ(link.registered_fd(), registered);  // 注销 Channel 要用的是这个
+
+    ::close(sv[1]);
+}
 void run_all_cluster_bus_framing_tests() {
     std::cout << "\n========================================\n";
     std::cout << "Running Cluster Bus Framing Tests\n";
@@ -264,7 +293,9 @@ void run_all_cluster_bus_framing_tests() {
     test_bus_frame_shorter_than_header_disconnects();
     test_bus_send_still_allows_large_replicated_value();
     test_bus_sender_identity_predicate();
-    test_bus_partial_frame_drip_becomes_stale();
+    test_bus_partial_frame_drip_times_out();
+    test_bus_partial_frame_timeout_disconnects();
+    test_disconnect_still_reports_the_registered_fd();
 
     std::cout << "\n========================================\n";
     std::cout << "All Cluster Bus Framing Tests Done!\n";

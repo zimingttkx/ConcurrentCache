@@ -36,6 +36,7 @@ bool ClusterLink::connect() {
                  node_name_.c_str(), strerror(errno));
         return false;
     }
+    registered_fd_ = fd_;
 
     // 设置非阻塞
     int flags = fcntl(fd_, F_GETFL, 0);
@@ -327,30 +328,23 @@ void ClusterLink::handle_read() {
         }
 
         bool frame_pending = false;
+        uint32_t declared = 0;
         if (pending >= kHeaderSize) {
             uint32_t magic = 0;
             memcpy(&magic, recv_buffer_.peek(), sizeof(magic));
             if (magic == kMsgMagic) {
-                uint32_t declared = 0;
                 memcpy(&declared, recv_buffer_.peek() + offsetof(ClusterMsgHeader, length),
-                            sizeof(declared));
+                       sizeof(declared));
                 frame_pending = static_cast<uint64_t>(declared) > pending;
             }
         }
 
-        if (frame_pending) {
-            if (partial_frame_since_ms_ == 0) {
-                partial_frame_since_ms_ = now;
-            } else if (now - partial_frame_since_ms_ >= kPartialFrameTimeoutMs) {
-                LOG_ERROR(CLUSTER,
-                          "Partial frame from %s dripping for %lu ms, disconnecting",
-                          node_name_.c_str(),
-                          static_cast<unsigned long>(now - partial_frame_since_ms_));
-                disconnect_and_notify();
-                return;  // 回调可能已销毁 this
-            }
-        } else {
-            partial_frame_since_ms_ = 0;
+        if (partial_frame_expired(frame_pending ? declared : 0, pending, now)) {
+            LOG_ERROR(CLUSTER,
+                      "Frame from %s stuck at %zu/%u bytes past its deadline, disconnecting",
+                      node_name_.c_str(), pending, declared);
+            disconnect_and_notify();
+            return;  // 回调可能已销毁 this
         }
     } else if (n == 0) {
         // 对端关闭连接
@@ -536,11 +530,46 @@ uint64_t ClusterLink::steady_now_ms() {
         ).count());
 }
 
-bool ClusterLink::partial_frame_stale(const uint64_t now_ms) const {
-    if (partial_frame_since_ms_ == 0) {
-        return false;  // 没有半帧挂着，谈不上超时
+bool ClusterLink::partial_frame_expired(const uint32_t declared_len, const size_t buffered,
+                                       const uint64_t now_ms) {
+    if (declared_len == 0) {
+        // 没有半帧挂着：要么还没读到头，要么这一帧已经凑齐交给 read_complete。
+        reset_partial_frame_accounting();
+        return false;
     }
-    return now_ms - partial_frame_since_ms_ >= kPartialFrameTimeoutMs;
+
+    // 只在"换了一帧"时重新起算：声明长度变了，或者缓冲变短了（上一条被消费掉或
+    // 被 read_complete 丢弃）。注意滴包不会在这里重置——它每滴一个字节都在长，
+    // 如果按进展重新起算，"每 10 秒滴 1 字节"就永远超不了时，防护等于没有。
+    if (partial_frame_since_ms_ == 0 || declared_len != partial_frame_declared_ ||
+        buffered < partial_frame_bytes_) {
+        partial_frame_since_ms_ = now_ms;
+        partial_frame_bytes_ = buffered;
+        partial_frame_declared_ = declared_len;
+        return false;
+    }
+
+    partial_frame_bytes_ = buffered;
+
+    // 期限 = 固定宽限 + 按声明长度折算的时间（下限 1MB/s，见头文件注释）。
+    // 真实链路远快于 1MB/s，所以大 value 复制帧不会被误杀；而滴包要凑完 256MB
+    // 得几十年，一定超。
+    const uint64_t limit_ms =
+        kPartialFrameGraceMs + (declared_len / kPartialFrameMinBytesPerSec) * 1000ull;
+    return now_ms - partial_frame_since_ms_ >= limit_ms;
+}
+
+void ClusterLink::reset_partial_frame_accounting() {
+    partial_frame_since_ms_ = 0;
+    partial_frame_bytes_ = 0;
+    partial_frame_declared_ = 0;
+}
+
+void ClusterLink::set_partial_frame_start_for_test(const uint64_t started_ms) {
+    // 测试接缝：把"这一帧第一次残缺"的时刻往前挪，好在没有真实 200 多秒的情况下
+    // 驱动 handle_read 里的超时断链分支。与 set_fd 属于同一类只用于观测的接缝，
+    // 不参与任何业务路径的决策。
+    partial_frame_since_ms_ = started_ms;
 }
 
 } // namespace cc_server
