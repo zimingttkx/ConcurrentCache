@@ -337,6 +337,12 @@ void ClusterLink::handle_read() {
                        sizeof(declared));
                 frame_pending = static_cast<uint64_t>(declared) > pending;
             }
+        } else if (pending > 0) {
+            // 连帧头都还没读全，同样是一帧没着落。不记这一笔的话，对端只要每次滴
+            // 不到 kHeaderSize 个字节，下面的记账就会每轮从零开始 —— 缓冲确实涨不动，
+            // 但这条链路和它的 fd 可以无限期挂着。期限按头长折算，等于固定 10 秒宽限。
+            declared = static_cast<uint32_t>(kHeaderSize);
+            frame_pending = true;
         }
 
         if (partial_frame_expired(frame_pending ? declared : 0, pending, now)) {

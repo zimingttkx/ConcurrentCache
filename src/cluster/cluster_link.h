@@ -189,7 +189,8 @@ private:
     static constexpr uint64_t kPartialFrameGraceMs = 10000;
     static constexpr uint64_t kPartialFrameMinBytesPerSec = 1024ull * 1024ull;
 
-    /// @brief 当前半帧第一次出现/最近一次进展的时刻（steady_clock 毫秒），0 表示没有半帧挂着。
+    /// @brief 当前这一帧第一次残缺的时刻（steady_clock 毫秒），0 表示没有半帧挂着。
+    /// 只在换帧时重置，按进展重置会被滴包永远续下去。
     uint64_t partial_frame_since_ms_ = 0;
 
     /// @brief 上次记账时缓冲里已有多少字节，用来区分"换了一帧"与"同一帧还在长"。

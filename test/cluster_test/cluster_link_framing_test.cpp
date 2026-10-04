@@ -307,6 +307,36 @@ void test_disconnect_still_reports_the_registered_fd() {
 
     ::close(sv[1]);
 }
+// 只滴帧头的一部分，也不能让链路无限期挂着。
+//
+// 记账只看"整帧还差多少"的话，攻击者不必声明一个巨大的帧——每次只滴几个字节、
+// 永远凑不满 2120 字节的头，就能让每一轮的起算时间都从零开始：缓冲确实涨不动，
+// 但这条链路和它的 fd 可以无限挂着（心跳与连接数照吃）。所以"头没读全"同样按
+// 一帧没着落来记账，期限按头长折算 = 固定 10 秒宽限。
+void test_bus_partial_header_also_times_out() {
+    TEST_SUITE("Cluster Bus Frame Bounds");
+
+    BusHarness h;
+    if (!h.ok()) {
+        EXPECT_TRUE(false);
+        return;
+    }
+
+    const char junk[10] = {0x43, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    EXPECT_EQ(::write(h.peer_fd, junk, sizeof(junk)), static_cast<ssize_t>(sizeof(junk)));
+    h.link.handle_read();
+    EXPECT_TRUE(!h.disconnected);  // 才 10 个字节，宽限内
+
+    h.link.set_partial_frame_start_for_test(ClusterLink::steady_now_ms() - 11000);
+    EXPECT_EQ(::write(h.peer_fd, "x", 1), static_cast<ssize_t>(1));
+    h.link.handle_read();
+    EXPECT_TRUE(h.disconnected);   // 11 秒没有整帧头 -> 断链
+
+    if (!h.disconnected) {
+        // 没断的话把这条链关掉，别让 socketpair 泄漏到下一个用例
+        h.link.disconnect_and_notify();
+    }
+}
 void run_all_cluster_bus_framing_tests() {
     std::cout << "\n========================================\n";
     std::cout << "Running Cluster Bus Framing Tests\n";
@@ -321,6 +351,7 @@ void run_all_cluster_bus_framing_tests() {
     test_bus_partial_frame_drip_times_out();
     test_bus_partial_frame_timeout_disconnects();
     test_disconnect_still_reports_the_registered_fd();
+    test_bus_partial_header_also_times_out();
 
     std::cout << "\n========================================\n";
     std::cout << "All Cluster Bus Framing Tests Done!\n";
