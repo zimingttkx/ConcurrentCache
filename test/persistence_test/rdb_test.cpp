@@ -1,5 +1,6 @@
 #include <iostream>
 #include <cassert>
+#include <cstdio>
 #include <fstream>
 #include <thread>
 #include <chrono>
@@ -429,6 +430,46 @@ void test_rdb_bgsave() {
 // 主测试函数
 // ============================================================================
 
+// 损坏的 RDB 必须在"动存储"之前就被拦下。
+// 旧顺序是逐条写进 storage、读到文件末尾才计算 CRC —— 于是半个数据集已经落库，
+// load() 才返回 false，而调用方分不清"文件坏了"和"根本没有文件"，服务器照常
+// 拿着这批残缺数据对外服务。
+void test_rdb_corrupt_file_leaves_storage_untouched() {
+    TEST_SUITE("RDB Corrupt File");
+
+    const std::string path = "/tmp/test_rdb_corrupt.rdb";
+
+    GlobalStorage src;
+    CacheObject a;
+    a.set_string("AAA");
+    CacheObject b;
+    b.set_string("BBB");
+    src.set("k1", a);
+    src.set("k2", b);
+
+    auto& rdb = RdbPersistence::instance();
+    EXPECT_TRUE(rdb.save(path, src));
+
+    // 翻掉正文中间的一个字节：magic、版本、CRC 尾都在，只有内容不符
+    {
+        std::fstream f(path, std::ios::in | std::ios::out | std::ios::binary);
+        EXPECT_TRUE(f.good());
+        f.seekg(10);
+        char c = 0;
+        f.get(c);
+        f.seekp(10);
+        f.put(static_cast<char>(c ^ 0xFF));
+    }
+
+    GlobalStorage dst;
+    EXPECT_TRUE(!rdb.load(path, dst));
+    // 关键断言：一个键都不许进来
+    EXPECT_EQ(dst.size(), static_cast<size_t>(0));
+    EXPECT_TRUE(!dst.get("k1").has_value());
+
+    std::remove(path.c_str());
+}
+
 void run_all_rdb_tests() {
     std::cout << "\n========================================\n";
     std::cout << "Running RDB Persistence Tests\n";
@@ -440,6 +481,7 @@ void run_all_rdb_tests() {
     test_rdb_empty_storage();
     test_rdb_large_dataset();
     test_rdb_file_not_exist();
+    test_rdb_corrupt_file_leaves_storage_untouched();
     test_rdb_stats();
     test_rdb_bgsave();
 

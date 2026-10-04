@@ -187,10 +187,18 @@ int main(int argc, char* argv[]) {
     // 9. 加载 RDB 持久化文件（必须在 ExpirationChecker 启动之前，避免并发访问）
     auto& rdb = RdbPersistence::instance();
     std::string rdb_path = Config::instance().getString("rdb_path", "./dump.rdb");
-    if (rdb.load(rdb_path, GlobalStorage::instance())) {
+    if (access(rdb_path.c_str(), R_OK) != 0) {
+        std::cout << "[主线程] 没有可读的 RDB 文件，将从空存储开始" << std::endl;
+    } else if (rdb.load(rdb_path, GlobalStorage::instance())) {
         std::cout << "[主线程] RDB 数据加载成功" << std::endl;
     } else {
-        std::cout << "[主线程] 无 RDB 文件或加载失败，将从空存储开始" << std::endl;
+        // 文件在、却读不出来 = 数据损坏。继续启动就是拿一个残缺数据集对外服务，
+        // 而且客户端再也分不清"这就是库里全部内容"和"启动时把文件读崩了"。
+        // 这种情况必须让退出码说话，systemd / docker 才看得到。
+        std::cerr << "[主线程] RDB 文件存在但加载失败：" << rdb_path
+                  << "，拒绝启动以免对外提供残缺数据" << std::endl;
+        SubReactorPool::instance().stop();
+        return 1;
     }
 
     // 9.1 设置集群的 EventLoop（在集群初始化之前）
