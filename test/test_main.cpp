@@ -5,6 +5,8 @@
 #include <memory>
 #include <thread>
 
+#include "trace/test_assertions.h"
+
 // 测试函数声明
 namespace cc_server {
 namespace testing {
@@ -86,6 +88,12 @@ int main(int argc, char* argv[]) {
         exit_code = 1;
     } catch (...) {
         std::cerr << "Unknown exception caught\n";
+        exit_code = 1;
+    }
+
+    // 断言失败必须反映到退出码。这个二进制此前唯一的"失败"方式是崩溃：tests.cpp
+    // 一个 assert 都没有，也没读过任何统计量，所以除 SEGFAULT 外一律绿。
+    if (cc_server::testing::g_test_stats().failed_tests.load() > 0) {
         exit_code = 1;
     }
 

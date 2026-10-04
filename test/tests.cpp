@@ -9,12 +9,16 @@
 #include <sstream>
 #include <string>
 #include <utility>
+#include <set>
 
 #include "trace/trace_logger.h"
 #include "trace/trace_analyzer.h"
+#include "trace/test_assertions.h"
 #include "base/thread_pool.h"
 #include "base/lock.h"
 #include "memorypool/memory_pool.h"
+#include "memorypool/central_cache.h"
+#include "memorypool/size_class.h"
 
 namespace cc_server {
 namespace testing {
@@ -776,10 +780,65 @@ void run_lock_tests() {
     TraceLogger::instance().flush_and_close();
 }
 
+// CentralCache::deallocate 必须把对象挂回它原来那个 Span 的空闲链。
+//
+// 旧实现有两处叠加的错误：取空的 Span 会被从链表里摘掉，而 deallocate 只靠
+// "页号落在 [page_id_, page_id_+num_pages_)" 认归属；加上 SpanList::begin()
+// 返回裸 Span*，range-for 的 ++ 是指针自增而不是走 next_。结果归还时既认不出
+// 归属，又会读出根本没分配过的内存 —— CI 上 ConcurrencyTests 的 SEGFAULT 和
+// ASan 的 heap-buffer-overflow 都是这一条。
+//
+// 两条不会随平台页大小/合并策略漂移的断言：
+//   1) 同一个地址不能被同时发给两个使用者（空闲链被写坏时一定会破）；
+//   2) 反复 alloc/free 之后见过的不同地址总数必须收敛，不能每轮都换新地址 ——
+//      还不回去的对象被静默丢弃，PageCache 只好一直切新 Span。
+static void test_central_cache_recycles_objects() {
+    TEST_SUITE("CentralCache 回收契约");
+
+    const size_t cls = SizeClass::get_index(64);
+    EXPECT_TRUE(cls != static_cast<size_t>(-1));
+
+    auto& central = CentralCache::get_instance();
+    constexpr int kBatch = 1200;   // 明显超过单个 Span（64B 类是 256 个），保证跨 Span
+    constexpr int kRounds = 3;
+
+    std::set<void*> seen;
+    for (int round = 0; round < kRounds; ++round) {
+        std::vector<void*> live;
+        live.reserve(kBatch);
+        std::set<void*> now_live;
+        for (int i = 0; i < kBatch; ++i) {
+            void* p = central.allocate(cls);
+            EXPECT_TRUE(p != nullptr);
+            if (p == nullptr) break;
+            // 把一个还在用的地址再发一次就是数据损坏
+            EXPECT_EQ(now_live.count(p), static_cast<std::size_t>(0));
+            now_live.insert(p);
+            seen.insert(p);
+            live.push_back(p);
+        }
+        EXPECT_EQ(live.size(), static_cast<std::size_t>(kBatch));
+
+        for (void* p : live) {
+            central.deallocate(p, cls);
+        }
+    }
+
+    std::cout << "  " << kRounds << " 轮各 " << kBatch << " 个对象，累计见过的不同地址数 = "
+              << seen.size() << "\n";
+    // 归还正常时实测 1280（略多于一个批次，因为 Span 还给 PageCache 后会被重新切分）；
+    // 归还失效时每轮都是全新的 1200 个地址。取 2 轮做门槛，两边都留有余量。
+    EXPECT_TRUE(seen.size() <= static_cast<std::size_t>(kBatch) * 2);
+}
+
 void run_memory_pool_tests() {
     std::cout << "\n========================================\n";
     std::cout << "       MemoryPool Concurrency Tests\n";
     std::cout << "========================================\n\n";
+
+    std::cout << "[Test 0] CentralCache recycle contract\n";
+    test_central_cache_recycles_objects();
+    std::cout << "\n";
 
     TraceLogger::instance().initialize("memory_pool_test");
 

@@ -67,9 +67,33 @@ public:
     // 获取链表大小（不包含哨兵节点）
     [[nodiscard]] size_t size() const;
 
-    // 遍历链表
-    Span* begin() const { return head_->next_; }
-    Span* end() const { return head_; }
+    // 遍历链表。
+    // begin()/end() 不能直接返回 Span*：那样 range-for 里的 ++it 就是指针自增
+    // （访问的是 span+1 这块根本没分配过的内存），而不是走 next_。节点是逐个
+    // new 出来的，彼此不连续，所以这种遍历读到的全是野指针 —— CentralCache::
+    // deallocate 就因此既找不到正确的 Span，又会踩内存（ASan: heap-buffer-overflow
+    // "READ of size 8, 0 bytes after 64-byte region"，region 正是 sizeof(Span)）。
+    class Iterator {
+    public:
+        explicit Iterator(Span* pos) : pos_(pos) {}
+
+        Span& operator*() const { return *pos_; }
+        Span* operator->() const { return pos_; }
+
+        Iterator& operator++() {
+            pos_ = pos_->next_;
+            return *this;
+        }
+
+        bool operator==(const Iterator& other) const { return pos_ == other.pos_; }
+        bool operator!=(const Iterator& other) const { return pos_ != other.pos_; }
+
+    private:
+        Span* pos_;
+    };
+
+    Iterator begin() const { return Iterator(head_->next_); }
+    Iterator end() const { return Iterator(head_); }
 
 private:
     Span* head_;  // 哨兵节点，简化空链表判断
