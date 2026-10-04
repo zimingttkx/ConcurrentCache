@@ -197,6 +197,18 @@ namespace cc_server {
             }
         }
 
+        // 退出前把已经排队、还没人执行的任务收尾。
+        //
+        // 循环顶的 quit 检查排在 drain_pending_tasks() 之前，所以"投递成功"与
+        // "quit 落地"之间确实存在窗口：SubReactor::add_connection 已经看过
+        // is_quitting()（那时还是 false）并把登记任务交给了队列，而循环下一圈
+        // 直接 break —— 这条 fd 从此没人接手。SubReactor 那边的 quit 防线只挡得
+        // 到投递之后发生的 quit，挡不住这个先投递、后 quit 的顺序。
+        //
+        // 在这里排空一次：register_connection 建出的 Connection 归 SubReactor 的
+        // connections_ 持有，停机流程销毁它时 fd 随之关掉，不会再留悬空 fd。
+        drain_pending_tasks();
+
         LOG_INFO(event_loop, "EventLoop stopped");
     }
 
