@@ -175,6 +175,22 @@ int main(int argc, char* argv[]) {
     std::cout << "[主线程] SubReactor 数量: " << reactor_count << std::endl;
     std::cout << "[主线程] 线程池大小: " << thread_pool_size << std::endl;
 
+    // 4.1 键数量上限接进存储
+    //
+    // conf 里写了 max_entries，但从来没有人读它：GlobalStorage 一直用类内默认值
+    // （200 万），配置项是装饰性的。淘汰判断发生在 set 的路径上，所以这一步必须
+    // 在任何写入之前做完，否则启动初期的写入都按默认上限算。
+    const int configured_max_entries = Config::instance().getInt("max_entries", 0);
+    if (configured_max_entries > 0) {
+        GlobalStorage::instance().set_max_entries(static_cast<size_t>(configured_max_entries));
+    } else if (configured_max_entries < 0) {
+        // 0 / 缺省 = 沿用类内默认值；负数是配错了，明确说出来而不是静接受
+        std::cerr << "[主线程] max_entries=" << configured_max_entries
+                  << " 非法，沿用默认键数量上限 " << GlobalStorage::instance().max_entries()
+                  << std::endl;
+    }
+    std::cout << "[主线程] 键数量上限: " << GlobalStorage::instance().max_entries() << std::endl;
+
     // 5. 初始化 SubReactorPool（多线程处理 I/O 事件）
     // 必须先于 ThreadPool 初始化，因为 MainReactor 会用到
     SubReactorPool::instance().init(static_cast<size_t>(reactor_count));
