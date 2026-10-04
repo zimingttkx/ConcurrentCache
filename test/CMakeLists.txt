@@ -138,7 +138,9 @@ add_executable(concurrency-tests
 )
 
 # 语义契约测试：起真服务器、走真 socket 与真 RESP，断言 Redis 的（也是本仓库
-# 文档承诺的）行为。多数条目今天会失败，所以标签是 contract —— 可见但不拦合并。
+# 文档承诺的）行为。自 #37 起整层是绿的（7/7），但它要绑端口、起进程、看时序，
+# 所以留在 contract 多观察几轮再收紧到 gate —— 一条时好时坏的 required check
+# 和一条假绿一样有害。
 add_executable(contract-tests
     contract_test/contract_test.cpp
 )
@@ -235,11 +237,11 @@ set(CC_TESTS
     "AtomicTests|atomic-tests|gate|60"
     "SyncPrimitivesTests|sync-primitives-tests|gate|120"
     "ClusterTests|cluster-tests|gate|60"
-    "LockCorrectnessTests|lock-correctness-tests|contract|120"
-    "LockDeadlockTests|lock-deadlock-tests|contract|120"
-    "LockRaceTests|lock-race-tests|contract|120"
-    "LockBoundaryTests|lock-boundary-tests|contract|120"
-    "V3Tests|concurrentcache-v3-tests|contract|600"
+    "LockCorrectnessTests|lock-correctness-tests|gate|120"
+    "LockDeadlockTests|lock-deadlock-tests|gate|120"
+    "LockRaceTests|lock-race-tests|gate|120"
+    "LockBoundaryTests|lock-boundary-tests|gate|120"
+    "V3Tests|concurrentcache-v3-tests|gate|600"
     "ConcurrencyTests|concurrency-tests|contract|300"
     "ContractTests|contract-tests|contract|180"
     "LockStressTests|lock-stress-tests|slow|300"
