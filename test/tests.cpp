@@ -159,7 +159,11 @@ public:
             });
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+        // 排空线程池再读，而不是睡两秒。TSan 报的就是这里：worker 线程写
+        // executed_counts_，主线程睡完之后直接读，睡眠不是 happens-before 边。
+        // ThreadPool::stop() 会先把队列跑空再 join（take_task 只在"已停止且队列为
+        // 空"时才返回 nullptr），join 之后再读这些计数才是安全的。
+        pool_->stop();
 
         // 原来这里比的是"完成顺序 == 提交顺序"。4 个 worker 谁先取到任务由调度
         // 决定，那条断言绿只说明当时的排程凑巧——它不是线程池的性质。改成断言性
