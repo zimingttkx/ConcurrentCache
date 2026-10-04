@@ -8,16 +8,36 @@
 #include <sys/socket.h>
 
 #include <atomic>
+#include <cstdio>
+#include <fstream>
+#include <iostream>
 #include <memory>
+#include <string>
 #include <thread>
 #include <chrono>
+#include <vector>
 
 #include "../trace/test_assertions.h"
+#include "base/config.h"
 #include "network/connection.h"
 #include "network/event_loop.h"
 
 namespace cc_server {
 namespace testing {
+
+namespace {
+    /// @brief 把两条高水位压到下限（1MB），让用例不必真灌几十 MB
+    void use_low_buffer_watermark() {
+        const std::string path = "/tmp/cc_buffer_limit.conf";
+        {
+            std::ofstream out(path, std::ios::trunc);
+            out << "client_query_buffer_limit = 1048576\n";
+            out << "client_output_buffer_limit = 1048576\n";
+        }
+        EXPECT_TRUE(Config::instance().load(path));
+        std::remove(path.c_str());
+    }
+}  // namespace
 
 // 契约：Connection::close() 必须先关掉自己的 fd，再通知所有者。
 //
@@ -86,6 +106,75 @@ void test_event_loop_runs_queued_tasks() {
     loop_thread.join();
 }
 
+// 契约：输入缓冲不能无限增长。
+//
+// 一条客户端只要发个永不写完的 RESP bulk（"*1\r\n$2000000\r\n" 然后不再发），
+// 服务端就会把这堆没用的字节一直攒在 input_buffer_ 里。没有高水位时，几个这样的
+// 连接就足以把进程撑爆。
+void test_input_buffer_high_water_closes_client() {
+    TEST_SUITE("Connection Buffer High Water");
+
+    use_low_buffer_watermark();
+
+    int sv[2] = {-1, -1};
+    EXPECT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+
+    EventLoop loop;
+    auto owner = std::make_unique<Connection>(sv[0], &loop);
+
+    bool closed_by_server = false;
+    owner->set_close_callback([&closed_by_server]() { closed_by_server = true; });
+
+    const std::string header = "*1\r\n$2000000\r\n";
+    EXPECT_EQ(::write(sv[1], header.data(), header.size()),
+              static_cast<ssize_t>(header.size()));
+
+    // handle_read() 每次只从 socket 取 4095 字节，所以按这个节奏喂到超过 1MB 上限
+    std::vector<char> chunk(4096, 'a');
+    size_t pushed = header.size();
+    while (!closed_by_server && pushed < 4ull * 1024 * 1024) {
+        const ssize_t written = ::write(sv[1], chunk.data(), chunk.size());
+        EXPECT_TRUE(written > 0);
+        pushed += static_cast<size_t>(written);
+        owner->handle_read();
+    }
+
+    EXPECT_TRUE(closed_by_server);
+    EXPECT_TRUE(owner->fd() < 0);
+
+    owner->close();  // 幂等，确认重复关闭不会崩
+    ::close(sv[1]);
+}
+
+// 契约：对端不读时，积压的回复不能无限增长。
+void test_output_buffer_high_water_closes_client() {
+    TEST_SUITE("Connection Buffer High Water");
+
+    use_low_buffer_watermark();
+
+    int sv[2] = {-1, -1};
+    EXPECT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+
+    EventLoop loop;
+    auto owner = std::make_unique<Connection>(sv[0], &loop);
+
+    bool closed_by_server = false;
+    owner->set_close_callback([&closed_by_server]() { closed_by_server = true; });
+
+    // 完全不从 sv[1] 读，让回复只进不出
+    const std::string payload(64 * 1024, 'x');
+    for (int i = 0; i < 64 && !closed_by_server; ++i) {
+        owner->send_response(payload);
+    }
+
+    EXPECT_TRUE(closed_by_server);
+    // 关掉之后继续排队必须是无效的，不能再把内存攒回去
+    const std::string after_close(1024, 'y');
+    owner->send_response(after_close);
+
+    ::close(sv[1]);
+}
+
 void run_all_connection_tests() {
     std::cout << "\n========================================\n";
     std::cout << "Running Connection / EventLoop Lifetime Tests\n";
@@ -93,6 +182,8 @@ void run_all_connection_tests() {
 
     test_connection_close_frees_fd_before_notifying_owner();
     test_event_loop_runs_queued_tasks();
+    test_input_buffer_high_water_closes_client();
+    test_output_buffer_high_water_closes_client();
 
     std::cout << "\n========================================\n";
     std::cout << "All Connection Lifetime Tests Done!\n";

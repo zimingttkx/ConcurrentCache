@@ -1,6 +1,20 @@
 #include "connection.h"
+#include "base/config.h"
 
 namespace cc_server {
+
+namespace {
+    /// @brief 把配置里的缓冲上限收敛成可用值：0 = 不限制，过小则抬到下限
+    size_t normalize_buffer_limit(int configured_bytes, size_t default_bytes) {
+        if (configured_bytes == 0) {
+            return 0;  // 显式关掉限制，语义与 Redis 的 0 一致
+        }
+        const auto bytes = configured_bytes > 0
+                               ? static_cast<size_t>(configured_bytes)
+                               : default_bytes;  // 负数是配错了，回到默认
+        return bytes < Connection::kMinBufferLimit ? Connection::kMinBufferLimit : bytes;
+    }
+}  // namespace
 
     /**
      * =========================================================================
@@ -34,6 +48,17 @@ namespace cc_server {
         // Channel 负责监听这个客户端连接的 IO 事件
         // 当 epoll 检测到 client_fd 可读/可写时，通知 Connection 处理
         channel_ = std::make_unique<Channel>(loop_, client_socket_.fd());
+
+        // 缓冲高水位：构造时取一次配置，避免每个请求都去查 Config（它内部有锁）。
+        // Redis 用 client-query-buffer-limit / client-output-buffer-limit 做同样的事。
+        input_buffer_limit_bytes_ = normalize_buffer_limit(
+            Config::instance().getInt("client_query_buffer_limit",
+                                      static_cast<int>(kDefaultInputBufferLimit)),
+            kDefaultInputBufferLimit);
+        output_buffer_limit_bytes_ = normalize_buffer_limit(
+            Config::instance().getInt("client_output_buffer_limit",
+                                      static_cast<int>(kDefaultOutputBufferLimit)),
+            kDefaultOutputBufferLimit);
 
         // Channel 本身不处理业务，只是把事件分发给我们
         // 所以要告诉 Channel："事件来了调我这些函数"
@@ -138,6 +163,19 @@ namespace cc_server {
 
             // 追加到输入缓冲区
             input_buffer_.append(temp_buffer, static_cast<size_t>(bytes_read));
+
+            // 输入缓冲高水位（对应 Redis 的 client-query-buffer-limit）。
+            // 没有这条，一个客户端可以只发不发完的 RESP——比如 "*1\r\n$900000000000\r\n"
+            // 后面永远不写完——让 input_buffer_ 无上限地长，直到整个进程被 OOM 杀掉。
+            // 超限就断开，和 Redis 的处理一致（Redis 也是 closing client）。
+            if (input_buffer_limit_bytes_ > 0 &&
+                input_buffer_.readable_bytes() > input_buffer_limit_bytes_) {
+                LOG_ERROR(connection,
+                          "Client input buffer exceeded limit %zu bytes on fd=%d, closing",
+                          input_buffer_limit_bytes_, client_socket_.fd());
+                close();
+                return;  // close 的所有者回调可能已经销毁 this
+            }
 
             // 协议解析 调用RespParaser解析命令
             // 注意：解析错误时不再 drain（消耗）坏字节是 P2-4 的遗留行为；
@@ -309,6 +347,19 @@ namespace cc_server {
         }
 
         output_buffer_.append(data, len);
+
+        // 输出缓冲高水位（对应 Redis 的 client-output-buffer-limit）。触发条件只看
+        // "积压了多少"，不看"这一条多大"：一条正常的大回复（比如 GET 一个很大的 value）
+        // 允许排完，但对端不读、命令又一直在产生回复时，积压会一路吃到进程被
+        // OOM——所以超过上限就把这条连接关掉，让积压归零。
+        if (output_buffer_limit_bytes_ > 0 &&
+            output_buffer_.readable_bytes() > output_buffer_limit_bytes_) {
+            LOG_ERROR(connection,
+                      "Client output buffer exceeded limit %zu bytes on fd=%d, closing",
+                      output_buffer_limit_bytes_, client_socket_.fd());
+            close();
+            return;  // close 的所有者回调可能已经销毁 this
+        }
 
         // 告诉 epoll："我想知道什么时候可以写"
         // 这样 handle_write() 会被调用，发完这些数据
