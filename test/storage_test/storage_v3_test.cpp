@@ -565,6 +565,38 @@ void test_log_level_parsing() {
     EXPECT_TRUE(!parse_log_level("", lvl));
 }
 
+// BGSAVE 的脏计数按快照扣减，不能把窗口期的写一起抹掉。
+//
+// 调度线程是"起线程 → 立刻记账"，所以 snapshot 之后还会继续有写进来。旧代码在这里
+// 直接 reset 成 0：那批写既没进这次快照，又丢了计数，于是永远攒不到下一次触发。
+void test_storage_consume_dirty_count_keeps_window_writes() {
+    TEST_SUITE("GlobalStorage Dirty Snapshot");
+
+    GlobalStorage storage;
+    CacheObject obj;
+    obj.set_string("v");
+
+    storage.reset_dirty_count();
+    storage.set("a", obj);
+    storage.set("b", obj);
+    EXPECT_EQ(storage.get_dirty_count(), static_cast<size_t>(2));
+
+    // 调度线程抓到快照 2，随后 BGSAVE 开始写文件；这期间又来了两笔写
+    const size_t snapshot = storage.get_dirty_count();
+    storage.set("c", obj);
+    storage.set("d", obj);
+    EXPECT_EQ(storage.get_dirty_count(), static_cast<size_t>(4));
+
+    storage.consume_dirty_count(snapshot);
+    // c、d 不在快照里，必须仍然算脏（旧实现会把计数变成 0）
+    EXPECT_EQ(storage.get_dirty_count(), static_cast<size_t>(2));
+
+    // 扣得比现存的多时饱和到 0，不能下溢成巨大的 size_t —— 那会让每一轮都过阈值
+    storage.consume_dirty_count(1000);
+    EXPECT_EQ(storage.get_dirty_count(), static_cast<size_t>(0));
+    EXPECT_TRUE(storage.get_dirty_count() < static_cast<size_t>(100));
+}
+
 void run_all_storage_tests() {
     std::cout << "\n========================================\n";
     std::cout << "Running GlobalStorage V3 Tests\n";
@@ -578,6 +610,7 @@ void run_all_storage_tests() {
     test_storage_huge_ttl_does_not_overflow();
     test_storage_concurrent_container_mutate();
     test_storage_dirty_counter();
+    test_storage_consume_dirty_count_keeps_window_writes();
     test_storage_concurrent_read_write();
     test_storage_sharding_performance();
     test_storage_large_dataset();

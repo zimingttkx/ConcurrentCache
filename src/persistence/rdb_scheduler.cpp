@@ -96,10 +96,12 @@ void RdbScheduler::do_save() {
     // 使用异步保存避免阻塞调度线程
     if (rdb.save_in_background(rdb_path_, storage_)) {
         LOG_INFO(kSchedulerModule, "Background save started, dirty_count=%zu", dirty_snapshot);
-        // 修复 P1-10：保存成功后重置脏计数器，否则 threshold==1 时每轮都触发 BGSAVE
-        // 并与正在运行的 CAS 冲突刷 "Failed to start background save"。
-        // 注意：后台保存期间的写操作会在重置后继续累加，不影响正确性。
-        storage_.reset_dirty_count();
+        // 只扣掉这次快照已经排进去的那部分（Redis 的 dirty_before_save 同理）。
+        // 旧代码在这里 reset 成 0：快照开始之后、文件写完之前落进来的那批写，
+        // 计数被抹掉，于是它们永远攒不到下一次触发——dirty_threshold 配得越小，
+        // 丢得越彻底（配 1 时等于每次 BGSAVE 都把窗口期的写静默吞掉）。
+        // 也不能等 BGSAVE 结束再扣：调度线程不阻塞，期间还会继续写。
+        storage_.consume_dirty_count(dirty_snapshot);
     } else {
         LOG_ERROR(kSchedulerModule, "Failed to start background save");
     }

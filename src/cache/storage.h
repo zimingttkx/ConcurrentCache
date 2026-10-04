@@ -201,8 +201,23 @@ namespace cc_server {
         void increment_dirty() { dirty_counter_.fetch_add(1, std::memory_order_relaxed); }
         size_t get_dirty_count() const { return dirty_counter_.load(std::memory_order_relaxed); }
         void reset_dirty_count() { dirty_counter_.store(0, std::memory_order_relaxed); }
-        void decrement_dirty_count(size_t count) {
-            dirty_counter_.fetch_sub(count, std::memory_order_relaxed);
+        /**
+         * @brief 扣掉"已经落盘的那部分"脏计数，期间的并发写继续留着
+         *
+         * 快照法：BGSAVE 的语义是"这一份内容已经存盘"，所以只能减去发起时抓到的
+         * 那个数；把计数直接清零，会让 snapshot 之后、文件写完之前的那批写永久失去
+         * 触发下一次保存的资格（dirty_threshold 配得越小丢得越多）。
+         *
+         * 用 CAS 而不是 fetch_sub：并发下可能已经有人清零，减法会下溢成一个巨大的
+         * size_t，之后每一轮都过阈值。这里饱和到 0。
+         */
+        void consume_dirty_count(size_t saved_count) {
+            size_t current = dirty_counter_.load(std::memory_order_relaxed);
+            size_t next = 0;
+            do {
+                next = (current > saved_count) ? current - saved_count : 0;
+            } while (!dirty_counter_.compare_exchange_weak(
+                         current, next, std::memory_order_relaxed));
         }
 
         // 构造函数 - 允许创建实例用于测试
