@@ -9,8 +9,67 @@
 #include "datatype/object.h"
 #include <cctype>
 #include <cstdlib>
+#include <cstring>
+#include <netdb.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
 
 namespace cc_server {
+
+namespace {
+
+/// @brief 把主机名解析成点分地址，解析不出来返回 false。成功时把 in_out 换成解析结果。
+///
+/// 直接替换成数字地址，是因为本仓库的节点身份与总线对账都以 "ip:port" 为单位
+/// （见 ClusterConnection 里的 bus 身份规则）：让同一个节点在配置里叫
+/// node-1、在身份表里叫 10.0.0.5，两条路径就会各说各话。
+///
+/// 先只试 AF_INET，再退到 AF_INET6。本服务目前绑的是 INADDR_ANY（IPv4），
+/// 若主机名同时有 A 与 AAAA，拿 AAAA 去连会连一个自己根本没监听的地址，
+/// 表现出来是"MEET 接受了但链路永远起不来"。
+bool resolve_host_to_ip(std::string& in_out) {
+    for (int family : {AF_INET, AF_INET6}) {
+        addrinfo hints;
+        std::memset(&hints, 0, sizeof(hints));
+        hints.ai_family = family;
+        hints.ai_socktype = SOCK_STREAM;
+
+        addrinfo* res = nullptr;
+        if (getaddrinfo(in_out.c_str(), nullptr, &hints, &res) != 0 || res == nullptr) {
+            if (res != nullptr) {
+                freeaddrinfo(res);
+            }
+            continue;
+        }
+
+        char buf[INET6_ADDRSTRLEN] = {0};
+        bool ok = false;
+        for (addrinfo* p = res; p != nullptr; p = p->ai_next) {
+            // 两个分支各写一遍 inet_ntop 的族参数，而不是把 p->ai_family 转手传进去：
+            // ai_family 是 int，而 inet_ntop 收 sa_family_t，直接传会吃一条
+            // -Wconversion；写成常量既没有转换也不会把不认识的族递下去。
+            if (p->ai_family == AF_INET) {
+                const auto* sin = reinterpret_cast<const sockaddr_in*>(p->ai_addr);
+                ok = inet_ntop(AF_INET, &sin->sin_addr, buf, sizeof(buf)) != nullptr;
+            } else if (p->ai_family == AF_INET6) {
+                const auto* sin6 = reinterpret_cast<const sockaddr_in6*>(p->ai_addr);
+                ok = inet_ntop(AF_INET6, &sin6->sin6_addr, buf, sizeof(buf)) != nullptr;
+            }
+            if (ok) {
+                break;
+            }
+        }
+        freeaddrinfo(res);
+
+        if (ok) {
+            in_out = buf;
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
 
 std::string ClusterCommand::execute(const std::vector<std::string>& args) {
     // 参数检查：CLUSTER <subcommand>
@@ -56,11 +115,16 @@ std::string ClusterCommand::handleMeet(const std::vector<std::string>& args) {
         return RespEncoder::encode_error("ERR wrong number of arguments for 'cluster meet' command");
     }
 
-    const std::string& ip = args[2];
-
-    // 验证 IP 地址格式
-    if (!isValidIp(ip)) {
-        return RespEncoder::encode_error("ERR invalid IP address");
+    // CLUSTER MEET <ip-or-hostname> <port>。Redis 7 起两种写法都接受，这里原来只认
+    // isValidIp，任何主机名都直接回 "ERR invalid IP address" —— 在靠 DNS/容器名互相
+    // 寻址的拓扑里标准写法一律连不上。daily 的 Full-cluster e2e 里"B 用主机名 MEET C"
+    // 已经在断言这件事（#75），当时红在产品这一侧。
+    //
+    // 注意这与 Redis 一样有个副作用：inet_aton 风格的裸数字（"666"）也会被 getaddrinfo
+    // 解释成一个地址，不是严格的语法校验。
+    std::string ip = args[2];
+    if (!isValidIp(ip) && !resolve_host_to_ip(ip)) {
+        return RespEncoder::encode_error("ERR Invalid or unresolvable IP address or hostname");
     }
 
     // 解析端口号，带错误处理
