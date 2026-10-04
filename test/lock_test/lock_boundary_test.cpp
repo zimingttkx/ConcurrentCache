@@ -388,14 +388,26 @@ void test_race_condition_boundary() {
     RUN_TEST(simultaneous_lock_attempts) {
         Mutex mutex;
         std::atomic<int> success_count{0};
+        std::atomic<int> holders{0};
+        std::atomic<int> max_holders{0};
         const int num_threads = 10;
 
         std::vector<std::thread> threads;
         for (int i = 0; i < num_threads; ++i) {
             threads.emplace_back([&]() {
                 if (mutex.try_lock()) {
-                    success_count++;
+                    // 互斥锁的契约是"任意时刻至多一个持有者"，不是"十个线程里只有
+                    // 一个人能成功"：赢家睡 1ms 后解锁，启动得晚的线程再拿到锁完全
+                    // 合法。旧断言写的是 success_count == 1，把自己排程里的巧合当成了
+                    // 不变量，于是 Debug+ASan 下（线程启动被拖慢、彼此错开）稳定地
+                    // 报 actual: 2 —— 那是测试写错，不是锁错。
+                    const int now = ++holders;
+                    int prev_max = max_holders.load();
+                    while (now > prev_max &&
+                           !max_holders.compare_exchange_weak(prev_max, now)) {}
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    --holders;
+                    success_count++;
                     mutex.unlock();
                 }
             });
@@ -405,8 +417,10 @@ void test_race_condition_boundary() {
             t.join();
         }
 
-        // 只有1个线程应该成功获取锁
-        EXPECT_EQ(success_count.load(), 1);
+        // 真正的契约：从不出现两个持有者
+        EXPECT_LE(max_holders.load(), 1);
+        // 至少有一个赢家（全是失败的话说明锁的状态坏了）
+        EXPECT_GE(success_count.load(), 1);
     });
 
     RUN_TEST(try_lock_race_with_timeout) {

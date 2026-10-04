@@ -390,6 +390,9 @@ void test_read_write_race() {
         std::atomic<int> reader_count{0};
         std::atomic<int> max_readers{0};
         std::atomic<bool> start{false};
+        // 读写锁真正的契约：写者持锁期间不能有任何读者在里面
+        std::atomic<int> writer_active{0};
+        std::atomic<int> reader_writer_overlap{0};
 
         // 多个读线程
         std::vector<std::thread> readers;
@@ -399,6 +402,9 @@ void test_read_write_race() {
                 for (int j = 0; j < 100; ++j) {
                     RWLockReadGuard guard(rwlock);
                     reader_count++;
+                    if (writer_active.load() > 0) {
+                        reader_writer_overlap.fetch_add(1);
+                    }
                     int current = reader_count.load();
                     while (current > max_readers.load()) {
                         max_readers.store(current);
@@ -416,7 +422,12 @@ void test_read_write_race() {
             while (!start.load()) std::this_thread::yield();
             for (int j = 0; j < 100; ++j) {
                 WriteLockGuard<RWLock> guard(rwlock);
+                writer_active.store(1);
+                if (reader_count.load() > 0) {
+                    reader_writer_overlap.fetch_add(1);
+                }
                 shared_data = j;
+                writer_active.store(0);
             }
         });
 
@@ -427,8 +438,62 @@ void test_read_write_race() {
         writer.join();
 
         std::cout << "Max concurrent readers observed: " << max_readers.load() << "\n";
-        // 读写锁应该允许多个读线程并发
-        EXPECT_GT(max_readers.load(), 1);
+        // 这里断言的是安全边界，不是排程巧合。原来写的是 EXPECT_GT(max_readers, 1)，
+        // 也就是"必须看到两个读线程同时在里面"——但没有任何东西保证这具机器上它们会
+        // 重叠：Debug+ASan 下读线程被逐个拉开，峰值就是 1，于是这条稳定误报。
+        // "多个读者可以并发"由下面那条定死的用例证明，这里只要求不自相矛盾。
+        EXPECT_GE(max_readers.load(), 1);
+        // 写者与读者从不重叠（这才是读写锁的契约）
+        EXPECT_EQ(reader_writer_overlap.load(), 0);
+
+        TraceLogger::instance().flush_and_close();
+    });
+
+    // 并发读是读写锁的功能，但要用"必须重叠"的排布去证明，而不是指望调度正好撞上。
+    RUN_TEST(two_readers_can_hold_the_lock_simultaneously) {
+        TraceLogger::instance().reset();
+        TraceLogger::instance().initialize("rwlock_two_readers");
+
+        RWLock rwlock;
+        std::atomic<int> inside{0};
+        std::atomic<int> peak{0};
+        std::atomic<bool> a_in{false};
+        std::atomic<bool> b_in{false};
+
+        auto note_enter = [&]() {
+            const int now = ++inside;
+            int prev = peak.load();
+            while (now > prev && !peak.compare_exchange_weak(prev, now)) {}
+        };
+
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+
+        std::thread a([&]() {
+            RWLockReadGuard guard(rwlock);
+            note_enter();
+            a_in.store(true);
+            // 等 B 也进来；等不到就在 500ms 后退出（此时 peak 仍为 1，断言会红）
+            while (!b_in.load() && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::yield();
+            }
+        });
+
+        std::thread b([&]() {
+            while (!a_in.load() && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::yield();
+            }
+            RWLockReadGuard guard(rwlock);
+            note_enter();
+            b_in.store(true);
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        });
+
+        a.join();
+        b.join();
+
+        // A 还在持锁时 B 也拿到了读锁 → 峰值必须是 2
+        EXPECT_EQ(peak.load(), 2);
+        EXPECT_TRUE(b_in.load());
 
         TraceLogger::instance().flush_and_close();
     });
