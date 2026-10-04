@@ -422,6 +422,15 @@ void ClusterConnection::unregister_link_from_loop(ClusterLink* link) {
     }
 }
 
+bool bus_sender_ip_matches_peer(const std::string& claimed_ip,
+                                const std::string& observed_ip) {
+    // 空值一律不通过：观察不到来源不等于免检，声称里少了一半也不等于免检
+    if (claimed_ip.empty() || observed_ip.empty()) {
+        return false;
+    }
+    return claimed_ip == observed_ip;
+}
+
 void ClusterConnection::handle_link_msg(ClusterMsg&& msg, ClusterLink* link) {
     // 从 sender_name 提取节点信息 (格式: ip:port)
     std::string sender_name_str(msg.header.sender_name, 40);
@@ -435,6 +444,27 @@ void ClusterConnection::handle_link_msg(ClusterMsg&& msg, ClusterLink* link) {
     auto colon_pos = sender_name_str.find(':');
     if (colon_pos == std::string::npos || sender_name_str.empty()) {
         LOG_WARN(CLUSTER, "Invalid sender_name in message, ignoring");
+        return;
+    }
+
+    // 发送者身份校验，理由见 cluster_connection.h 里那段注释：sender_name 是集群
+    // 成员的身份 key，PFAIL 记名与 failover 法定人数都以它为单位计票，而这个端口
+    // 不认证。所以先把它和实际观察到的链路地址对一遍。
+    const std::string claimed_ip = sender_name_str.substr(0, colon_pos);
+    const std::string observed_ip = link ? link->ip() : std::string();
+    if (!bus_sender_ip_matches_peer(claimed_ip, observed_ip)) {
+        LOG_WARN(CLUSTER,
+                 "Bus packet claims %s but arrived on a link to %s; dropping (unverified identity)",
+                 sender_name_str.c_str(),
+                 observed_ip.empty() ? "<unknown>" : observed_ip.c_str());
+        return;
+    }
+
+    // 自称是本端自己的报文同样丢掉：那会让我们把伪造的数据写进自己的状态表，
+    // 而 Redis 也是拒绝跟自己 MEET 的。
+    if (sender_name_str == ClusterServer::instance().getMyNodeName()) {
+        LOG_WARN(CLUSTER, "Bus packet claims our own node name %s, dropping",
+                 sender_name_str.c_str());
         return;
     }
 

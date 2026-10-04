@@ -13,6 +13,7 @@
 
 #include "../trace/test_assertions.h"
 #include "cluster/cluster_link.h"
+#include "cluster/cluster_connection.h"
 
 namespace cc_server {
 namespace testing {
@@ -176,6 +177,35 @@ void test_bus_send_still_allows_large_replicated_value() {
     EXPECT_TRUE(h.link.is_connected());
 }
 
+// 发送者身份校验的判据本身。
+//
+// 注意覆盖面：这里证明的是谓词逻辑，`handle_link_msg` 是否真的在每个分支上叫它，
+// 由集群 e2e（failover / psync / cluster-stress / cluster-full）反过来保证——那些脚本
+// 里节点绑的都是 127.0.0.1、声称的也是 127.0.0.1，一旦这条校验写宽或写严，MEET/PING
+// 就组不成集群，daily 的 e2e Job 会直接红。
+void test_bus_sender_identity_predicate() {
+    TEST_SUITE("Cluster Bus Sender Identity");
+
+    // 一致 → 接受
+    EXPECT_TRUE(bus_sender_ip_matches_peer("127.0.0.1", "127.0.0.1"));
+    EXPECT_TRUE(bus_sender_ip_matches_peer("10.0.3.7", "10.0.3.7"));
+
+    // 不一致 → 拒。这就是伪造集群成员身份的形状：报文里自称另一个节点
+    //（身份 key 与 PFAIL 计票单位），但包是从别的地址进来的
+    EXPECT_TRUE(!bus_sender_ip_matches_peer("10.0.0.9", "127.0.0.1"));
+    EXPECT_TRUE(!bus_sender_ip_matches_peer("127.0.0.1", "10.0.0.9"));
+
+    // 带尾空格/大小写不同的写法也不放过：身份 key 必须精确匹配，
+    // 否则 "127.0.0.1 " 就能绕过等值比较
+    EXPECT_TRUE(!bus_sender_ip_matches_peer("127.0.0.1 ", "127.0.0.1"));
+    EXPECT_TRUE(!bus_sender_ip_matches_peer("127.0.0.2", "127.0.0.1"));
+
+    // 任何一侧为空都不通过：观察不到来源不等于免检
+    EXPECT_TRUE(!bus_sender_ip_matches_peer("", ""));
+    EXPECT_TRUE(!bus_sender_ip_matches_peer("127.0.0.1", ""));
+    EXPECT_TRUE(!bus_sender_ip_matches_peer("", "127.0.0.1"));
+}
+
 void run_all_cluster_bus_framing_tests() {
     std::cout << "\n========================================\n";
     std::cout << "Running Cluster Bus Framing Tests\n";
@@ -186,6 +216,7 @@ void run_all_cluster_bus_framing_tests() {
     test_bus_frame_absurd_length_does_not_overread();
     test_bus_frame_shorter_than_header_disconnects();
     test_bus_send_still_allows_large_replicated_value();
+    test_bus_sender_identity_predicate();
 
     std::cout << "\n========================================\n";
     std::cout << "All Cluster Bus Framing Tests Done!\n";
