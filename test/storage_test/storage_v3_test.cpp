@@ -188,6 +188,61 @@ void test_storage_huge_ttl_does_not_overflow() {
 }
 
 // ============================================================================
+// 分片内原子读-改-写
+// ============================================================================
+
+// mutate() 存在的全部理由：容器命令原来是 get() 拿一份副本、改完 set() 整体覆盖，
+// 两个并发命令各自读到旧副本，后写的那个把先写的整个覆盖掉。CI 上
+// concurrent_lpush_loses_nothing 的实测就是 8 线程 × 50 次 LPUSH 只剩 212/400。
+void test_storage_concurrent_container_mutate() {
+    TEST_SUITE("GlobalStorage Atomic Mutate");
+
+    GlobalStorage storage;
+    constexpr int kThreads = 8;
+    constexpr int kPerThread = 50;
+
+    std::vector<std::thread> workers;
+    workers.reserve(kThreads);
+    for (int t = 0; t < kThreads; ++t) {
+        workers.emplace_back([&storage, t]() {
+            for (int i = 0; i < kPerThread; ++i) {
+                storage.mutate("clist", ObjectType::LIST, [&](CacheObject& obj) {
+                    obj.list_push(std::to_string(t) + ":" + std::to_string(i), true);
+                    return StoreOp::kWrite;
+                });
+            }
+        });
+    }
+    for (auto& th : workers) {
+        th.join();
+    }
+
+    auto obj = storage.get("clist");
+    EXPECT_TRUE(obj.has_value());
+    if (obj.has_value()) {
+        EXPECT_EQ(obj.value().list_size(), static_cast<size_t>(kThreads * kPerThread));
+    }
+
+    // 弹空即删：把 400 个元素全 LPOP 掉之后键必须消失，而不是留下空列表。
+    // 多弹几次应当是 kNoop，不能再凭空计数。
+    int popped_total = 0;
+    for (int i = 0; i < kThreads * kPerThread + 5; ++i) {
+        storage.mutate(
+            "clist", ObjectType::LIST, [&](CacheObject& o) {
+                auto val = o.list_pop(true);
+                if (!val) return StoreOp::kNoop;
+                ++popped_total;
+                return o.list_size() == 0 ? StoreOp::kErase : StoreOp::kWrite;
+            },
+            StringPromotion::kReject);
+    }
+    EXPECT_EQ(popped_total, kThreads * kPerThread);
+    EXPECT_TRUE(!storage.exist("clist"));
+
+    std::cout << "✓ Storage atomic mutate test passed\n";
+}
+
+// ============================================================================
 // 脏计数器测试
 // ============================================================================
 
@@ -455,6 +510,7 @@ void run_all_storage_tests() {
     test_storage_set_with_expire();
     test_storage_persist();
     test_storage_huge_ttl_does_not_overflow();
+    test_storage_concurrent_container_mutate();
     test_storage_dirty_counter();
     test_storage_concurrent_read_write();
     test_storage_sharding_performance();

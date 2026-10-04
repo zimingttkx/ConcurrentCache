@@ -283,23 +283,20 @@ namespace cc_server {
             }
 
             const std::string& key = args[1];
-            auto result = GlobalStorage::instance().get(key);
-
-            CacheObject obj;
-            if (result.has_value()) {
-                if (result.value().type() != ObjectType::LIST && result.value().type() != ObjectType::STRING) {
-                    return RespEncoder::encode_error(
-                        "WRONGTYPE Operation against a key holding the wrong kind of value");
-                }
-                obj = std::move(result.value());
+            int64_t new_len = 0;
+            const bool ok = GlobalStorage::instance().mutate(
+                key, ObjectType::LIST, [&](CacheObject& obj) {
+                    for (size_t i = 2; i < args.size(); ++i) {
+                        obj.list_push(args[i], true);
+                    }
+                    new_len = static_cast<int64_t>(obj.list_size());
+                    return StoreOp::kWrite;
+                });
+            if (!ok) {
+                return RespEncoder::encode_error(
+                    "WRONGTYPE Operation against a key holding the wrong kind of value");
             }
-
-            for (size_t i = 2; i < args.size(); ++i) {
-                obj.list_push(args[i], true);
-            }
-
-            GlobalStorage::instance().set(key, obj);
-            return RespEncoder::encode_integer(static_cast<int64_t>(obj.list_size()));
+            return RespEncoder::encode_integer(new_len);
         }
 
         [[nodiscard]] std::unique_ptr<Command> clone() const override {
@@ -322,23 +319,20 @@ namespace cc_server {
             }
 
             const std::string& key = args[1];
-            auto result = GlobalStorage::instance().get(key);
-
-            CacheObject obj;
-            if (result.has_value()) {
-                if (result.value().type() != ObjectType::LIST && result.value().type() != ObjectType::STRING) {
-                    return RespEncoder::encode_error(
-                        "WRONGTYPE Operation against a key holding the wrong kind of value");
-                }
-                obj = std::move(result.value());
+            int64_t new_len = 0;
+            const bool ok = GlobalStorage::instance().mutate(
+                key, ObjectType::LIST, [&](CacheObject& obj) {
+                    for (size_t i = 2; i < args.size(); ++i) {
+                        obj.list_push(args[i], false);
+                    }
+                    new_len = static_cast<int64_t>(obj.list_size());
+                    return StoreOp::kWrite;
+                });
+            if (!ok) {
+                return RespEncoder::encode_error(
+                    "WRONGTYPE Operation against a key holding the wrong kind of value");
             }
-
-            for (size_t i = 2; i < args.size(); ++i) {
-                obj.list_push(args[i], false);
-            }
-
-            GlobalStorage::instance().set(key, obj);
-            return RespEncoder::encode_integer(static_cast<int64_t>(obj.list_size()));
+            return RespEncoder::encode_integer(new_len);
         }
 
         [[nodiscard]] std::unique_ptr<Command> clone() const override {
@@ -361,26 +355,24 @@ namespace cc_server {
             }
 
             const std::string& key = args[1];
-            auto result = GlobalStorage::instance().get(key);
-
-            if (!result.has_value()) {
-                return RespEncoder::encode_nil();
-            }
-
-            if (result.value().type() != ObjectType::LIST) {
+            std::optional<std::string> popped;
+            const bool ok = GlobalStorage::instance().mutate(
+                key, ObjectType::LIST, [&](CacheObject& obj) {
+                    auto val = obj.list_pop(true);
+                    if (!val) return StoreOp::kNoop;
+                    popped = val;
+                    // 弹空就删键：留一个空列表在库里，EXISTS / DBSIZE 都会多算一个
+                    return obj.list_size() == 0 ? StoreOp::kErase : StoreOp::kWrite;
+                },
+                StringPromotion::kReject);
+            if (!ok) {
                 return RespEncoder::encode_error(
                     "WRONGTYPE Operation against a key holding the wrong kind of value");
             }
-
-            auto obj = std::move(result.value());
-            auto val = obj.list_pop(true);
-
-            if (val) {
-                GlobalStorage::instance().set(key, obj);
-                return RespEncoder::encode_bulk_string(val.value());
+            if (!popped) {
+                return RespEncoder::encode_nil();
             }
-
-            return RespEncoder::encode_nil();
+            return RespEncoder::encode_bulk_string(popped.value());
         }
 
         [[nodiscard]] std::unique_ptr<Command> clone() const override {
@@ -403,26 +395,23 @@ namespace cc_server {
             }
 
             const std::string& key = args[1];
-            auto result = GlobalStorage::instance().get(key);
-
-            if (!result.has_value()) {
-                return RespEncoder::encode_nil();
-            }
-
-            if (result.value().type() != ObjectType::LIST) {
+            std::optional<std::string> popped;
+            const bool ok = GlobalStorage::instance().mutate(
+                key, ObjectType::LIST, [&](CacheObject& obj) {
+                    auto val = obj.list_pop(false);
+                    if (!val) return StoreOp::kNoop;
+                    popped = val;
+                    return obj.list_size() == 0 ? StoreOp::kErase : StoreOp::kWrite;
+                },
+                StringPromotion::kReject);
+            if (!ok) {
                 return RespEncoder::encode_error(
                     "WRONGTYPE Operation against a key holding the wrong kind of value");
             }
-
-            auto obj = std::move(result.value());
-            auto val = obj.list_pop(false);
-
-            if (val) {
-                GlobalStorage::instance().set(key, obj);
-                return RespEncoder::encode_bulk_string(val.value());
+            if (!popped) {
+                return RespEncoder::encode_nil();
             }
-
-            return RespEncoder::encode_nil();
+            return RespEncoder::encode_bulk_string(popped.value());
         }
 
         [[nodiscard]] std::unique_ptr<Command> clone() const override {

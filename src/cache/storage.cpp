@@ -105,6 +105,67 @@ namespace cc_server {
         }
     }
 
+    bool GlobalStorage::mutate(const std::string& key, ObjectType want_type,
+                               const std::function<StoreOp(CacheObject&)>& fn,
+                               StringPromotion promote) {
+        assert(!key.empty() && "GlobalStorage::mutate - key is empty");
+
+        // 与 set() 一致：在拿分片锁之前做淘汰检查。evict_if_needed 会去锁各分片
+        // 找受害者，在独占锁里调它就是自己等自己。
+        evict_if_needed(key);
+
+        const size_t shard_idx = get_shard_index(key);
+        std::unique_lock<std::shared_mutex> lock(mutexes_[shard_idx]);
+
+        auto& store = stores_[shard_idx];
+        auto it = store.find(key);
+
+        // 过期的键当作不存在，并且顺手清掉
+        if (it != store.end() && expire_dict_.is_expired(key)) {
+            store.erase(it);
+            expire_dict_.remove(key);
+            it = store.end();
+        }
+
+        if (it != store.end()) {
+            const ObjectType current_type = it->second.value.type();
+            const bool promotable = current_type == ObjectType::STRING &&
+                                    promote == StringPromotion::kAllow;
+            if (current_type != want_type && !promotable) {
+                return false;  // 调用方据此回 WRONGTYPE
+            }
+        }
+
+        const bool existed = (it != store.end());
+        // 键不存在时给一个默认构造对象（STRING 且为空），容器操作会把它接管成 want_type
+        CacheObject obj = existed ? it->second.value : CacheObject();
+
+        const StoreOp op = fn(obj);
+
+        if (op == StoreOp::kNoop) {
+            return true;
+        }
+
+        if (op == StoreOp::kErase) {
+            if (existed) {
+                store.erase(it);
+                expire_dict_.remove(key);
+                dirty_counter_.fetch_add(1, std::memory_order_relaxed);
+            }
+            return true;
+        }
+
+        if (existed) {
+            // 只替换 value：TTL 是键的属性，容器写入不应该把它清掉
+            it->second.value = std::move(obj);
+            it->second.last_access_time_ms.store(current_time_ms(), std::memory_order_relaxed);
+        } else {
+            stores_[shard_idx].insert_or_assign(key, CacheEntry(std::move(obj), current_time_ms()));
+        }
+        dirty_counter_.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+
     // del - 删除键值对
     // @param key 键
     // @return true 表示键存在且被删除，false 表示键不存在
