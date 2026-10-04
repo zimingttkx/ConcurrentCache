@@ -407,4 +407,12 @@ void ClusterState::clearPfailReports(const std::string& node_name) {
     pfailing_reports_.erase(node_name);
 }
 
+
+uint64_t ClusterState::note_bus_identity_rejection() {
+    return bus_identity_rejections_.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+
+uint64_t ClusterState::bus_identity_rejections() const {
+    return bus_identity_rejections_.load(std::memory_order_relaxed);
+}
 } // namespace cc_server

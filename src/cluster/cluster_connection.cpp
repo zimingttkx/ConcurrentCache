@@ -443,13 +443,79 @@ void ClusterConnection::unregister_link_from_loop(ClusterLink* link) {
     }
 }
 
-bool bus_sender_ip_matches_peer(const std::string& claimed_ip,
-                                const std::string& observed_ip) {
+namespace {
+
+/// @brief sender_name 里那半截"我是谁"的形状
+enum class BusNameShape {
+    kLiteralAddress,  // 只可能是地址：数字 + 点/冒号（IPv4、IPv6）
+    kHostname,        // 名字：localhost、node-1、db.internal
+    kMalformed,       // 两者都不是：有空格、下划线、纯数字没有分隔符等
+};
+
+// 形状判定不校验合法性，只回答一个问题：这两个字符串在真实拓扑里可不可能天然相等。
+// 名字与源地址本来就是两种东西（运维敲进 CLUSTER MEET 的是名字，入站 accept 看到的是
+// IP），拿它们逐字比永远都不等。
+//
+// kMalformed 单独一档很重要：身份 key 必须精确匹配，否则 "127.0.0.1 "（尾部多一个空格）
+// 这种写法就能绕过等值比较。
+BusNameShape classify_bus_name(const std::string& s) {
+    if (s.empty()) return BusNameShape::kMalformed;
+
+    bool has_separator = false;
+    bool has_non_hex_letter = false;
+    for (const char c : s) {
+        if (c >= '0' && c <= '9') continue;
+        if (c == '.' || c == ':') {
+            has_separator = true;
+            continue;
+        }
+        const bool hex_letter = (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+        if (hex_letter) continue;
+        if (c == '-' || (c >= 'g' && c <= 'z') || (c >= 'G' && c <= 'Z')) {
+            has_non_hex_letter = true;
+            continue;
+        }
+        return BusNameShape::kMalformed;  // 空格、下划线、其它标点
+    }
+
+    if (has_non_hex_letter) return BusNameShape::kHostname;
+    if (has_separator) return BusNameShape::kLiteralAddress;
+    return BusNameShape::kMalformed;  // 纯数字（"42"）既不是地址也不是名字
+}
+
+}  // namespace
+
+bool bus_sender_identity_accepted(const std::string& claimed_ip,
+                                  const std::string& observed_ip,
+                                  const bool sender_is_known_member,
+                                  const BusMsgPlane plane) {
     // 空值一律不通过：观察不到来源不等于免检，声称里少了一半也不等于免检
     if (claimed_ip.empty() || observed_ip.empty()) {
         return false;
     }
-    return claimed_ip == observed_ip;
+
+    if (plane == BusMsgPlane::kData) {
+        // 数据面（复制命令、REPLSYNC）不拿地址当凭据：hostname/NAT/Docker 之后
+        // "对端自报是谁"与"这条链路在哪"本来就永远不等，按地址拦会把整条复制静默丢掉。
+        // 拦的依据改成"这个名字已经在成员表里"——握手阶段不会发数据面报文，所以随机
+        // 来客依然进不来。畸形形状同样不接受。
+        return sender_is_known_member &&
+               classify_bus_name(claimed_ip) != BusNameShape::kMalformed;
+    }
+
+    const BusNameShape claimed = classify_bus_name(claimed_ip);
+    const BusNameShape observed = classify_bus_name(observed_ip);
+    if (claimed == BusNameShape::kMalformed || observed == BusNameShape::kMalformed) {
+        // 身份 key 必须精确匹配，不接受"形状都不对还互相放行"
+        return false;
+    }
+
+    // 控制面：两侧都是字面地址时保持 #45 的防伪能力（冒充另一个成员直接拒）；任一侧
+    // 是主机名时不做地址比对，否则用主机名敲的那条 CLUSTER MEET 永远通不过。
+    if (claimed == BusNameShape::kLiteralAddress && observed == BusNameShape::kLiteralAddress) {
+        return claimed_ip == observed_ip;
+    }
+    return true;
 }
 
 void ClusterConnection::handle_link_msg(ClusterMsg&& msg, ClusterLink* link) {
@@ -470,14 +536,29 @@ void ClusterConnection::handle_link_msg(ClusterMsg&& msg, ClusterLink* link) {
 
     // 发送者身份校验，理由见 cluster_connection.h 里那段注释：sender_name 是集群
     // 成员的身份 key，PFAIL 记名与 failover 法定人数都以它为单位计票，而这个端口
-    // 不认证。所以先把它和实际观察到的链路地址对一遍。
+    // 不认证。控制面按地址形状对账，数据面按"是不是已认识的成员"。
     const std::string claimed_ip = sender_name_str.substr(0, colon_pos);
     const std::string observed_ip = link ? link->ip() : std::string();
-    if (!bus_sender_ip_matches_peer(claimed_ip, observed_ip)) {
-        LOG_WARN(CLUSTER,
-                 "Bus packet claims %s but arrived on a link to %s; dropping (unverified identity)",
-                 sender_name_str.c_str(),
-                 observed_ip.empty() ? "<unknown>" : observed_ip.c_str());
+    const bool is_data_plane =
+        msg.header.type == static_cast<uint16_t>(ClusterMsgType::kRepData);
+    const bool known_member =
+        state_ != nullptr && state_->getNode(sender_name_str) != nullptr;
+    if (!bus_sender_identity_accepted(claimed_ip, observed_ip, known_member,
+                                      is_data_plane ? BusMsgPlane::kData : BusMsgPlane::kControl)) {
+        // 计数进 CLUSTER INFO：以前这里只有一条 WARN，复制数据被静默丢掉的时候，
+        // 从协议面上看不出任何东西——"可诊断"必须有凭据。日志按第 1 条与每 100 条
+        // 采样，避免被攻击刷屏。
+        const uint64_t total = state_ != nullptr ? state_->note_bus_identity_rejection() : 1;
+        if (state_ == nullptr || total == 1 || total % 100 == 0) {
+            LOG_WARN(CLUSTER,
+                     "Bus packet claims %s but arrived on a link to %s (plane=%s, known_member=%d, "
+                     "total rejections=%llu); dropping",
+                     sender_name_str.c_str(),
+                     observed_ip.empty() ? "<unknown>" : observed_ip.c_str(),
+                     is_data_plane ? "data" : "control",
+                     known_member ? 1 : 0,
+                     static_cast<unsigned long long>(total));
+        }
         return;
     }
 

@@ -298,7 +298,24 @@ async def test_cluster_formation(harness: ClusterTestHarness, r: TestResults):
     has_b_in_c = "16380" in nodes_c
     r.record("Node C knows Node A", has_a_in_c)
     r.record("Node C knows Node B", has_b_in_c)
+    # 主机名拓扑不能被身份对账拒掉。#45 原来要求"声称的 ip 与链路地址逐字相等"，
+    # 于是运维敲 CLUSTER MEET localhost 时：对端自报 127.0.0.1、链路是 localhost，
+    # 两边永远不等，报文被静默丢弃，复制与故障判定一起失效。这里用拒绝计数验"没拒"。
+    rej_before = _bus_identity_rejected(await cli_b.execute("CLUSTER", "INFO"))
+    meet_host = await cli_b.execute("CLUSTER", "MEET", "localhost", "16381")
+    r.record("CLUSTER MEET B->C by hostname accepted", meet_host == "OK", f"got: {meet_host}")
+    await asyncio.sleep(2.0)
+    rej_after = _bus_identity_rejected(await cli_b.execute("CLUSTER", "INFO"))
+    r.record("CLUSTER INFO exposes bus identity rejections", rej_after >= 0, f"value: {rej_after}")
+    r.record("hostname MEET was not rejected by identity check", rej_after == rej_before,
+             f"rejected before={rej_before} after={rej_after}")
 
+
+def _bus_identity_rejected(info: str) -> int:
+    """从 CLUSTER INFO 里取总线身份对账的拒绝计数；字段不存在返回 -1。"""
+    import re
+    m = re.search(r"cluster_bus_identity_rejected:(\d+)", info or "")
+    return int(m.group(1)) if m else -1
 
 async def test_slot_assignment(harness: ClusterTestHarness, r: TestResults):
     """Test 2: Assign hash slots to nodes."""

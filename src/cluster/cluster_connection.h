@@ -17,8 +17,14 @@
 
 namespace cc_server {
 
+/// @brief 总线报文的两个平面，身份口径不同（理由见 bus_sender_identity_accepted）
+enum class BusMsgPlane {
+    kControl,  // PING / PONG / MEET 等成员状态交换
+    kData,     // kRepData：被复制的写命令与 REPLSYNC
+};
+
 /**
- * @brief gossip 报文的发送者身份是否与本端实际观察到的链路地址一致
+ * @brief 这条总线报文可不可以按"已认识成员"处理
  *
  * 为什么必须有这一步：`ClusterMsgHeader::sender_name`（"ip:port"）不只是日志字段，
  * 它是节点在集群里的**身份 key**——`ClusterState` 的表以它为键，PFAIL/FAIL 报告按它
@@ -27,20 +33,33 @@ namespace cc_server {
  * 声称自己是第三个主节点，凭空把 FAIL 判定凑成法定人数，让一个活得好好的主节点被判死、
  * 触发副本升主；也可以声称是本端自己，往本端的状态表里写东西。
  *
- * 本端唯一能独立确定的事实是链路地址：入站链路是 accept() 看到的源 IP，出站链路是我们
- * 按 CLUSTER MEET 拨出去的那个 IP。报文里声称的 ip 必须与它一致。
+ * 但"声称的 ip 必须与链路地址逐字相等"这条口径（#45 原来的写法）代价被低估了：
+ * 本仓库把被复制的写命令也塞在同一条总线上，所以它不只拦伪造的成员判定，还连带拦掉
+ * 复制数据面；而 hostname / Docker service-name / NAT 之后的部署里"对端自己是谁"与
+ * "这条链路是什么地址"本来就永远不等（运维敲进 CLUSTER MEET 的是名字，入站 accept 的
+ * 是 IP），于是报文被静默丢弃、对端等不到 PONG 就把本端标 PFAIL。把整条数据面绑死在
+ * 一个字符串全等上，比它要防的问题更严重。
  *
- * 这是一条比 Redis 更严的口径：Redis 允许 cluster-announce-ip 与源地址不同（NAT 后
- * 的多主机场景），它靠总线签名（cluster-secret 的 HMAC）弥补。本仓库没有签名机制，
- * 所以在跨 NAT 的部署里这条会拒收对端报文——那是一个明确的、可诊断的功能限制，比
- * "谁都能伪造集群成员判定"要安全。两侧都为空的字段一律判不通过：观察不到来源
- * 不构成免检理由。
+ * 所以分平面处理：
+ *  - 控制面：两侧都是字面地址（IPv4/IPv6 形状）时仍要求逐字相等——这正是 #45 要防的
+ *    "冒充另一个成员"；任一侧是主机名时不做地址比对，否则 MEET 用主机名拨号这一步
+ *    永远通不过。
+ *  - 数据面：地址不作为凭据，要求的是"这个名字已经在我们表里"。握手期不会走数据面，
+ *    所以不依赖先认识；而随机来客拿不出一个已在表里的节点名，仍然被拒。
  *
- * @param claimed_ip 报文 sender_name 里声称的 IP（冒号前的部分）
- * @param observed_ip 本端实际看到的那条链路的对端 IP
+ * 这不是授权机制——它仍是启发式。真正的凭据是共享密钥签名（SECURITY.md 的已知未修项，
+ * Redis 用 cluster-secret 的 HMAC），做完签名之后这两个平面也就不用再靠地址形状猜了。
+ * 两侧任何一边为空一律判不通过：观察不到来源不构成免检理由。
+ *
+ * @param claimed_ip 报文 sender_name 里声称的地址（冒号前的部分）
+ * @param observed_ip 本端实际看到的那条链路的对端地址
+ * @param sender_is_known_member sender_name 整串是否已在 ClusterState 的节点表里
+ * @param plane 这条报文属于控制面还是数据面
  */
-[[nodiscard]] bool bus_sender_ip_matches_peer(const std::string& claimed_ip,
-                                               const std::string& observed_ip);
+[[nodiscard]] bool bus_sender_identity_accepted(const std::string& claimed_ip,
+                                                const std::string& observed_ip,
+                                                bool sender_is_known_member,
+                                                BusMsgPlane plane);
 
 
 // ClusterConnection 类：管理所有集群节点间的连接
