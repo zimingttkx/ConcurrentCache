@@ -203,6 +203,12 @@ namespace {
                 resp_parser_.reset();  // 重置解析器状态，准备下一次解析
             }
             for (auto & cmd : commands) {
+                // 这一批里前面的命令可能已经把这条连接关掉了（#37 的输出缓冲高水位
+                // 就是在这条路径上触发 close()）。fd 已关、也已被 SubReactor 摘表，
+                // 剩下的命令不该再交给回调。
+                if (closed_) {
+                    break;
+                }
                 if (command_callback_) {
                     command_callback_(cmd, this);
                 }
