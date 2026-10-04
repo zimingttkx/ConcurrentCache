@@ -113,7 +113,16 @@ using FilePtr = std::unique_ptr<FILE, FileCloser>;
 
 RdbPersistence::RdbPersistence() = default;
 
-RdbPersistence::~RdbPersistence() = default;
+RdbPersistence::~RdbPersistence() {
+    // 进程退出时等后台快照线程结束。以前它是 detach() 的：主线程已经开始析构
+    // GlobalStorage / Logger 这些函数局部静态对象，快照线程那边还在遍历 storage
+    // 的快照并往文件里写 —— 退出时的 use-after-free。RdbPersistence 比 GlobalStorage
+    // 晚构造，所以它的析构先发生，这里 join 是安全的顺序。
+    std::lock_guard<std::mutex> guard(snapshot_mutex_);
+    if (snapshot_thread_.joinable()) {
+        snapshot_thread_.join();
+    }
+}
 
 bool RdbPersistence::save(const std::string& filepath, GlobalStorage& storage) {
     // 防止与后台 save 或其他 save() 调用并发写同一文件
@@ -121,6 +130,7 @@ bool RdbPersistence::save(const std::string& filepath, GlobalStorage& storage) {
 
     // 原子写：先写临时文件，完成后 fsync + rename 覆盖目标，避免崩溃留下残缺文件
     std::string tmp_path = filepath + ".tmp";
+    uint32_t saved_keys = 0;
     {
         FilePtr file_guard(fopen(tmp_path.c_str(), "w+b"));
         file_ = file_guard.get();
@@ -179,13 +189,11 @@ bool RdbPersistence::save(const std::string& filepath, GlobalStorage& storage) {
 
             // file_guard 会自动关闭文件
             file_ = nullptr;
-
-            // 更新统计信息（在 rename 之前，避免子进程统计丢失问题）
-            update_bgsave_status(BgsaveStatus::SUCCESS, kv_count);
+            saved_keys = kv_count;
 
         } catch (const std::exception& e) {
             LOG_ERROR(RDB, "Exception during save: %s", e.what());
-            update_bgsave_status(BgsaveStatus::FAILED, 0);
+            record_save_result(BgsaveStatus::FAILED, 0);
             // file_guard 会自动关闭文件
             file_ = nullptr;
             // 清理可能残留的临时文件
@@ -199,6 +207,9 @@ bool RdbPersistence::save(const std::string& filepath, GlobalStorage& storage) {
         LOG_ERROR(RDB, "Failed to rename temp file %s to %s: %s",
                   tmp_path.c_str(), filepath.c_str(), strerror(errno));
         std::remove(tmp_path.c_str());
+        // rename 失败就是这次快照没落盘。以前统计信息在 rename 之前就已经记成
+        // SUCCESS 了，INFO 里的 lastsave 时间会指向一个根本没替换成功的保存。
+        record_save_result(BgsaveStatus::FAILED, 0);
         return false;
     }
 
@@ -211,6 +222,8 @@ bool RdbPersistence::save(const std::string& filepath, GlobalStorage& storage) {
             close(dirfd);
         }
     }
+
+    record_save_result(BgsaveStatus::SUCCESS, saved_keys);
 
     LOG_INFO(RDB, "RDB save completed: %s, keys=%u", filepath.c_str(),
              static_cast<uint32_t>(storage.size()));
@@ -322,22 +335,32 @@ static std::string escape_windows_arg(const std::string& arg) {
 #else
     // 方案 A：不使用 fork，直接在当前进程的独立线程内快照写临时文件
     // 规避 fork-in-multithreaded 下自定义内存池锁的死锁/UB 风险
-    std::thread bg_thread([this, filepath, &storage]() {
-        bool success = save(filepath, storage);
-        stats_.last_bgsave_status.store(
-            success ? BgsaveStatus::SUCCESS : BgsaveStatus::FAILED,
-            std::memory_order_release);
-        LOG_INFO(RDB, "Background save completed (in-process thread), success=%d", success);
-        bgsave_in_progress_.store(0, std::memory_order_release);
-    });
-    bg_thread.detach();
-
-    LOG_INFO(RDB, "Background save started (in-process thread)");
-
-    // 父进程：设置初始状态
-    stats_.last_bgsave_time_sec.store(current_time_sec(), std::memory_order_release);
+    //
+    // 初始状态必须在起线程之前落好：放到后面的话，一次快完成的快照会先把状态写成
+    // SUCCESS，然后这行又把它盖回 IN_PROGRESS，INFO 就永远停在"还在跑"。
+    // last_bgsave_time_sec 不在这里写 —— 它表示"最后一次成功保存的时间"，
+    // 由 save() 成功收尾时的 record_save_result 负责。
     stats_.last_bgsave_status.store(BgsaveStatus::IN_PROGRESS, std::memory_order_release);
     stats_.total_bgsave_calls.fetch_add(1, std::memory_order_relaxed);
+
+    {
+        std::lock_guard<std::mutex> guard(snapshot_mutex_);
+        // 能走到这里说明 bgsave_in_progress_ 刚被我们抢下来，上一轮快照线程已经
+        // 跑完最后一条语句（它就是以清零收尾的），join 只是回收线程对象。
+        if (snapshot_thread_.joinable()) {
+            snapshot_thread_.join();
+        }
+        snapshot_thread_ = std::thread([this, filepath, &storage]() {
+            bool success = save(filepath, storage);
+            stats_.last_bgsave_status.store(
+                success ? BgsaveStatus::SUCCESS : BgsaveStatus::FAILED,
+                std::memory_order_release);
+            LOG_INFO(RDB, "Background save completed (in-process thread), success=%d", success);
+            bgsave_in_progress_.store(0, std::memory_order_release);
+        });
+    }
+
+    LOG_INFO(RDB, "Background save started (in-process thread)");
 
     return true;
 }
@@ -487,22 +510,16 @@ bool RdbPersistence::load(const std::string& filepath, GlobalStorage& storage) {
     }
 }
 
-void RdbPersistence::update_bgsave_status(BgsaveStatus status, size_t keys) {
-    int64_t now = current_time_sec();
-
-    switch (status) {
-        case BgsaveStatus::SUCCESS:
-        case BgsaveStatus::FAILED:
-            // save() 在子进程中调用，所以这里也是子进程更新
-            // 父进程需要在子进程退出后检测
-            bgsave_in_progress_.store(0);
-            stats_.last_bgsave_time_sec.store(now, std::memory_order_release);
-            stats_.last_bgsave_keys.store(keys, std::memory_order_release);
-            stats_.total_rdb_saved_keys.fetch_add(keys, std::memory_order_relaxed);
-            break;
-        default:
-            break;
+void RdbPersistence::record_save_result(BgsaveStatus status, size_t keys) {
+    if (status == BgsaveStatus::SUCCESS) {
+        // 只记统计。bgsave_in_progress_ 由启动快照的那个线程负责清零（见 rdb.h 的
+        // 注释）：以前这里也顺手把它 store(0)，客户端在 BGSAVE 跑的时候敲一条 SAVE
+        // 就会让服务器以为后台快照已经结束，紧接着第二条 BGSAVE 也能启动。
+        stats_.last_bgsave_time_sec.store(current_time_sec(), std::memory_order_release);
+        stats_.last_bgsave_keys.store(keys, std::memory_order_release);
+        stats_.total_rdb_saved_keys.fetch_add(keys, std::memory_order_relaxed);
     }
+    // FAILED 不动 lastsave / keys：一次失败的保存没有"最后成功保存时间"可更新。
 
     stats_.last_bgsave_status.store(status, std::memory_order_release);
 }

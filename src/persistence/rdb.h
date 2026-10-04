@@ -11,6 +11,8 @@
 #include <chrono>
 #include <ctime>
 #include <cstdio>
+#include <mutex>
+#include <thread>
 // 本头文件里 inline 的 operator<<(std::ostream&, BgsaveStatus) 需要 ostream 的
 // 完整定义；此前只靠别的头传递包含，gcc-11 下就找不到 operator<< 重载了。
 #include <ostream>
@@ -191,8 +193,12 @@ namespace cc_server {
         // CRC32 计算（指定结束位置，排除 CRC 本身）
         uint32_t calculate_crc32_for_range(long end_pos);
 
-        // 更新 BGSAVE 状态
-        void update_bgsave_status(BgsaveStatus status, size_t keys);
+        // 更新一次落盘结果的统计。
+        //
+        // 刻意不去碰 bgsave_in_progress_：那个标志属于 BGSAVE 的生命周期，由启动
+        // 快照的线程负责收尾。以前 save() 末尾会顺手把它清零，于是客户端在 BGSAVE
+        // 进行中执行一次 SAVE，就会让服务器认为"后台快照已经结束"。
+        void record_save_result(BgsaveStatus status, size_t keys);
 
         // 获取当前时间戳（秒）
         int64_t current_time_sec() const {
@@ -207,6 +213,13 @@ namespace cc_server {
 
         // 保存互斥锁：防止同步 save 与后台 save 并发写同一文件
         std::mutex save_mutex_;
+
+        // 后台快照线程。以前是 detach()，进程退出时没人等它：线程还在遍历
+        // GlobalStorage 的快照数据、往外写文件，而主线程已经开始析构函数局部静态
+        // 对象 —— 这是一次退出时的 use-after-free。改成可 join 的成员，析构和
+        // wait_for_bgsave() 都会等它结束。
+        std::mutex snapshot_mutex_;
+        std::thread snapshot_thread_;
     };
 
 }  // namespace cc_server

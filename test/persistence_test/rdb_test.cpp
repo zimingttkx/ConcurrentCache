@@ -470,6 +470,40 @@ void test_rdb_corrupt_file_leaves_storage_untouched() {
     std::remove(path.c_str());
 }
 
+// BGSAVE 的状态机：完成之后必须是 SUCCESS 且不再 in-progress。
+// 旧代码把 "IN_PROGRESS" 的赋值写在起线程之后，小快照先跑完就会被这一行盖回
+// IN_PROGRESS，INFO 里永远显示"还在保存"。
+void test_rdb_bgsave_reports_success() {
+    TEST_SUITE("RDB BGSAVE State Machine");
+
+    GlobalStorage storage;
+    CacheObject a;
+    a.set_string("1");
+    storage.set("bk1", a);
+    storage.set("bk2", a);
+    storage.set("bk3", a);
+
+    auto& rdb = RdbPersistence::instance();
+    // 前一个用例可能还留着一次没跑完的 BGSAVE，先排干再断言
+    rdb.wait_for_bgsave(5000);
+
+    const std::string path = "/tmp/test_rdb_bgsave_state.rdb";
+    std::remove(path.c_str());
+
+    EXPECT_TRUE(rdb.save_in_background(path, storage));
+    EXPECT_TRUE(rdb.wait_for_bgsave(5000));
+    EXPECT_TRUE(!rdb.is_bgsave_in_progress());
+    EXPECT_TRUE(rdb.get_last_bgsave_status() == BgsaveStatus::SUCCESS);
+    EXPECT_EQ(rdb.get_last_bgsave_keys(), static_cast<size_t>(3));
+
+    // 快照必须真的落盘、且内容对得上
+    GlobalStorage reloaded;
+    EXPECT_TRUE(rdb.load(path, reloaded));
+    EXPECT_EQ(reloaded.size(), static_cast<size_t>(3));
+
+    std::remove(path.c_str());
+}
+
 void run_all_rdb_tests() {
     std::cout << "\n========================================\n";
     std::cout << "Running RDB Persistence Tests\n";
@@ -484,6 +518,7 @@ void run_all_rdb_tests() {
     test_rdb_corrupt_file_leaves_storage_untouched();
     test_rdb_stats();
     test_rdb_bgsave();
+    test_rdb_bgsave_reports_success();
 
     std::cout << "\n========================================\n";
     std::cout << "All RDB Persistence Tests Passed!\n";
