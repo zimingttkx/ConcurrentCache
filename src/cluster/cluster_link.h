@@ -117,6 +117,11 @@ public:
     void update_last_recv_time();
     [[nodiscard]] int64_t last_recv_time() const { return last_recv_time_.load(); }
 
+    // 半帧停留检测（滴包防护，理由见 kPartialFrameTimeoutMs 的注释）。
+    // 时钟由调用方传入，测试可以自己推进。
+    [[nodiscard]] bool partial_frame_stale(uint64_t now_ms) const;
+    [[nodiscard]] static uint64_t steady_now_ms();
+
 private:
     // 完整读取一个消息
     bool read_complete();
@@ -154,6 +159,18 @@ private:
     /// 必须由 handle_read 单独判断并断链：不能让 decode_msg 拿着一个缓冲区里
     /// 并不存在的长度去读参数区。
     bool frame_invalid_ = false;
+
+    /// @brief 一帧从"第一次出现残缺"起允许停留多久，超时即断链。
+    ///
+    /// 空闲检测（last_recv_time_ + ping_timeout）挡不住滴包：对端先送一个 length =
+    /// kMaxPacketBytes-1 的合法帧头，之后每 10 秒滴 1 个字节——每个字节都会刷新
+    /// last_recv_time_，于是超时永远不触发，而这条链路的接收缓冲一路涨到接近 256MB，
+    /// 总线链路数又不设上限，是一个不做认证的远程内存放大。这里量的是同一帧停留了
+    /// 多久，与流量无关，滴包照样在 30 秒后被切断。
+    static constexpr uint64_t kPartialFrameTimeoutMs = 30000;
+
+    /// @brief 当前这帧第一次残缺的时刻（steady_clock 毫秒），0 表示没有半帧挂着。
+    uint64_t partial_frame_since_ms_ = 0;
 };
 
 } // namespace cc_server

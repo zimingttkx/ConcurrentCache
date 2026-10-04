@@ -206,6 +206,53 @@ void test_bus_sender_identity_predicate() {
     EXPECT_TRUE(!bus_sender_ip_matches_peer("", "127.0.0.1"));
 }
 
+// 滴包防护：帧头声明 200MB（合法，没超 kMaxPacketBytes），正文一直不齐。
+//
+// 空闲超时挡不住这种打法——每滴一个字节都会把 last_recv_time_ 刷新，于是
+// ping_timeout 永远不触发，而这条链路的接收缓冲一路往 256MB 涨；总线链路数又
+// 不设上限，就是一个不做认证的远程内存放大。所以要量的是"同一帧停留了多久"。
+// 测试不真的等 30 秒：partial_frame_stale 的时钟由调用方给。
+void test_bus_partial_frame_drip_becomes_stale() {
+    TEST_SUITE("Cluster Bus Frame Bounds");
+
+    BusHarness h;
+    if (!h.ok()) {
+        EXPECT_TRUE(false);
+        return;
+    }
+
+    constexpr uint32_t kDeclared = 200u * 1024u * 1024u;
+    h.feed(make_header(kDeclared, static_cast<uint16_t>(ClusterMsgType::kPing)));
+    h.link.handle_read();
+
+    // 第一滴只登记起算时间：不断链、不投递
+    EXPECT_TRUE(!h.disconnected);
+    EXPECT_EQ(h.delivered, 0);
+
+    const uint64_t now = ClusterLink::steady_now_ms();
+    EXPECT_TRUE(!h.link.partial_frame_stale(now));
+    EXPECT_TRUE(h.link.partial_frame_stale(now + 31000));
+
+    // 再滴一个字节，链路仍然活着（还没到停留上限）
+    EXPECT_EQ(::write(h.peer_fd, "x", 1), static_cast<ssize_t>(1));
+    h.link.handle_read();
+    EXPECT_TRUE(!h.disconnected);
+    EXPECT_TRUE(h.link.partial_frame_stale(ClusterLink::steady_now_ms() + 31000));
+
+    // 反过来：长度正好凑齐的帧必须被投递，并且不留任何"半帧"状态——
+    // 否则正常流量会被误判成滴包而断掉。
+    BusHarness good;
+    if (!good.ok()) {
+        EXPECT_TRUE(false);
+        return;
+    }
+    good.feed(make_header(static_cast<uint32_t>(sizeof(ClusterMsgHeader)),
+                          static_cast<uint16_t>(ClusterMsgType::kPing)));
+    good.link.handle_read();
+    EXPECT_EQ(good.delivered, 1);
+    EXPECT_TRUE(!good.link.partial_frame_stale(ClusterLink::steady_now_ms() + 60000));
+}
+
 void run_all_cluster_bus_framing_tests() {
     std::cout << "\n========================================\n";
     std::cout << "Running Cluster Bus Framing Tests\n";
@@ -217,6 +264,7 @@ void run_all_cluster_bus_framing_tests() {
     test_bus_frame_shorter_than_header_disconnects();
     test_bus_send_still_allows_large_replicated_value();
     test_bus_sender_identity_predicate();
+    test_bus_partial_frame_drip_becomes_stale();
 
     std::cout << "\n========================================\n";
     std::cout << "All Cluster Bus Framing Tests Done!\n";
