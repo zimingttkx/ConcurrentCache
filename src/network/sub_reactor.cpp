@@ -279,7 +279,12 @@ void SubReactor::remove_connection(int fd) {
     // 里，当场析构等于把正在执行的栈帧和它的 Channel 一起释放掉。
     // fd 已经在 Connection::close() 里关过了，所以把对象交给 loop 线程在下一次
     // 迭代开头的任务队列回收——那时上一轮分发的栈帧早就退干净了。
-    loop_->queue_in_loop([conn = std::move(dying)]() {});
+    //
+    // 这里转成 shared_ptr 再捕获：任务队列的载体是 std::function，它要求目标可拷贝
+    // 构造，直接捕获 unique_ptr 编译不过（项目是 C++20，std::move_only_function 还
+    // 用不了）。此时 map 里那份是唯一所有者，转成 shared_ptr 只是多一个控制块。
+    std::shared_ptr<Connection> keeper(std::move(dying));
+    loop_->queue_in_loop([keeper]() {});
 }
 
 } // namespace cc_server
