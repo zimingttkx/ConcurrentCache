@@ -55,11 +55,16 @@ jobs:
           cmake --build build --parallel "$(nproc)"
         if: matrix.san == 'undefined'
 
-      # 不拦合并（本 workflow 里没有 required check），但必须每天看得见。
-      # lock-race/deadlock 里存在故意构造的竞争与死锁场景，TSAN 报它们是预期行为，
-      # 需要逐条区分"测试故意"与"产品真有"。
+      # 收紧：这一步现在会红。
+      #
+      # 原来挂着 continue-on-error，理由是"lock-race/deadlock 里存在故意构造的竞争与
+      # 死锁场景，TSAN 报它们是预期行为"。取证看步骤级结论而不是 Job 级（Job 级正是被
+      # 这层容错刷绿的）：最近两轮 daily 里 sanitizer-thread / sanitizer-address /
+      # sanitizer-undefined 三个矩阵项的 "Run gate + contract suites" 都是 success，
+      # 也就是当前 gate|contract 这套用例在三种 sanitizer 下没有任何报告。
+      # 以后若真需要保留一个故意构造的竞争用例，正确做法是把它移出 gate|contract 标签
+      # （它本来就不是给 sanitizer 读的），而不是把整步重新调成容错。
       - name: Run gate + contract suites
-        continue-on-error: true
         run: |
           set -o pipefail
           TSAN_OPTIONS="halt_on_error=0" ctest --test-dir build -L "gate|contract" -j1 --output-on-failure 2>&1 | tee san.log
@@ -95,8 +100,9 @@ jobs:
           cmake -B build -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DENABLE_ASAN=ON
           cmake --build build --parallel "$(nproc)"
 
+      # 收紧：这步用 ASan 的 detect_leaks=1 跑 gate|contract，最近两轮 daily 的步骤级
+      # 结论都是 success。
       - name: Leak sweep
-        continue-on-error: true
         env:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=0
         run: ctest --test-dir build -L "gate|contract" -j1 --output-on-failure
@@ -121,8 +127,9 @@ jobs:
 
       # 短参数先跑：load-limit 与 long-running 默认就是数分钟到 180s 起步，
       # 完整跑法留给手动 workflow_dispatch。
+      # 收紧：slow 标签套件最近两轮 daily 均为 success。跑不完会撞到 ctest TIMEOUT，
+      # 那种红必须响，不能被吞成绿。
       - name: Stress suites
-        continue-on-error: true
         run: ctest --test-dir build -L slow -j1 --output-on-failure
 
   e2e:
@@ -166,8 +173,10 @@ jobs:
       - name: Full-cluster e2e
         run: python3 test/e2e_test/e2e_cluster_full_test.py
 
+      # 收紧：stress_find_limit.py 唯一的非零出口是"找不到 build/concurrentcache-server"，
+      # 那正是接线断了、探测根本没跑的情形——以前这层容错把"没跑成"显示为通过。
+      # 各并发级别的 OK/WARN/FAIL 只是打印，不参与退出码，所以这一步不会因性能波动而红。
       - name: Limit probe
-        continue-on-error: true
         run: python3 test/e2e_test/stress_find_limit.py
 
       - name: Upload e2e reports
@@ -201,8 +210,10 @@ jobs:
           cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
           cmake --build build --target concurrentcache-server --parallel "$(nproc)"
 
+      # 收紧：与真 Redis 的行为对照（comparison_test.py）最近两轮 daily 步骤级均 success。
+      # 它红的时候只有两种可能：我们的语义偏离了 Redis，或对照脚本没跟着产品改动更新
+      # ——两种都需要有人看，不该显示成绿。
       - name: Compare against Redis
-        continue-on-error: true
         run: python3 test/e2e_test/comparison_test.py
 
   # 可移植性：Redis 在 ci.yml 里跑老发行版与 arm。这里先补两条最可能藏问题的。
