@@ -227,6 +227,44 @@ void test_command_loop_stops_once_connection_is_closed() {
     ::close(sv[1]);
 }
 
+// EPOLLHUP 不能被静默吞掉。
+//
+// 旧接线里 Connection 只给 Channel 设了 read / write / error 三个回调，而 Channel 的
+// HUP 分支写的是"有 close_cb 就调它，然后 return"。close_cb 从来没被设过，于是 HUP
+// 到达时**什么都不做**就返回：fd 既不读也不关。而 EPOLLHUP 是持续条件，epoll_wait
+// 每轮都会立刻返回同一个事件 —— EventLoop 变成 100% CPU 空转，客户端永远等不到回复。
+//
+// 这里不起 loop，直接把事件喂给 handle_event()，所以时序是钉死的、不靠调度。
+void test_hup_alone_still_finishes_the_connection() {
+    TEST_SUITE("Connection HUP Handling");
+
+    int sv[2] = {-1, -1};
+    EXPECT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+
+    EventLoop loop;
+    auto owner = std::make_unique<Connection>(sv[0], &loop);
+
+    bool notified = false;
+    owner->set_close_callback([&notified]() { notified = true; });
+
+    // 对端留下一条完整命令后整个关闭：数据还没被读，HUP 已经成立
+    const std::string cmd = "*1\r\n$4\r\nPING\r\n";
+    EXPECT_EQ(::write(sv[1], cmd.data(), cmd.size()), static_cast<ssize_t>(cmd.size()));
+    ::close(sv[1]);
+
+    owner->channel()->set_triggered_events(EPOLLHUP);
+    owner->channel()->handle_event();
+
+    // 必须有人接手这条已经断掉的连接
+    EXPECT_TRUE(notified);
+
+    // 收尾走 Connection::close()：本用例的 close_callback_ 只置标志、不销毁对象，
+    // 而 fd 的所有权在 Connection 手里。这里要是直接 ::close(sv[0])，出作用域时
+    // ~Socket 会对同一个号码再关一次——同一个二进制里后面还有别的用例，那个号
+    // 可能已经被它们重新 open 出来了。
+    owner->close();
+}
+
 void run_all_connection_tests() {
     std::cout << "\n========================================\n";
     std::cout << "Running Connection / EventLoop Lifetime Tests\n";
@@ -238,6 +276,7 @@ void run_all_connection_tests() {
     test_output_buffer_high_water_closes_client();
     test_event_loop_drains_pending_tasks_on_exit();
     test_command_loop_stops_once_connection_is_closed();
+    test_hup_alone_still_finishes_the_connection();
 
     std::cout << "\n========================================\n";
     std::cout << "All Connection Lifetime Tests Done!\n";
