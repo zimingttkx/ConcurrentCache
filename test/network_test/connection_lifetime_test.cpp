@@ -175,12 +175,29 @@ void test_output_buffer_high_water_closes_client() {
     ::close(sv[1]);
 }
 
+// INJECTION — 这个 PR 不合并。用来证明 asan-smoke 的 sweep 在 #49 之后是真的
+// 拦合并：Release/gate-tests 与 build-assert 都不会因此崩（只是读了一格隔壁的堆字节），
+// 而 Debug + ASan 必须报 heap-buffer-overflow 并把用例判失败。
+void test_injection_asan_heap_overread() {
+    TEST_SUITE("ASan Gate Injection");
+
+    char* buf = new char[32];
+    for (int i = 0; i < 32; ++i) {
+        buf[i] = static_cast<char>('a' + (i % 26));
+    }
+    volatile char sink = buf[32];  // 故意越界一个字节
+    (void)sink;
+    delete[] buf;
+    EXPECT_TRUE(true);
+}
+
 void run_all_connection_tests() {
     std::cout << "\n========================================\n";
     std::cout << "Running Connection / EventLoop Lifetime Tests\n";
     std::cout << "========================================\n\n";
 
     test_connection_close_frees_fd_before_notifying_owner();
+    test_injection_asan_heap_overread();
     test_event_loop_runs_queued_tasks();
     test_input_buffer_high_water_closes_client();
     test_output_buffer_high_water_closes_client();
