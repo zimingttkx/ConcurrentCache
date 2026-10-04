@@ -230,3 +230,27 @@ jobs:
 
       - name: Inspect image
         run: docker images concurrentcache:ci
+
+      # 只 build 不启动的 docker job 证明不了镜像能用：Dockerfile 里的
+      # HEALTHCHECK / ENTRYPOINT 从来没被门禁执行过一次（本仓库的
+      # .dockerignore 排除 test/ 那次回归就是靠 build 抓到的，启动失败抓不到）。
+      - name: Start container and wait for health
+        run: |
+          set -o pipefail
+          docker run -d --name cc-ci -p 6379:6379 concurrentcache:ci
+          ok=""
+          for i in $(seq 1 45); do   # ~135s：HEALTHCHECK 是 interval=30s/retries=3，窗口要容得下至少三次探针
+            status=$(docker inspect --format '{{.State.Health.Status}}' cc-ci)
+            echo "attempt $i: health=$status"
+            if [ "$status" = "healthy" ]; then ok=yes; break; fi
+            if [ "$(docker inspect --format '{{.State.Running}}' cc-ci)" != "true" ]; then
+              echo "container exited early"; docker logs cc-ci; exit 1
+            fi
+            sleep 2
+          done
+          [ -n "$ok" ] || { echo "HEALTHCHECK 一直没通过"; docker logs cc-ci; exit 1; }
+          # HEALTHCHECK 用的是镜像里的 redis-cli，所以还要确认它真的答了 PONG
+          reply=$(docker exec cc-ci redis-cli -p 6379 PING)
+          echo "PING -> $reply"
+          [ "$reply" = "PONG" ] || exit 1
+          docker rm -f cc-ci

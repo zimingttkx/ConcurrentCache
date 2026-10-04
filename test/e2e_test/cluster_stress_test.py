@@ -334,6 +334,8 @@ async def main():
         for d in tmp_dirs: shutil.rmtree(d, ignore_errors=True)
         sys.exit(1)
 
+    hard_failures: List[str] = []  # 与机器负载无关的那几条判据
+
     try:
         PORTS = [16379, 16380, 16381]
         # 预热
@@ -371,6 +373,48 @@ async def main():
                 await run_cluster_tier(f"L{phase+1}", safe, PORTS, slot_map, duration=30)
                 await asyncio.sleep(2.0)
 
+        # ─── 与机器负载无关的判据 ───
+        #
+        # 上面那张阶梯表量的是 QPS / p99 / 错误率，随 runner 负载浮动。把它当红绿判据
+        # 就是重演 #49 里"把排程巧合当不变量"的错误，所以阶梯继续只报告（它本意就是探
+        # 极限，daily.yml 里也是这么写的）。这里只留三种不会因机器快慢而假的：
+        #   1) 压测过程中没有节点进程退出；
+        #   2) 压测之后集群仍能应答 SET/GET；
+        #   3) 压测之后新写的键必须原样读回——值不对就是写坏。
+        #
+        # 注意两件刻意不做的事：
+        #   - 不抽查预热键。压测的 SET 会不断造新键，越过 max_entries*0.9 就会按 LRU
+        #     淘汰最老的键（storage.cpp 的淘汰路径），那是配置规定的行为，拿它当缺陷就
+        #     是把负载相关现象当不变量。所以这里验的是压测结束后当场写的键。
+        #   - 不把"没读到回复"当写坏。本文件的 RespClient 只 read 一次就去解析，回复跨
+        #     多个 TCP 段时会返回 None（daily.yml 里 failover 那条注释记录过同一个毛病）。
+        #     None 只计数并打印，值不对（非 None 且不相等）才算硬失败。
+        for idx, proc in enumerate(procs):
+            if proc.poll() is not None:
+                hard_failures.append(f"节点 #{idx} 在压测中退出，returncode={proc.returncode}")
+
+        alive = len(procs) - sum(1 for pr in procs if pr.poll() is not None)
+        verified = wrong = no_reply = 0
+        verify = ClusterClient(PORTS, slot_map)
+        if not await verify.connect():
+            hard_failures.append("压测结束后连不上任何节点")
+        else:
+            for i in range(20):
+                key = f"post_stress:{i}"
+                value = f"v{i}"
+                if await verify.execute("SET", key, value) != "OK":
+                    hard_failures.append(f"压测结束后 SET {key} 没有返回 +OK")
+                    break
+                got = await verify.execute("GET", key)
+                verified += 1
+                if got is None:
+                    no_reply += 1
+                elif got != value:
+                    wrong += 1
+            await verify.close()
+        if wrong:
+            hard_failures.append(f"压测后写入的 {verified} 个键里，{wrong} 个读回的值不对")
+        print(f"  硬判据：节点存活 {alive}/{len(procs)}，压测后回读 {verified} 个键，值不对 {wrong} 个，无回复 {no_reply} 个（不计入失败，见上面的说明）")
         # 报告
         print(f"\n{'='*70}")
         print(f"  {'集群压测报告':^60}")
@@ -407,6 +451,13 @@ async def main():
             except: p.kill()
         for d in tmp_dirs:
             shutil.rmtree(d, ignore_errors=True)
+
+    if hard_failures:
+        print("")
+        print("  ✗ 集群压测出现硬失败（不是吞吐/延迟问题）：")
+        for item in hard_failures:
+            print(f"      - {item}")
+        return 1
 
     return 0
 
