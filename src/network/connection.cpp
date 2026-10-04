@@ -82,6 +82,15 @@ namespace {
             }
         });
 
+        // EPOLLHUP / EPOLLRDHUP 走同一套收尾。以前只设了 error 回调，而 Channel 的
+        // HUP 分支在 close_cb 为空时直接 return，于是 HUP 被静默吞掉：fd 既不读也不关，
+        // epoll 每轮都立刻返回同一个 HUP。
+        channel_->set_close_callback([this]() {
+            if (close_callback_) {
+                close_callback_();
+            }
+        });
+
         // 启用读事件监听
         // 为什么要监听读？
         // - 服务器是被动的，客户端主动发数据过来
