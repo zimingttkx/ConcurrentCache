@@ -719,7 +719,28 @@ bool RespParser::parse_bulk_string(Buffer* buffer, std::string& out) {
 // 例如: *2\r\n$3\r\nget\r\n$3\r\nkey\r\n
 //       *3\r\n:1\r\n:2\r\n:3\r\n
 
+namespace {
+// 递归深度守卫：正常返回、提前 return false、抛异常，都要把计数收回去
+class DepthGuard {
+public:
+    explicit DepthGuard(int& depth) : depth_(depth) { ++depth_; }
+    ~DepthGuard() { --depth_; }
+
+private:
+    int& depth_;
+};
+}  // namespace
+
 bool RespParser::parse_array(Buffer* buffer, std::vector<RespValue>& out) {
+    DepthGuard guard(array_depth_);
+    if (array_depth_ > kMaxNestingDepth) {
+        error_msg_ = "Array nesting exceeds limit";
+        // 这批字节永远解析不出来。只设 error_msg_ 的话对端会反复把它喂回来，
+        // 变成 CPU 空转；设成协议错误才能按既有路径断开连接。
+        protocol_error_ = error_msg_;
+        return false;
+    }
+
     const char* data = buffer->peek();
     size_t len = buffer->readable_bytes();
 
@@ -761,7 +782,14 @@ bool RespParser::parse_array(Buffer* buffer, std::vector<RespValue>& out) {
     // 使用 reserve() 预分配内存，避免多次重新分配
     // reserve(n) 确保 vector 可以容纳 n 个元素而不重新分配
 
-    out.reserve(static_cast<size_t>(count));
+    // reserve 要按"还能读到多少字节"再夹一层：一个元素至少占 1 个字节，所以
+    // count 超过剩余字节数时必然是还没收全。不夹的话 12 个字节的 *1048576\r\n
+    // 就能让人一次预留一百万个 RespValue（约 40MB），客户端反复发这个就是
+    // 用 12 字节换 40MB 的分配放大。
+    const size_t available = buffer->readable_bytes();
+    const size_t reserve_n =
+        (count > static_cast<int64_t>(available)) ? available : static_cast<size_t>(count);
+    out.reserve(reserve_n);
 
     for (int64_t i = 0; i < count; ++i) {
         // 检查是否还有数据
