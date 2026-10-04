@@ -39,7 +39,9 @@ flowchart LR
     end
 ```
 
-> 加载端是**计数驱动**：先读 `db_count`、`kv_count`，按 `kv_count` 循环读取 KV 条目，最后读 EOF marker 并校验 CRC——不依赖 EOF 来终止循环。
+> 加载端是**计数驱动**：先读 `db_count`、`kv_count`，按 `kv_count` 循环读取 KV 条目，最后读 EOF marker——不依赖 EOF 来终止循环。CRC 在循环**之前**就验完（覆盖 `[0, size-4)`），所以一个被截断或改坏的文件不会先把半个数据集留在内存里；循环结束后还要求游标正好落在 EOF marker 处，正文比头部声称的多一条少一条都判坏。
+>
+> 每个 `*_len` 字段都先跟正文真正还剩的字节数比一遍，才拿去分配内存，所以一个几十字节的 `dump.rdb` 把 `len` 写成 `0xFFFFFFFF` 也换不来一次 4GB 的申请。
 >
 > 字段顺序固定为「TTL marker（可选，最前）→ key → type → value」。`KV_WITH_TTL` 中的 8 字节是**绝对过期时间戳**（epoch ms），不是剩余 TTL。
 
@@ -53,7 +55,7 @@ flowchart LR
 | `0x03` | SET | `count(4B) + count × (len + bytes)` |
 | `0x04` | ZSET | `count(4B) + count × (member_len + member + score_bits 8B，IEEE-754 大端)` |
 | `0xFE` | KV_WITH_TTL（前置 marker） | `绝对过期时间戳 epoch ms(8B)` |
-| `0xFF` | EOF_MARKER | 循环后读取并校验 |
+| `0xFF` | EOF_MARKER | 循环后读取；游标必须正好停在它前面，否则判坏 |
 
 ## 3. 核心类
 
@@ -245,13 +247,15 @@ sequenceDiagram
     participant GS as GlobalStorage
     M->>RP: load(path, storage)
     RP->>RP: fopen(path, "rb")
+    RP->>RP: 0 字节文件 → 当作空数据集，直接返回成功
     RP->>RP: read magic == "CCRD"? 不符 → fail
     RP->>RP: read version == "0002"? 不符 → 拒绝加载
+    RP->>RP: 跳到文件尾读 CRC32，与 [0, size-4) 现算的比对 → 不符 → fail（此时一个字节都还没进存储）
     RP->>RP: read db_count
     RP->>RP: read kv_count
     loop kv_count 次
         RP->>RP: opt type == 0xFE → read 绝对过期时间戳
-        RP->>RP: read key → read type → deserialize_xxx
+        RP->>RP: read key → read type → deserialize_xxx（未知 type → 抛异常，整份文件判坏）
         alt expire_time_ms > 0 且 ttl = expire - now > 0
             RP->>GS: storage.set_with_expire(key, obj, 剩余ttl_ms)
         else 已过期
@@ -260,8 +264,8 @@ sequenceDiagram
             RP->>GS: storage.set(key, obj)
         end
     end
-    RP->>RP: read EOF marker 0xFF
-    RP->>RP: read CRC32 verify
+    RP->>RP: 游标必须正好停在 EOF marker 前一个字节 → 不对 → fail
+    RP->>RP: read EOF marker == 0xFF? 不符 → fail
     RP->>RP: fclose
 ```
 
