@@ -134,7 +134,9 @@ sudo systemctl start concurrentcache
 | `rdb_path` | `./dump.rdb` | RDB 文件路径 |
 | `rdb_save_interval` | `900` | 自动保存间隔（秒；配置 ≤ 0 时自动回退默认） |
 | `rdb_dirty_threshold` | `1` | 达到 N 个脏键就触发保存（配置 ≤ 0 时自动回退默认） |
-| `max_entries` | `2000000` | 存储上限（触发 ARU 淘汰；**当前未接线**——代码中 `set_max_entries` 无调用方，运行期恒为内置默认 2,000,000，配置值不生效） |
+| `max_entries` | `2000000` | 键数量上限，触发近似 LRU 淘汰。启动时由 `main.cpp` 交给 `GlobalStorage::set_max_entries()`；缺省或 `0` 沿用内置默认，负数视为配错并回退默认。淘汰按条数判断，没有按字节的 maxmemory 口径 |
+| `client_query_buffer_limit` | `16777216` | 单条连接输入缓冲高水位（字节）。未完成请求攒过这个值就断开该连接，等价于当前可用的最大 value 尺寸；`0` = 不限制，小于 1MB 抬到 1MB |
+| `client_output_buffer_limit` | `67108864` | 单条连接输出缓冲高水位（字节）。对端不读时回复的积压上限，超过即断开；`0` = 不限制 |
 | `cluster_enabled` | `false` | 是否启用集群模式 |
 | `cluster_node_timeout` | `15000` | Gossip 节点超时（毫秒） |
 | `cluster_config_file` | `nodes.conf` | 集群节点状态文件 |
