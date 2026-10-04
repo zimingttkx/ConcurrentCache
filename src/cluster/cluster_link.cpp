@@ -340,7 +340,7 @@ void ClusterLink::handle_read() {
 
         if (frame_pending) {
             if (partial_frame_since_ms_ == 0) {
-                partial_frame_since_ms_ = now;
+                // MUTANT: 起算时间不记录，计时器永不启动
             } else if (now - partial_frame_since_ms_ >= kPartialFrameTimeoutMs) {
                 LOG_ERROR(CLUSTER,
                           "Partial frame from %s dripping for %lu ms, disconnecting",
