@@ -72,9 +72,16 @@ void test_zero_value_boundary() {
     TEST_SUITE("Zero Value Boundary Tests");
 
     RUN_TEST(sharded_lock_zero_shards) {
-        // 分片数为 0 应该被处理
+        // #34 把 0 片收敛成 1 片可用：留 0 的话第一次 get_shard() 就要算
+        // hash % 0，直接 SIGFPE。这条断言原本写的是"应当还是 0"，那是崩溃
+        // 之前的形状，跟着修复一起改过来。
         ShardedLock<SpinLock> sharded(0);
-        EXPECT_EQ(sharded.num_shards(), size_t(0));
+        EXPECT_EQ(sharded.num_shards(), size_t(1));
+
+        // 只有一片时，任何 hash 都必须落在同一把锁上——这也是崩溃路径本身
+        auto& first = sharded.get_shard(0);
+        auto& other = sharded.get_shard(12345);
+        EXPECT_TRUE(&first == &other);
     });
 
     RUN_TEST(atomic_integer_zero_init) {
