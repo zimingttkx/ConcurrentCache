@@ -198,17 +198,19 @@ jobs:
             echo "构建配置：Debug + -fsanitize=address，全部测试 target 编译链接通过。"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # 运行阶段暂时只观察不拦：这是 gate 第一次在 Debug 下跑，而 assert() 只在
-      # Debug 生效且 SIGABRT 不会被 TestSuite 的 try/catch 接住（整个二进制直接没）。
-      # 攒够连续干净结果后，把 continue-on-error 去掉即完成收紧。
-      - name: ASan sweep (observe)
-        continue-on-error: true
+      # 运行阶段现在是真的拦合并了。以前它挂着 continue-on-error，理由是"gate 第一次
+      # 在 Debug 下跑，assert() 只在 Debug 生效且 SIGABRT 不会被 TestSuite 的 try/catch
+      # 接住"。查了最近四次 asan-smoke 的 sweep 结果，这个容错的实际效果是：required
+      # 检查里藏着红 —— #41 是 8/10、#40 与 #42 是 9/10、只有 #43 侥幸 10/10，而红的
+      # 全部是 Lock 层的两条"把排程巧合当不变量"的断言（本 PR 同时修掉）。
+      # 一个不拦合并的 ASan 扫描等于没有 ASan 扫描：内存错误可以一路进 main。
+      - name: ASan sweep
         run: |
           set -o pipefail
           ctest --test-dir build -L "gate|contract" -j1 --output-on-failure 2>&1 | tee asan.log
           {
             echo
-            echo "### ASAN 运行结果（不拦合并）"
+            echo "### ASAN 运行结果（拦合并）"
             grep -E "tests passed|tests failed" asan.log || echo "见上方日志"
           } >> "$GITHUB_STEP_SUMMARY"
 
