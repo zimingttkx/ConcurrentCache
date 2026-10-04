@@ -171,7 +171,10 @@ jobs:
       # 吞掉失败的成本是：一个绿色 Job 里藏着一个没人看得见的红点。脚本侧的修法
       # （读到能解析为止 + 超时/关闭/nil 分开返回 + 失败时打节点日志尾巴）在同一次
       # 提交里。Full-cluster 那条也从 continue-on-error 改成真实结果。
-      - name: Cluster and replication e2e
+      # cluster_stress_test.py 以前恒 return 0（阶梯表里的错误率只打印，节点在压测中
+      # 死掉也不会红）。阶梯本身是探极限的，随 runner 负载浮动，不该当判据——所以
+      # 判据换成三条与机器快慢无关的：压测中没有节点死掉、压测后 SET/GET 仍正常、
+      # 预热写入的键抽查 200 个没有丢失或被写坏。阶梯继续只报告。      - name: Cluster and replication e2e
         run: |
           python3 test/e2e_test/e2e_failover_test.py
           python3 test/e2e_test/e2e_psync_replication_test.py

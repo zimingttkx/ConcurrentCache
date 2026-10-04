@@ -334,6 +334,8 @@ async def main():
         for d in tmp_dirs: shutil.rmtree(d, ignore_errors=True)
         sys.exit(1)
 
+    hard_failures: List[str] = []  # 与机器负载无关的那几条判据
+
     try:
         PORTS = [16379, 16380, 16381]
         # 预热
@@ -371,6 +373,37 @@ async def main():
                 await run_cluster_tier(f"L{phase+1}", safe, PORTS, slot_map, duration=30)
                 await asyncio.sleep(2.0)
 
+        # ─── 与机器负载无关的判据 ───
+        #
+        # 上面那张阶梯表量的是 QPS / p99 / 错误率，随 runner 负载浮动。把它当红绿
+        # 判据就是重演 #49 里"把排程巧合当不变量"的错误，所以阶梯继续只报告（它的
+        # 本意就是探极限，daily.yml 里也是这么写的）。这里补三条不会因机器快慢而假的：
+        #   1) 压测过程中没有节点进程死掉；
+        #   2) 压测之后集群仍能正常应答 SET/GET；
+        #   3) 预热写进去的键没丢、没被写坏（抽查 200 个）。
+        for idx, proc in enumerate(procs):
+            if proc.poll() is not None:
+                hard_failures.append(f"节点 #{idx} 在压测中退出，returncode={proc.returncode}")
+
+        verify = ClusterClient(PORTS, slot_map)
+        alive = len(procs) - sum(1 for pr in procs if pr.poll() is not None)
+        checked = bad = 0
+        if not await verify.connect():
+            hard_failures.append("压测结束后连不上任何节点")
+        else:
+            probe = "post_stress_probe"
+            if await verify.execute("SET", probe, "1") != "OK":
+                hard_failures.append("压测结束后 SET 没有返回 +OK")
+            if await verify.execute("GET", probe) != "1":
+                hard_failures.append("压测结束后读不回刚写的键")
+            for i in range(0, 1000, 5):
+                checked += 1
+                if await verify.execute("GET", f"warmup:{i}") != f"val_{i}":
+                    bad += 1
+            await verify.close()
+        print(f"  硬判据：节点存活 {alive}/{len(procs)}，预热键抽查 {checked} 个，异常 {bad} 个")
+        if bad:
+            hard_failures.append(f"抽查 {checked} 个预热键，{bad} 个丢失或被写坏")
         # 报告
         print(f"\n{'='*70}")
         print(f"  {'集群压测报告':^60}")
@@ -407,6 +440,13 @@ async def main():
             except: p.kill()
         for d in tmp_dirs:
             shutil.rmtree(d, ignore_errors=True)
+
+    if hard_failures:
+        print("")
+        print("  ✗ 集群压测出现硬失败（不是吞吐/延迟问题）：")
+        for item in hard_failures:
+            print(f"      - {item}")
+        return 1
 
     return 0
 
