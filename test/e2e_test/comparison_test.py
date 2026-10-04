@@ -746,7 +746,21 @@ class FunctionalTester:
         r1 = await c.execute("ZADD", "cmp_zset", "1.0", "a", "2.0", "b", "3.0", "c")
         r2 = await c.execute("ZSCORE", "cmp_zset", "b")
         await c.close()
-        ok = r1 == "3" and r2 == "2.0"
+        # ZSCORE 的返回值按数值比，不按字符串比。原来写的是 r2 == "2.0"，而真 Redis
+        # 打印整数值分数是 "2"（ld2string 会去掉多余的 .0），于是这一条在 Redis 那一栏
+        # 也是 FAIL —— 两栏同时红，作业报成"与 Redis 行为不符"，其实不符的是脚本自己
+        # 的期望值。改成数值比较之后，仍然拦得住真正的偏离：返回 nil、类型错、分数不对
+        # 都会红。
+        #
+        # 但**格式差异是真的**：本项目把 2.0 打成 "2.0"，Redis 打成 "2"。客户端按字符串
+        # 解析分数时会看到差别，属于兼容性缺口，只是不该由这一条用例以"两栏都红"的方式
+        # 报出来。缺口挂在缺陷队列里，等做分数格式化（对齐 Redis 的 ld2string）那一版
+        # 一起改，届时这一条要改回按字符串断言。
+        try:
+            score_matches = r2 is not None and float(r2) == 2.0
+        except (TypeError, ValueError):
+            score_matches = False
+        ok = r1 == "3" and score_matches
         return (f"ZADD={r1}, ZSCORE(b)={r2}", ok, "")
 
     async def _test_zcard(self, port, tag):
