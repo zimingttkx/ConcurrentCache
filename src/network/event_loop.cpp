@@ -285,7 +285,17 @@ namespace cc_server {
             tasks.swap(pending_tasks_);
         }
         for (auto& task : tasks) {
-            task();
+            // 一条任务抛异常不能连累后面的任务，更不能让异常穿出 loop()：调用链
+            // 上没人接它（loop() 是 SubReactor / MainReactor 线程入口直接跑的），
+            // 逃到线程顶端就是 std::terminate，一次有序停机会变成进程崩溃。循环体
+            // 里那层 try/catch 只包着 channel 分发，包不到任务队列。
+            try {
+                task();
+            } catch (const std::exception& e) {
+                LOG_ERROR(event_loop, "Pending task threw, skipped: %s", e.what());
+            } catch (...) {
+                LOG_ERROR(event_loop, "Pending task threw unknown exception, skipped");
+            }
         }
     }
 

@@ -13,6 +13,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <chrono>
@@ -266,6 +267,37 @@ void test_hup_alone_still_finishes_the_connection() {
     owner->close();
 }
 
+// 契约：一条任务抛异常，不能连累排在它后面的任务，更不能穿出 loop()。
+//
+// loop() 是 SubReactor / MainReactor 线程的入口，那条调用链上没有任何 catch，
+// 队列里一个异常逃到线程顶端就是 std::terminate。
+//
+// 这里不起线程也不睡眠：先投一条会抛的、再投一条计数的，然后才 quit() + loop()。
+// quit_ 已经置位，循环第一圈就 break，唯一的执行点是退出路径上那次 drain
+// （#67 加的），所以时序是钉死的：
+//   - 修复前：异常从 drain_pending_tasks 穿出 loop()，escaped 为真，红；
+//   - 修复后：escaped 为假，且排在后面的那条照常执行完。
+void test_throwing_task_does_not_stop_the_others() {
+    TEST_SUITE("EventLoop Task Isolation");
+
+    EventLoop loop;
+    std::atomic<int> ran{0};
+
+    loop.queue_in_loop([]() { throw std::runtime_error("boom"); });
+    loop.queue_in_loop([&ran]() { ran.fetch_add(1); });
+
+    loop.quit();
+    bool escaped = false;
+    try {
+        loop.loop();
+    } catch (const std::exception&) {
+        escaped = true;
+    }
+
+    EXPECT_TRUE(!escaped);
+    EXPECT_EQ(ran.load(), 1);
+}
+
 void run_all_connection_tests() {
     std::cout << "\n========================================\n";
     std::cout << "Running Connection / EventLoop Lifetime Tests\n";
@@ -278,6 +310,7 @@ void run_all_connection_tests() {
     test_event_loop_drains_pending_tasks_on_exit();
     test_command_loop_stops_once_connection_is_closed();
     test_hup_alone_still_finishes_the_connection();
+    test_throwing_task_does_not_stop_the_others();
 
     std::cout << "\n========================================\n";
     std::cout << "All Connection Lifetime Tests Done!\n";
