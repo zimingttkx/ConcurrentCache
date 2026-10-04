@@ -433,8 +433,12 @@ void test_recursive_mutex_stress() {
 
         t.join();
 
-        // 每次迭代调用深度5，总共 6 次锁操作（包含外层）
-        EXPECT_EQ(counter.load(), iterations * 6);
+        // 计数只发生在 depth > 0 的那几层：deeply_nested(5) 递归到 4、3、2、1，
+        // 共 5 次 guard + 5 次自增；depth == 0 那次既不取锁也不计数。
+        // 原来写的 iterations * 6 是把"外层调用"误当成第 6 次 —— 外层那次就是
+        // depth == 5 本身。daily 的 slow 作业一直在这条上红（5000 vs 6000），
+        // 被步骤上的 continue-on-error 吞掉了。
+        EXPECT_EQ(counter.load(), iterations * 5);
     });
 
     RUN_TEST(recursive_lock_concurrent) {
