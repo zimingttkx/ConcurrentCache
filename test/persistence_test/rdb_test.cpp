@@ -2,8 +2,10 @@
 #include <cassert>
 #include <cstdio>
 #include <fstream>
+#include <string>
 #include <thread>
 #include <chrono>
+#include <zlib.h>
 #include "../trace/test_assertions.h"
 #include "persistence/rdb.h"
 #include "cache/storage.h"
@@ -535,6 +537,155 @@ void test_rdb_empty_file_is_a_valid_start_point() {
     std::remove(truncated_path.c_str());
 }
 
+// ============================================================================
+// 手工构造 RDB 的小工具
+//
+// 下面几条要测的是"正文与头部对不上"的文件。这种文件 save() 写不出来，只能手拼。
+// 尾部 4 字节按 save() 的算法补上 CRC32（覆盖 [0, 文件尾-4) 的全部字节），好让文件
+// 先过 CRC 校验、真的走到正文解析——不然测到的是 CRC 那一关，跟这里想证明的东西无关。
+// ============================================================================
+
+namespace {
+
+void put_u32(std::string& out, uint32_t v) {
+    out.push_back(static_cast<char>((v >> 24) & 0xFFu));
+    out.push_back(static_cast<char>((v >> 16) & 0xFFu));
+    out.push_back(static_cast<char>((v >> 8) & 0xFFu));
+    out.push_back(static_cast<char>(v & 0xFFu));
+}
+
+void put_u8(std::string& out, uint8_t v) {
+    out.push_back(static_cast<char>(v));
+}
+
+std::string seal_rdb(const std::string& body) {
+    uLong crc = crc32(0L, Z_NULL, 0);
+    crc = crc32(crc, reinterpret_cast<const Bytef*>(body.data()), static_cast<uInt>(body.size()));
+    std::string out = body;
+    put_u32(out, static_cast<uint32_t>(crc));
+    return out;
+}
+
+// 头部：MAGIC + VERSION + db 数量 + 第一个 db 的键值对数量
+std::string rdb_header(uint32_t db_count, uint32_t kv_count) {
+    std::string out;
+    put_u32(out, kRdbMagic);
+    out.append(reinterpret_cast<const char*>(kRdbVersion), 4);
+    put_u32(out, db_count);
+    put_u32(out, kv_count);
+    return out;
+}
+
+void write_raw_file(const std::string& path, const std::string& bytes) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    out.close();
+}
+
+}  // namespace
+
+// 值类型字节不在 STRING/LIST/HASH/SET/ZSET 之内。
+//
+// 修之前：这条记录算"解析失败"，可 load() 里的循环没人看返回值就接着读下一条，
+// 而未知类型后面的正文本该按那个类型来解析——游标就此错位。这里 kv_count 只有 1，
+// 循环结束后那个 0xFF 正好被当成 EOF 标记读走，于是整个文件报成"加载成功"，
+// 键一条都没进存储。损坏被报成成功，客户端无从分辨。
+void test_rdb_unknown_value_type_is_not_a_successful_load() {
+    TEST_SUITE("RDB Unknown Value Type");
+
+    const std::string path = "/tmp/test_rdb_unknown_type.rdb";
+
+    std::string body = rdb_header(1, 1);
+    put_u8(body, 0x00);                                        // 非 TTL 标记
+    put_u32(body, 1);
+    body.append("k", 1);                                       // key = "k"
+    put_u8(body, 0x07);                                        // 没有这个 value 类型
+    put_u8(body, static_cast<uint8_t>(RdbSpecialMarker::EOF_MARKER));
+    write_raw_file(path, seal_rdb(body));
+
+    auto& rdb = RdbPersistence::instance();
+    GlobalStorage dst;
+    EXPECT_TRUE(!rdb.load(path, dst));
+    EXPECT_EQ(dst.size(), static_cast<size_t>(0));
+
+    std::remove(path.c_str());
+}
+
+// 头部声称 0 条记录，正文却在 EOF 标记后面还剩一个字节。
+//
+// 修之前：循环什么都不读，直接读到那个 0xFF，标记对得上就 return true，多出来的字节
+// 没人管。EOF 标记原本只按 WARN 处理，正文长度与头部计数不一致这件事等于没检查。
+void test_rdb_body_longer_than_header_claims_is_rejected() {
+    TEST_SUITE("RDB Trailing Body Bytes");
+
+    const std::string path = "/tmp/test_rdb_trailing_body.rdb";
+
+    std::string body = rdb_header(1, 0);
+    put_u8(body, static_cast<uint8_t>(RdbSpecialMarker::EOF_MARKER));
+    put_u8(body, 0x00);                                        // 头部没算到的多余字节
+    write_raw_file(path, seal_rdb(body));
+
+    auto& rdb = RdbPersistence::instance();
+    GlobalStorage dst;
+    EXPECT_TRUE(!rdb.load(path, dst));
+
+    std::remove(path.c_str());
+}
+
+// value 的长度字段声称 4 字节，正文里只剩 2 字节——多出来的 2 字节是尾部的 CRC。
+//
+// 这条最能说明边界检查为什么必须在分配之前做：fread 照样读得满（文件里确实还有
+// 那些字节），所以修之前不会报错，而是把 CRC 的字节当成 value 的内容收下，
+// 最后拿 CRC 的第三个字节去比 EOF 标记——比不上也只 WARN，load() 返回 true，
+// 存储里多出一个键为 "ke"、值是半个校验和的键。长度字段没跟"正文还剩多少"比过。
+void test_rdb_string_length_beyond_body_is_rejected() {
+    TEST_SUITE("RDB String Length Beyond Body");
+
+    const std::string path = "/tmp/test_rdb_length_borrows_crc.rdb";
+
+    std::string body = rdb_header(1, 1);
+    put_u8(body, 0x00);                                        // 非 TTL 标记
+    put_u32(body, 2);
+    body.append("ke", 2);                                      // key = "ke"
+    put_u8(body, static_cast<uint8_t>(RdbValueType::STRING));
+    put_u32(body, 4);                                          // value 声称 4 字节
+    put_u8(body, 0xAA);                                        // 正文只剩这 1 字节
+    put_u8(body, static_cast<uint8_t>(RdbSpecialMarker::EOF_MARKER));
+    write_raw_file(path, seal_rdb(body));                      // seal 会再追加 4 字节 CRC
+
+    auto& rdb = RdbPersistence::instance();
+    GlobalStorage dst;
+    EXPECT_TRUE(!rdb.load(path, dst));
+    EXPECT_EQ(dst.size(), static_cast<size_t>(0));
+
+    std::remove(path.c_str());
+}
+
+// 一个几十字节的 dump.rdb 把 key 长度写成 0xFFFFFFFF。
+//
+// 这一条是防回归的护栏，不是证据：修之前它会先 malloc 一个 4GB 的 std::string（构造
+// 会把每个字节都写一遍，不是保留地址），申请失败抛 bad_alloc、申请成功则 fread 读不满
+// 抛异常，两种结局都返回 false，新旧实现都能过这条。它守的是顺序——检查必须在分配之前，
+// 否则启动时一个几十字节的 dump.rdb 就够把进程换掉。
+void test_rdb_huge_string_length_is_refused_without_allocating() {
+    TEST_SUITE("RDB Huge String Length");
+
+    const std::string path = "/tmp/test_rdb_huge_length.rdb";
+
+    std::string body = rdb_header(1, 1);
+    put_u8(body, 0x00);
+    put_u32(body, 0xFFFFFFFFu);                                // key 长度 = 4GB-1
+    put_u8(body, static_cast<uint8_t>(RdbSpecialMarker::EOF_MARKER));
+    write_raw_file(path, seal_rdb(body));
+
+    auto& rdb = RdbPersistence::instance();
+    GlobalStorage dst;
+    EXPECT_TRUE(!rdb.load(path, dst));
+    EXPECT_EQ(dst.size(), static_cast<size_t>(0));
+
+    std::remove(path.c_str());
+}
+
 void run_all_rdb_tests() {
     std::cout << "\n========================================\n";
     std::cout << "Running RDB Persistence Tests\n";
@@ -548,6 +699,10 @@ void run_all_rdb_tests() {
     test_rdb_file_not_exist();
     test_rdb_corrupt_file_leaves_storage_untouched();
     test_rdb_empty_file_is_a_valid_start_point();
+    test_rdb_unknown_value_type_is_not_a_successful_load();
+    test_rdb_body_longer_than_header_claims_is_rejected();
+    test_rdb_string_length_beyond_body_is_rejected();
+    test_rdb_huge_string_length_is_refused_without_allocating();
     test_rdb_stats();
     test_rdb_bgsave();
     test_rdb_bgsave_reports_success();
