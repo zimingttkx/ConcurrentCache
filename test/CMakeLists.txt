@@ -170,6 +170,7 @@ set(CC_TEST_TARGETS
     lock-deadlock-tests
     lock-race-tests
     lock-race-demo-tests
+    lock-boundary-tests
     lock-stress-tests
     sync-primitives-tests
     stress-test
