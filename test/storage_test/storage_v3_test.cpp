@@ -1,10 +1,14 @@
 #include <iostream>
 #include <cassert>
+#include <cstdio>
 #include <thread>
 #include <chrono>
 #include <vector>
 #include <limits>
+#include <sys/stat.h>
+#include <unistd.h>
 #include "../trace/test_assertions.h"
+#include "base/log.h"
 #include "cache/storage.h"
 #include "datatype/object.h"
 
@@ -499,6 +503,43 @@ void test_storage_get_all_objects() {
 // 主测试函数
 // ============================================================================
 
+// ============================================================================
+// FileSink 建目录不能走 shell
+// ============================================================================
+
+// 旧实现把配置里的日志目录拼进 system("mkdir -p " + dir)。目录名来自 conf 的
+// log_file，路径里一个分号就变成两条 shell 命令 —— 能改配置文件的人就能以服务器
+// 权限执行任意命令。这里用"注入是否会真的执行"来钉死它。
+//
+// 放在这个二进制里是因为它是唯一链接 base/log.cpp 又不需要起服务器的测试目标。
+void test_log_sink_path_is_not_a_shell_command() {
+    TEST_SUITE("FileSink Path Is Not A Shell Command");
+
+    const std::string base = "/tmp/cc_sink_probe";
+    const std::string marker = base + "_pwned";
+    std::remove(marker.c_str());
+
+    // 整个字符串是一个目录名（分号对文件系统来说只是普通字符）
+    const std::string weird_dir = base + "; touch " + marker;
+    const std::string file = weird_dir + "/app.log";
+
+    {
+        FileSink sink(file, 1024 * 1024, 3);
+        sink.write("hello");
+        sink.flush();
+    }
+
+    struct stat st{};
+    // 被注入的文件不该存在：说明没有任何 shell 参与
+    EXPECT_TRUE(::stat(marker.c_str(), &st) != 0);
+    // 而目录本身必须按字面建出来，日志才写得进去
+    EXPECT_TRUE(::stat(weird_dir.c_str(), &st) == 0 && S_ISDIR(st.st_mode));
+
+    std::remove(file.c_str());
+    ::rmdir(weird_dir.c_str());
+    std::remove(marker.c_str());
+}
+
 void run_all_storage_tests() {
     std::cout << "\n========================================\n";
     std::cout << "Running GlobalStorage V3 Tests\n";
@@ -517,6 +558,7 @@ void run_all_storage_tests() {
     test_storage_large_dataset();
     test_storage_multiple_datatypes();
     test_storage_get_all_objects();
+    test_log_sink_path_is_not_a_shell_command();
 
     std::cout << "\n========================================\n";
     std::cout << "All GlobalStorage V3 Tests Passed!\n";

@@ -1,11 +1,44 @@
 #include "log.h"
 #include "format.h"
+#include <cerrno>
 #include <cstring>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <dirent.h>
 
 namespace cc_server {
+
+namespace {
+// 递归建目录，用 mkdir(2) 而不是 system("mkdir -p …")。
+//
+// 目录来自配置文件里的 log_file 路径。把它拼进 shell 命令之后，路径里任何一个
+// 空格、; 、$( )、反引号都会被 sh 当成语法解释 —— 配置文件能改的人就能在这台
+// 机器上以服务器权限执行任意命令。逐段 mkdir(2) 不经过 shell，元字符就只是字符。
+bool make_dirs(const std::string& path) {
+    if (path.empty()) return true;
+
+    struct stat st{};
+    if (::stat(path.c_str(), &st) == 0) return S_ISDIR(st.st_mode);
+
+    const auto make_one = [](const char* p) {
+#ifdef _WIN32
+        return ::mkdir(p);
+#else
+        return ::mkdir(p, 0755);
+#endif
+    };
+
+    const size_t slash = path.find_last_of('/');
+    if (slash == std::string::npos) {
+        return make_one(path.c_str()) == 0 || errno == EEXIST;
+    }
+    // slash == 0 说明父目录就是根，不需要再建
+    if (slash > 0 && !make_dirs(path.substr(0, slash))) {
+        return false;
+    }
+    return make_one(path.c_str()) == 0 || errno == EEXIST;
+}
+}  // namespace
 
 // ConsoleSink 实现
 
@@ -61,16 +94,10 @@ FileSink::FileSink(const std::string& filepath, size_t maxSize, int maxFiles)
         // 提取目录部分
         std::string dir = filepath.substr(0, pos);
 
-        // 创建目录
-        // mkdir -p：递归创建，如果目录已存在不报错
-        // system() 调用 shell，虽然不太优雅，但简单可靠
-        // 更好的做法是用 POSIX mkdir()，但需要处理路径分割
-        std::string cmd = "mkdir -p " + dir;
-        int ret = system(cmd.c_str());
-        if (ret != 0) {
-            // 创建目录失败，但继续尝试打开文件
-            // 后续文件打开失败会处理这个错误
-        }
+        // 创建目录（递归，已存在不报错）—— 见 make_dirs 的注释：这里绝不能走 shell
+        (void)make_dirs(dir);
+        // 创建目录失败也不在这里报错：后面 file_.open() 失败会被 write() 察觉，
+        // 保持与原实现一致的行为。
     }
 
     // 打开文件
@@ -119,10 +146,12 @@ void FileSink::write(const std::string& message) {
         // 写入消息 + 换行符
         file_ << message << "\n";
 
-        // tellp() 返回当前写入位置（从文件开头计算的字节数）
-        // static_cast<size_t> 把 streamoff 转成 size_t
-        // 检查是否超过大小限制
-        if (static_cast<size_t>(file_.tellp()) > maxSize_) {
+        // tellp() 返回当前写入位置（从文件开头计算的字节数）。
+        // 流一旦出错它就返回 -1，而 -1 转成 size_t 是个天文数字 —— 于是此后每一条
+        // 日志都触发一次 rotate()+cleanup()，把磁盘目录翻来覆去地扫。先判非负。
+        const std::streampos write_pos = file_.tellp();
+        if (write_pos > static_cast<std::streampos>(0) &&
+            static_cast<size_t>(write_pos) > maxSize_) {
             file_.flush();  // 先刷出已有数据
             rotate();        // 触发轮转
             cleanup();       // 清理多余的历史文件
