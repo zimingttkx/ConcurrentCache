@@ -401,6 +401,18 @@ bool RdbPersistence::load(const std::string& filepath, GlobalStorage& storage) {
 
     // 使用 RAII 自动管理文件句柄（file_guard 已在上面创建）
 
+    // 0 字节的 RDB 不是损坏，是"还没写过任何数据"。Redis 同样把空文件当空数据集
+    // 接受，测试脚本也普遍用 touch 造一个空 dump.rdb 表示"从空存储启动"。
+    // 若让它走到 magic 读取失败，一个合法的首次启动就变成"文件损坏、拒绝启动"。
+    fseek(file_, 0, SEEK_END);
+    const long initial_size = ftell(file_);
+    fseek(file_, 0, SEEK_SET);
+    if (initial_size == 0) {
+        LOG_INFO(RDB, "RDB file is empty: %s, starting with an empty dataset", filepath.c_str());
+        file_ = nullptr;
+        return true;
+    }
+
     try {
         // 1. 读取并验证 Header
         uint32_t magic = read_uint32();
