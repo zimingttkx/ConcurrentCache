@@ -13,10 +13,15 @@
 
 namespace cc_server {
     // 缓存条目结构体
+    //
+    // 过期时间只有 ExpireDict 一份真相。这里曾经另存了一个
+    // CacheEntry::expire_at_ms，读路径用 "expire_dict_.is_expired(key) ||
+    // entry.expire_at_ms" 双判，于是 PERSIST 只清得掉字典、清不掉条目，
+    // GET 仍然把键当过期删掉（SETEX/PERSIST 组合下必现，v3 单测和契约测试
+    // 都撞过）。冗余副本已经没有读者，直接删掉，避免下一条读路径又去 OR 它。
     struct CacheEntry {
         CacheObject value;  // 替换原来的 std::string value
         std::atomic<int64_t> last_access_time_ms;  // 原子：读路径可能并发更新（修复 P1-4）
-        int64_t expire_at_ms = -1;  // 绝对过期时间戳（毫秒），-1 表示永不过期（修复 P1-5 单锁一致性）
 
         CacheEntry() : last_access_time_ms(0) {}
         CacheEntry(const CacheObject& v, int64_t t) : value(v), last_access_time_ms(t) {}
@@ -25,27 +30,23 @@ namespace cc_server {
         // insert_or_assign/emplace 无法编译）
         CacheEntry(CacheEntry&& o) noexcept
             : value(std::move(o.value)),
-              last_access_time_ms(o.last_access_time_ms.load(std::memory_order_relaxed)),
-              expire_at_ms(o.expire_at_ms) {}
+              last_access_time_ms(o.last_access_time_ms.load(std::memory_order_relaxed)) {}
         CacheEntry& operator=(CacheEntry&& o) noexcept {
             if (this != &o) {
                 value = std::move(o.value);
                 last_access_time_ms.store(o.last_access_time_ms.load(std::memory_order_relaxed),
                                           std::memory_order_relaxed);
-                expire_at_ms = o.expire_at_ms;
             }
             return *this;
         }
         CacheEntry(const CacheEntry& o)
             : value(o.value),
-              last_access_time_ms(o.last_access_time_ms.load(std::memory_order_relaxed)),
-              expire_at_ms(o.expire_at_ms) {}
+              last_access_time_ms(o.last_access_time_ms.load(std::memory_order_relaxed)) {}
         CacheEntry& operator=(const CacheEntry& o) {
             if (this != &o) {
                 value = o.value;
                 last_access_time_ms.store(o.last_access_time_ms.load(std::memory_order_relaxed),
                                           std::memory_order_relaxed);
-                expire_at_ms = o.expire_at_ms;
             }
             return *this;
         }

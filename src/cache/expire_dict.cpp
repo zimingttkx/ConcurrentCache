@@ -4,6 +4,7 @@
 #include "expire_dict.h"
 #include "base/log.h"
 #include <cassert>
+#include <limits>
 #include <ranges>
 
 namespace cc_server {
@@ -20,7 +21,11 @@ namespace cc_server {
         assert(!key.empty() && "ExpireDict::set - key is empty");
 
         std::unique_lock<std::shared_mutex> lock(mutex_);
-        const int64_t expire_time = current_time_ms() + expire_ms;
+        // 饱和加：expire_ms 极大时（EXPIRE key 9223372036854775 这类输入）
+        // now + expire_ms 会绕成负数，"很长的 TTL"变成"立刻就过期"。
+        constexpr int64_t max_ms = std::numeric_limits<int64_t>::max();
+        const int64_t now = current_time_ms();
+        const int64_t expire_time = (expire_ms > max_ms - now) ? max_ms : now + expire_ms;
         expire_map_[key] = expire_time;
 
         LOG_DEBUG(EXPIRE, "Set expire for key=%s, expire_at=%ld, ttl_ms=%ld",

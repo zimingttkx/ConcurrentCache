@@ -6,8 +6,17 @@
 #include "protocol/resp.h"
 #include "base/log.h"
 #include <cassert>
+#include <limits>
 
 namespace cc_server {
+
+// 秒转毫秒，并把乘法本身的溢出夹住：EXPIRE/SETEX 传一个极大的秒数时
+// seconds * 1000 会绕成负数，负 TTL 到了下游就是"立刻就过期"，
+// 键被下一次读直接删掉 —— 用户要求的是永不过期，得到的却是秒删。
+inline int64_t ttl_seconds_to_ms(int64_t seconds) {
+    constexpr int64_t kMaxMs = std::numeric_limits<int64_t>::max();
+    return seconds > kMaxMs / 1000 ? kMaxMs : seconds * 1000;
+}
 
 /**
  * @brief ExpireCommand - EXPIRE 命令
@@ -52,9 +61,10 @@ public:
             }
 
             // 设置过期时间（转换为毫秒）
-            storage.expire_dict().set(key, seconds * 1000);
+            const int64_t ttl_ms = ttl_seconds_to_ms(seconds);
+            storage.expire_dict().set(key, ttl_ms);
             LOG_INFO(EXPIRE, "EXPIRE - key=%s, seconds=%ld, ttl_ms=%ld",
-                    key.c_str(), seconds, seconds * 1000);
+                    key.c_str(), seconds, ttl_ms);
             return RespEncoder::encode_integer(1);
 
         } catch (const std::exception& e) {
@@ -283,7 +293,7 @@ public:
             auto& storage = GlobalStorage::instance();
 
             // 传入相对 TTL（毫秒），set_with_expire 内部会转换为绝对时间戳
-            storage.set_with_expire(key, CacheObject(value), seconds * 1000);
+            storage.set_with_expire(key, CacheObject(value), ttl_seconds_to_ms(seconds));
 
             LOG_INFO(EXPIRE, "SETEX - key=%s, seconds=%ld, value_len=%zu",
                     key.c_str(), seconds, value.size());

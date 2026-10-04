@@ -48,12 +48,9 @@ namespace cc_server {
             return std::nullopt;
         }
 
-        // 惰性删除：检查是否过期（以 CacheEntry.expire_at_ms 为准，避免两锁竞态）
-        if (expire_dict_.is_expired(key) ||
-            (it->second.expire_at_ms > 0 && current_time_ms() >= it->second.expire_at_ms)) {
+        // 惰性删除：过期只看 ExpireDict 这一份真相
+        if (expire_dict_.is_expired(key)) {
             LOG_DEBUG(STORAGE, "Get key=%s - expired, triggering lazy delete", key.c_str());
-            // 注：expire_at_ms 改为 atomic 后，这里可去掉 expire_dict_ 的二次查询，
-            // 但为了兼容现有主动过期路径先保留双判。
             lock.unlock();
             del(key);
             return std::nullopt;
@@ -92,9 +89,8 @@ namespace cc_server {
         // 获取当前时间
         int64_t now = current_time_ms();
 
-        // 在对应分片的unordered_map里面插入或者更新（同时维护 expire_at_ms，保持单真相源）
+        // 在对应分片的unordered_map里面插入或者更新
         CacheEntry entry(value, now);
-        entry.expire_at_ms = -1;  // set 命令清除过期
         stores_[shard_idx].insert_or_assign(key, std::move(entry));
 
         // 增加脏计数器
@@ -225,8 +221,10 @@ namespace cc_server {
                 int64_t oldest_time = std::numeric_limits<int64_t>::max();
                 auto expired_it = store.end();
 
+                const int64_t now = current_time_ms();
                 for (auto it = store.begin(); it != store.end(); ++it) {
-                    if (it->second.expire_at_ms > 0 && current_time_ms() >= it->second.expire_at_ms) {
+                    const int64_t expire_at = expire_dict_.get_expire_time(it->first);
+                    if (expire_at > 0 && now >= expire_at) {
                         expired_it = it;
                         break;
                     }
@@ -360,15 +358,17 @@ namespace cc_server {
         // 获取当前时间
         int64_t now = current_time_ms();
 
-        // 设置值（同时维护 expire_at_ms，保持单真相源）
+        // 设置值；过期时间只写 ExpireDict 这一份真相
         CacheEntry entry(value, now);
         if (ttl_ms > 0) {
-            entry.expire_at_ms = now + ttl_ms;
-            expire_dict_.set_expire_time(key, entry.expire_at_ms);
+            // 饱和加：SETEX 给一个极大的秒数时 now + ttl_ms 会绕成负数，
+            // "设了个很长的 TTL"就变成"立刻就过期"，键被下一次读直接删掉。
+            constexpr int64_t max_ms = std::numeric_limits<int64_t>::max();
+            const int64_t expire_at = (ttl_ms > max_ms - now) ? max_ms : now + ttl_ms;
+            expire_dict_.set_expire_time(key, expire_at);
             LOG_DEBUG(STORAGE, "Set_with_expire key=%s, ttl_ms=%ld, expire_at=%ld, shard=%zu",
-                     key.c_str(), ttl_ms, entry.expire_at_ms, shard_idx);
+                     key.c_str(), ttl_ms, expire_at, shard_idx);
         } else {
-            entry.expire_at_ms = -1;
             expire_dict_.remove(key);
             LOG_DEBUG(STORAGE, "Set_with_expire key=%s (no expire), shard=%zu",
                      key.c_str(), shard_idx);
