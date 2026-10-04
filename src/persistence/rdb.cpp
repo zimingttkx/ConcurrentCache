@@ -405,7 +405,34 @@ bool RdbPersistence::load(const std::string& filepath, GlobalStorage& storage) {
             return false;
         }
 
-        // 2. 读取数据库数量
+        // 2. 先验 CRC，再动存储。
+        //
+        // 原来的顺序是：把整个文件逐条写进 storage，读到末尾才算 CRC。于是一个被
+        // 截断或改坏的文件会先把半个数据集留在内存里，然后 load() 返回 false，
+        // 而调用方把这当成"没有 RDB 文件"，服务器带着这批来路不全的数据对外服务。
+        // CRC 覆盖 [0, filesize-4)，最后 4 字节就是它自己，所以可以在读正文之前
+        // 先验完。
+        const long body_pos = ftell(file_);
+        fseek(file_, 0, SEEK_END);
+        const long file_size = ftell(file_);
+        if (file_size < 4) {
+            LOG_ERROR(RDB, "RDB file too short to contain a CRC trailer: %ld bytes", file_size);
+            file_ = nullptr;
+            return false;
+        }
+        const long data_len = file_size - 4;
+        fseek(file_, data_len, SEEK_SET);
+        const uint32_t stored_crc = read_uint32();
+        const uint32_t calculated_crc = calculate_crc32_for_range(data_len);
+        if (stored_crc != calculated_crc) {
+            LOG_ERROR(RDB, "CRC32 mismatch, refusing to load: stored=0x%08X, calculated=0x%08X",
+                      stored_crc, calculated_crc);
+            file_ = nullptr;
+            return false;
+        }
+        fseek(file_, body_pos, SEEK_SET);
+
+        // 3. 读取数据库数量
         uint32_t db_count = read_uint32();
         LOG_INFO(RDB, "RDB contains %u databases", db_count);
 
@@ -443,21 +470,8 @@ bool RdbPersistence::load(const std::string& filepath, GlobalStorage& storage) {
             LOG_WARN(RDB, "Unexpected EOF marker: 0x%02X", eof);
         }
 
-        // 5. 记录 CRC 位置（在读取 CRC 之前，此时游标在 CRC 起始位置）
-        long crc_pos = ftell(file_);
-
-        // 6. 读取 CRC32
-        uint32_t stored_crc = read_uint32();
-
-        // 7. 验证 CRC32（计算 CRC 范围：[0, crc_pos)，排除 CRC 本身）
-        uint32_t calculated_crc = calculate_crc32_for_range(crc_pos);
-        if (stored_crc != calculated_crc) {
-            LOG_ERROR(RDB, "CRC32 mismatch: stored=0x%08X, calculated=0x%08X",
-                     stored_crc, calculated_crc);
-            // file_guard 会自动关闭文件
-            file_ = nullptr;
-            return false;
-        }
+        // CRC 已经在第 2 步验过（那时一个字节都还没写进存储），这里不必再读一遍
+        // 尾部 4 字节；文件合法性以那次校验为准。
 
         // file_guard 会自动关闭文件
         file_ = nullptr;
