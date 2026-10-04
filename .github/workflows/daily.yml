@@ -145,17 +145,25 @@ jobs:
 
       # 这几个脚本自己在临时目录生成 conf 并改 cwd 启动节点（它们依赖
       # build/concurrentcache-server 这个路径，所以不能挪构建目录）。
-      # 已知红点：e2e_failover_test.py 的 "CLUSTER NODES after FAIL" 断言会失败，
-      # 根因是自动 failover 打不开（PFAIL 报告计数只由已死的 gossip handler 写，
-      # checkFailQuorum 恒 false），属缺陷队列而非 CI 配置问题；其余 15/16 项通过。
+      #
+      # 以前 failover 那行挂着 `|| echo "::warning::"`，理由是"已知红点：
+      # CLUSTER NODES after FAIL 断言会失败，根因是 PFAIL 报告计数只由已死的
+      # gossip handler 写"。两条都不成立，所以这层容错一并撤掉：
+      #   - 实际日志里 `CLUSTER FAIL B` 是 PASS 的，红的只有紧跟着的那次
+      #     CLUSTER NODES，而它拿到的是 None（没有回复），不是断言不满足；
+      #   - 同一个断言在 e2e_cluster_full_test.py 里是 PASS 的，所以不是集群状态机
+      #     的问题，而是 failover 脚本的 RESP 客户端只 read 一次就去解析，回复跨
+      #     多个 TCP 段时判成"没解析出来"、于是统一返回 None。
+      # 吞掉失败的成本是：一个绿色 Job 里藏着一个没人看得见的红点。脚本侧的修法
+      # （读到能解析为止 + 超时/关闭/nil 分开返回 + 失败时打节点日志尾巴）在同一次
+      # 提交里。Full-cluster 那条也从 continue-on-error 改成真实结果。
       - name: Cluster and replication e2e
         run: |
-          python3 test/e2e_test/e2e_failover_test.py || echo "::warning::failover e2e 失败，见上方已知红点说明"
+          python3 test/e2e_test/e2e_failover_test.py
           python3 test/e2e_test/e2e_psync_replication_test.py
           python3 test/e2e_test/cluster_stress_test.py
 
       - name: Full-cluster e2e
-        continue-on-error: true
         run: python3 test/e2e_test/e2e_cluster_full_test.py
 
       - name: Limit probe
