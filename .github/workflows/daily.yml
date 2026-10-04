@@ -67,7 +67,15 @@ jobs:
       - name: Run gate + contract suites
         run: |
           set -o pipefail
-          TSAN_OPTIONS="halt_on_error=0" ctest --test-dir build -L "gate|contract" -j1 --output-on-failure 2>&1 | tee san.log
+          # LockRaceTests 的用例本身就是"故意无锁地读写同一个普通 int"（源码注释写的就是
+          # 无锁读取），TSan 报它正是这类用例的用途，不是缺陷。同一套用例在 asan/ubsan 下
+          # 仍有内存与未定义行为方面的价值，所以只在竞争检测这一档点名排除，不把整步调回
+          # 容错——容错会让真的竞争也一起消失。
+          EXCLUDE=""
+          if [ "${{ matrix.san }}" = "thread" ]; then
+            EXCLUDE="-E LockRaceTests"
+          fi
+          TSAN_OPTIONS="halt_on_error=0" ctest --test-dir build -L "gate|contract" ${EXCLUDE} -j1 --output-on-failure 2>&1 | tee san.log
           {
             echo "### ${{ matrix.san }} sanitizer"
             grep -E "tests passed|tests failed" san.log || echo "见日志"
