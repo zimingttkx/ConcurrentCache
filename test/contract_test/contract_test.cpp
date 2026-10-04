@@ -181,6 +181,66 @@ void run_atomicity_contract_tests(int port) {
         std::cout << "  LLEN after " << kExpected << " LPUSH = " << reply_text(reply) << "\n";
         EXPECT_EQ(reply.integer, static_cast<long long>(kExpected));
     });
+
+    // HSET / SADD 和 LPUSH 是同一个形状的读-改-写：get() 拿副本、改完 set() 整体
+    // 覆盖，并发下后写的把先写的整个盖掉。列表那条测到了，这两条把它们各自钉住。
+    RUN_TEST(concurrent_hash_and_set_writes_lose_nothing) {
+        constexpr int kThreads = 8;
+        constexpr int kPerThread = 50;
+        constexpr int kExpected = kThreads * kPerThread;
+
+        auto hammer = [port](const char* cmd, const char* key) {
+            std::atomic<bool> go{false};
+            std::vector<std::thread> workers;
+            workers.reserve(kThreads);
+            for (int t = 0; t < kThreads; ++t) {
+                workers.emplace_back([t, port, cmd, key, &go]() {
+                    RespClient client = connected_client(port);
+                    Reply reply;
+                    while (!go.load()) {
+                        std::this_thread::yield();
+                    }
+                    for (int i = 0; i < kPerThread; ++i) {
+                        const std::string field = "t" + std::to_string(t) + "_i" + std::to_string(i);
+                        do_cmd(client, {cmd, key, field, field}, reply);
+                    }
+                });
+            }
+            go.store(true);
+            for (auto& worker : workers) {
+                worker.join();
+            }
+        };
+
+        hammer("HSET", "atomic_hash");
+        hammer("SADD", "atomic_set");
+
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client, {"HLEN", "atomic_hash"}, reply));
+        std::cout << "  HLEN after " << kExpected << " HSET = " << reply_text(reply) << "\n";
+        EXPECT_EQ(reply.integer, static_cast<long long>(kExpected));
+
+        EXPECT_TRUE(do_cmd(client, {"SCARD", "atomic_set"}, reply));
+        std::cout << "  SCARD after " << kExpected << " SADD = " << reply_text(reply) << "\n";
+        EXPECT_EQ(reply.integer, static_cast<long long>(kExpected));
+    });
+
+    // 删空之后键必须消失：留一张空哈希/空集合，EXISTS 和 DBSIZE 都会多算
+    RUN_TEST(emptying_a_container_deletes_the_key) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client, {"HSET", "shrink_hash", "only", "v"}, reply));
+        EXPECT_TRUE(do_cmd(client, {"HDEL", "shrink_hash", "only"}, reply));
+        EXPECT_TRUE(do_cmd(client, {"EXISTS", "shrink_hash"}, reply));
+        std::cout << "  EXISTS after last HDEL = " << reply_text(reply) << "\n";
+        EXPECT_EQ(reply.integer, 0LL);
+
+        EXPECT_TRUE(do_cmd(client, {"LPUSH", "shrink_list", "a"}, reply));
+        EXPECT_TRUE(do_cmd(client, {"LPOP", "shrink_list"}, reply));
+        EXPECT_TRUE(do_cmd(client, {"EXISTS", "shrink_list"}, reply));
+        EXPECT_EQ(reply.integer, 0LL);
+    });
 }
 
 void run_all_contract_tests() {
