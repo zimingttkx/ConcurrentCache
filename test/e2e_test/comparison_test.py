@@ -376,6 +376,20 @@ class FunctionalTester:
         except Exception as e:
             r.redis_result = f"EXCEPTION: {e}"
             r.redis_pass = False
+
+        # 两栏不一致或有一栏失败时，把两边的原始回复打出来。表格里只有 ✓/✗ 两格，
+        # "与 Redis 行为不符"这种结论就没法当场判断是谁变了：2026-10-04 #80 把分数改成
+        # Redis 的文本形态之后，ZRANGE WITHSCORES 从两栏 PASS 变成两栏 FAIL 并被记成
+        # 一条偏离，而回包内容一个字都没留在作业日志里，只能靠猜（后来 #84 才是按形状
+        # 修对的）。
+        if (not r.cc_pass or not r.redis_pass
+                or str(r.cc_result) != str(r.redis_result)):
+            print(f"      [detail] {name}")
+            print(f"        CC    pass={r.cc_pass} result={r.cc_result!r}")
+            print(f"        Redis pass={r.redis_pass} result={r.redis_result!r}")
+            if r.detail:
+                print(f"        note  {r.detail}")
+
         self.results.append(r)
         return r
 
