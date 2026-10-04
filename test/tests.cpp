@@ -147,7 +147,6 @@ public:
         , num_tasks_(num_tasks)
         , task_counter_(0)
         , completed_counter_(0)
-        , expected_order_(num_tasks + 1, 0)
         , actual_order_(num_tasks + 1, 0) {
         pool_ = std::make_unique<ThreadPool>(num_threads_);
     }
@@ -162,24 +161,31 @@ public:
             });
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+        // 排空线程池并建立同步关系，而不是睡两秒再去读。TSan 报的那条竞争就落在
+        // 下面这个循环上：worker 线程写 actual_order_，主线程睡完就直接读，睡眠不是
+        // happens-before 边。ThreadPool::stop() 会先把队列跑空再 join（take_task
+        // 只在"已停止且队列为空"时才返回 nullptr），所以 join 之后读是安全的。
+        pool_->stop();
 
-        std::cout << "  Verifying task order...\n";
-        size_t errors = 0;
+        EXPECT_EQ(completed_counter_.load(), num_tasks_);
+
+        // 线程池不保证"完成顺序 == 提交顺序"：4 个 worker 抢同一个队列，每个任务
+        // 还要睡 100µs，谁先拿到就是谁先完成。原来那段拿它当不变量比，比的其实是
+        // 排程巧合（而且 expected_order_ 从来没被填过，全零）。真正成立的性质是
+        // "每个提交的任务恰好被执行一次"。
+        std::vector<size_t> seen(num_tasks_, 0);
         for (size_t i = 0; i < num_tasks_; ++i) {
-            if (expected_order_[i] != actual_order_[i]) {
-                errors++;
-                if (errors <= 5) {
-                    std::cout << "    Order mismatch at task " << i << "\n";
-                }
+            const size_t order = actual_order_[i];
+            EXPECT_TRUE(order < num_tasks_);
+            if (order < num_tasks_) {
+                seen[order]++;
             }
         }
-
-        if (errors > 0) {
-            std::cout << "  Order errors: " << errors << "\n";
-        } else {
-            std::cout << "  All tasks completed in expected order\n";
+        for (size_t i = 0; i < num_tasks_; ++i) {
+            EXPECT_EQ(seen[i], static_cast<size_t>(1));
         }
+
+        std::cout << "  All " << num_tasks_ << " tasks executed exactly once\n";
     }
 
 private:
@@ -194,7 +200,6 @@ private:
     std::unique_ptr<ThreadPool> pool_;
     std::atomic<size_t> task_counter_;
     std::atomic<size_t> completed_counter_;
-    std::vector<size_t> expected_order_;
     std::vector<size_t> actual_order_;
 };
 
