@@ -35,6 +35,20 @@ namespace cc_server {
         std::function<void()> close_callback_; // 连接关闭回调函数
         bool closed_ = false; // 连接是否已关闭
 
+        // 每条连接的缓冲高水位（字节）。构造时从配置取一次，之后热路径不再查 Config。
+        // 0 表示不限制（与 Redis 的 client-output-buffer-limit 语义一致）；
+        // 非 0 但小于 1MB 时抬到 1MB，避免一个笔误的小数值把每个连接都判死。
+        size_t input_buffer_limit_bytes_ = kDefaultInputBufferLimit;
+        size_t output_buffer_limit_bytes_ = kDefaultOutputBufferLimit;
+
+    public:
+        /// @brief 输入缓冲默认上限 16MB，对齐 Redis 的 client-query-buffer-limit 思路
+        static constexpr size_t kDefaultInputBufferLimit = 16ull * 1024 * 1024;
+        /// @brief 输出缓冲默认上限 64MB
+        static constexpr size_t kDefaultOutputBufferLimit = 64ull * 1024 * 1024;
+        /// @brief 高水位允许的最小值，比这小的配置值一律抬到这里
+        static constexpr size_t kMinBufferLimit = 1ull * 1024 * 1024;
+
     public:
         Connection(int client_fd, EventLoop* loop);
         ~Connection();
