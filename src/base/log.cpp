@@ -1,5 +1,6 @@
 #include "log.h"
 #include "format.h"
+#include <cctype>
 #include <cerrno>
 #include <cstring>
 #include <sys/stat.h>
@@ -39,6 +40,36 @@ bool make_dirs(const std::string& path) {
     return make_one(path.c_str()) == 0 || errno == EEXIST;
 }
 }  // namespace
+
+bool parse_log_level(const std::string& text, LogLevel& out) {
+    std::string v;
+    v.reserve(text.size());
+    for (char c : text) {
+        if (std::isspace(static_cast<unsigned char>(c))) continue;
+        v.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+
+    if (v == "trace") { out = LogLevel::TRACE; return true; }
+    if (v == "debug") { out = LogLevel::DEBUG; return true; }
+    if (v == "info")  { out = LogLevel::INFO;  return true; }
+    if (v == "warn")  { out = LogLevel::WARN;  return true; }
+    if (v == "error") { out = LogLevel::ERROR; return true; }
+    if (v == "fatal") { out = LogLevel::FATAL; return true; }
+
+    try {
+        size_t used = 0;
+        const long n = std::stol(v, &used);
+        // 整串必须是数字，且落在枚举范围内。越界不静默夹到某一端 —— 那会把
+        // "配置写错了"变成"日志突然全没了"或者"突然全刷了"。
+        if (used == v.size() && n >= 0 && n <= static_cast<long>(LogLevel::FATAL)) {
+            out = static_cast<LogLevel>(n);
+            return true;
+        }
+    } catch (...) {
+        // 交给下面的 return false
+    }
+    return false;
+}
 
 // ConsoleSink 实现
 
@@ -404,13 +435,15 @@ void Logger::flush() {
  */
 void Logger::onConfigChange(const std::string& key, const std::string& value) {
     if (key == "log_level") {
-        // 把字符串转成 LogLevel 枚举
-        if (value == "trace") setLevel(LogLevel::TRACE);
-        else if (value == "debug") setLevel(LogLevel::DEBUG);
-        else if (value == "info") setLevel(LogLevel::INFO);
-        else if (value == "warn") setLevel(LogLevel::WARN);
-        else if (value == "error") setLevel(LogLevel::ERROR);
-        else if (value == "fatal") setLevel(LogLevel::FATAL);
+        LogLevel parsed{};
+        if (parse_log_level(value, parsed)) {
+            setLevel(parsed);
+        } else {
+            // 以前这里是六个名字的 strcmp 链，配置里的 "4" 匹配不上就一声不响地
+            // 什么都不做 —— 运维以为改了，其实没改。认不出来必须说出来。
+            std::cerr << "[Logger] 无法识别的 log_level: \"" << value
+                      << "\"，保持原级别不变" << std::endl;
+        }
     }
 }
 
