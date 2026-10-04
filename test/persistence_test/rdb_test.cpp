@@ -504,6 +504,37 @@ void test_rdb_bgsave_reports_success() {
     std::remove(path.c_str());
 }
 
+void test_rdb_empty_file_is_a_valid_start_point() {
+    TEST_SUITE("RDB Empty File");
+
+    auto& rdb = RdbPersistence::instance();
+
+    // 0 字节 = 还没有数据，不是损坏。e2e 脚本正是 touch 一个空 dump.rdb 来
+    // 表示"从空存储启动"；把它判成损坏会让服务器根本起不来。
+    const std::string empty_path = "/tmp/test_rdb_empty.rdb";
+    {
+        std::ofstream out(empty_path, std::ios::binary | std::ios::trunc);
+        EXPECT_TRUE(out.good());
+    }
+
+    GlobalStorage dst;
+    EXPECT_TRUE(rdb.load(empty_path, dst));
+    EXPECT_EQ(dst.size(), static_cast<size_t>(0));
+    std::remove(empty_path.c_str());
+
+    // 而"短到装不下头部"的文件仍然必须被拒绝，证明上一条不是把校验整体放宽了
+    const std::string truncated_path = "/tmp/test_rdb_truncated.rdb";
+    {
+        std::ofstream out(truncated_path, std::ios::binary | std::ios::trunc);
+        out.write("RED", 3);
+    }
+
+    GlobalStorage dst2;
+    EXPECT_TRUE(!rdb.load(truncated_path, dst2));
+    EXPECT_EQ(dst2.size(), static_cast<size_t>(0));
+    std::remove(truncated_path.c_str());
+}
+
 void run_all_rdb_tests() {
     std::cout << "\n========================================\n";
     std::cout << "Running RDB Persistence Tests\n";
@@ -516,6 +547,7 @@ void run_all_rdb_tests() {
     test_rdb_large_dataset();
     test_rdb_file_not_exist();
     test_rdb_corrupt_file_leaves_storage_untouched();
+    test_rdb_empty_file_is_a_valid_start_point();
     test_rdb_stats();
     test_rdb_bgsave();
     test_rdb_bgsave_reports_success();
