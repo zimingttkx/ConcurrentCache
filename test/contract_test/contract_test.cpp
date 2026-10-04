@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -77,6 +78,30 @@ RespClient connected_client(int port) {
     RespClient client;
     client.connect_to("127.0.0.1", port);
     return client;
+}
+
+// 把服务器自己的输出尾巴打出来。start_server 把它的 stdout/stderr 重定向到
+// ./server.log，红的时候这是唯一能分清"崩了 / 卡住了 / 只是行为不对"的证据。
+void dump_server_log(int max_lines) {
+    std::ifstream in("server.log");
+    if (!in.good()) {
+        std::cout << "[诊断] 读不到 server.log\n";
+        return;
+    }
+    std::vector<std::string> lines;
+    std::string line;
+    while (std::getline(in, line)) {
+        lines.push_back(line);
+        if (static_cast<int>(lines.size()) > max_lines * 2) {
+            lines.erase(lines.begin(), lines.begin() + max_lines);
+        }
+    }
+    std::cout << "[诊断] server.log 末尾 " << max_lines << " 行：\n";
+    const size_t start = lines.size() > static_cast<size_t>(max_lines)
+                             ? lines.size() - static_cast<size_t>(max_lines) : 0;
+    for (size_t i = start; i < lines.size(); ++i) {
+        std::cout << "  | " << lines[i] << "\n";
+    }
 }
 
 }  // namespace
@@ -344,8 +369,30 @@ void run_all_contract_tests() {
     run_atomicity_contract_tests(port);
     run_protocol_limit_tests(port);
 
-    kill(server_pid, SIGTERM);
-    waitpid(server_pid, nullptr, 0);
+    // 红了要能就地解释。WNOHANG 先问一次：服务器是自己死了还是还活着，决定了
+    // 后面这些超时是崩溃还是行为不符 —— #29 那次 main 变红时就分不出来。
+    int server_status = 0;
+    const pid_t gone = waitpid(server_pid, &server_status, WNOHANG);
+    const bool any_failed = g_test_stats().failed_tests.load() > 0;
+
+    if (gone == server_pid) {
+        std::cout << "\n[诊断] 服务器进程已提前退出："
+                  << (WIFSIGNALED(server_status)
+                          ? ("信号 " + std::to_string(WTERMSIG(server_status)))
+                          : ("退出码 " + std::to_string(WEXITSTATUS(server_status))))
+                  << "\n";
+    } else if (any_failed) {
+        std::cout << "\n[诊断] 服务器进程仍在运行 —— 客户端拿不到回复不等于它崩了\n";
+    }
+
+    if (gone == server_pid || any_failed) {
+        dump_server_log(60);
+    }
+
+    if (gone != server_pid) {
+        kill(server_pid, SIGTERM);
+        waitpid(server_pid, nullptr, 0);
+    }
 }
 
 }  // namespace testing
