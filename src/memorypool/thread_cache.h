@@ -54,6 +54,13 @@ public:
     //
     void deallocate(void* obj, size_t size);
 
+    //
+    // 当前线程在该 SizeClass 上缓存的空闲对象数（只读，供指标/测试观测）
+    // @param class_index SizeClass索引
+    // @return 缓存对象数，索引越界返回 0
+    //
+    [[nodiscard]] size_t cached_object_count(size_t class_index) const;
+
 private:
     // 构造函数（private：仅由 get_instance 的 thread_local 使用）
     ThreadCache();
@@ -71,8 +78,10 @@ private:
     //
     // 归还过多的小块给CentralCache
     // @param class_index SizeClass索引
+    // @param return_all true 时清空整个 FreeList（线程退出用）；
+    //                   false 时只归还一半，另一半留在本地继续吸收下一次释放
     //
-    void return_to_central(size_t class_index);
+    void return_to_central(size_t class_index, bool return_all);
 
     // 每个SizeClass对应的FreeList
     std::vector<FreeList> free_lists_;
