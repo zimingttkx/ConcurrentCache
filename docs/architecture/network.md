@@ -190,9 +190,16 @@ void Channel::handle_event() {
 }
 ```
 
-> **为什么 ERR/HUP 要 early return？** HUP 常与 EPOLLIN 同时上报。旧逻辑把 HUP 绑到 read/error 回调且 close_cb 为空时，HUP 会被静默吞掉——对端已关闭的 fd 继续留在 epoll 里，连接泄漏。现在 HUP/RDHUP 直接触发 `close_callback_` 并终止本轮分发。
+> **为什么 ERR/HUP 要单独处理？** HUP 常与 EPOLLIN 同时上报。旧逻辑把 HUP 绑到 read/error 回调、而 close_cb 为空时什么都不做，结果比"泄漏"更糟：EPOLLHUP 是持续条件，`epoll_wait` 每轮立刻返回同一个事件，EventLoop 变成 100% CPU 空转，客户端永远等不到回复，而这条 fd 既不读也不关。
 >
-> 注意：**Channel 本身没有 `closed_` 状态**。`close_callback_` 只由 HUP 路径触发，最终走到 `SubReactor::remove_connection` 销毁 Connection（错误路径不经过 `Connection::close()`，由 `~Connection` / `~Socket` 负责摘除与关 fd）。
+> 现在两处都补上了：
+>
+> - `Connection` 给 Channel 设了 **close 回调**，与 error 回调同一套收尾（通知所有者 `close_callback_`）。在此之前只有 read / write / error 三个被设过，而 HUP 分支只认 close_cb。
+> - HUP 分支在 close_cb 为空时**退回 read_cb**，再退回 error_cb，不再直接 return。走 read 路径时 `recv()` 要么把剩余数据读完、要么返回 0 进入 `Connection::close()`，两种都是正确收尾。
+>
+> 用例：`test/network_test/connection_lifetime_test.cpp` 的 `test_hup_alone_still_finishes_the_connection` —— 不起 loop，直接把 `EPOLLHUP` 喂给 `Channel::handle_event()`，断言所有者被通知。
+>
+> 注意：**Channel 本身没有 `closed_` 状态**；HUP/错误路径不经过 `Connection::close()`，fd 由 `~Connection` / `~Socket` 关掉。
 
 ### 2.6 Connection
 
@@ -256,12 +263,15 @@ if n < 0 && EAGAIN: return  // 内核缓冲区满
 ```text
 1. 置 closed_ = true（同线程 check-then-set，无竞争）→ handle_read/write 提前返回
 2. remove_channel（从 epoll 摘除）
-3. 触发 close_callback_         → SubReactor::remove_connection 用【仍有效的 fd】
-                                  从 connections_ 中 erase（销毁 Connection）
-4. 兜底 close(fd)               （若对象未被回调销毁）
+3. close(fd)                       ← 必须先于回调
+4. 触发 close_callback_             → SubReactor::remove_connection 用【建连时捕获的
+                                  client_fd】从 connections_ 里 erase，销毁 Connection
+5. 回调返回后不再访问任何成员        ← 此刻 this 可能已经不存在
 ```
 
-> 顺序必须是「先回调、后关 fd」：`remove_connection` 以 `conn->fd()` 为 key 删除 map 条目，若先关 socket，fd 已是 -1，erase 永远删不到——每次断开泄漏一个完整 Connection 对象（Channel + 双 Buffer + 解析器）。
+> 顺序是「**先关 fd、后回调**」，与本章早期版本相反。反过来写会 use-after-free：`close_callback_` 就是 `SubReactor::remove_connection`，它把 `connections_` 里唯一持有本对象的 `unique_ptr` 摘走，回调返回时 `this` 已经析构，而旧代码接着还要执行一句 `client_socket_.close()`——读的是已释放内存里的 `fd_`。单线程下那块内存刚被 `~Socket` 写过 -1，多半是无害的空操作；一旦这块内存被下一个 Connection 复用（accept 与关闭交叉时很常见），这条语句关掉的就是**新连接的 fd**：新客户端的回复写进已关闭的 socket，表现出来是"少一条回复、之后这个连接上的命令全部超时"。
+>
+> 代价是回调里不能再向对象索取 fd（此刻它已经是 -1），所以 SubReactor 的关闭回调改为捕获建连时的 `client_fd`——这正是 P0-4「断开即泄漏」要求的那个改动。用例：`test_connection_close_frees_fd_before_notifying_owner`。
 
 ### 2.7 Buffer
 

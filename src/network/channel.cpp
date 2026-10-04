@@ -57,8 +57,21 @@ namespace cc_server {
             return;  // 错误后不再处理读/写，交由 close 路径统一清理
         }
         if (revents & (EPOLLHUP | EPOLLRDHUP)) {
-            if (close_cb) close_cb();
-            return;  // HUP 同样终结该连接的处理，避免对已半关的 fd 继续读写
+            // 这里不能"没有 close_cb 就直接 return"。EPOLLHUP 是持续条件：什么都不做
+            // 的话 epoll_wait 立刻又返回，这条连接既不读也不关，EventLoop 变成 100% CPU
+            // 空转，而客户端永远等不到回复。
+            //
+            // 有 close_cb 走 close_cb（Connection 把它接到"通知所有者"）；没有就退回
+            // read_cb —— handle_read 里 recv() 要么把剩余数据读完，要么返回 0 走
+            // Connection::close()，两种都是正确收尾。都没有才退回 error_cb。
+            if (close_cb) {
+                close_cb();
+            } else if (read_cb) {
+                read_cb();
+            } else if (error_cb) {
+                error_cb();
+            }
+            return;  // HUP 同样终结本轮分发，避免对已半关的 fd 继续写
         }
         if (revents & EPOLLIN) {
             if (read_cb) read_cb();
