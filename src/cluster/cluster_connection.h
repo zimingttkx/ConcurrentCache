@@ -17,6 +17,32 @@
 
 namespace cc_server {
 
+/**
+ * @brief gossip 报文的发送者身份是否与本端实际观察到的链路地址一致
+ *
+ * 为什么必须有这一步：`ClusterMsgHeader::sender_name`（"ip:port"）不只是日志字段，
+ * 它是节点在集群里的**身份 key**——`ClusterState` 的表以它为键，PFAIL/FAIL 报告按它
+ * 记名，`checkFailQuorum` 的法定人数按"有多少个不同的上报者提到这个键"来数。而这个端口
+ * 不做任何认证，报文字段完全由发送方自报。于是一个只要能连上总线端口的进程就可以
+ * 声称自己是第三个主节点，凭空把 FAIL 判定凑成法定人数，让一个活得好好的主节点被判死、
+ * 触发副本升主；也可以声称是本端自己，往本端的状态表里写东西。
+ *
+ * 本端唯一能独立确定的事实是链路地址：入站链路是 accept() 看到的源 IP，出站链路是我们
+ * 按 CLUSTER MEET 拨出去的那个 IP。报文里声称的 ip 必须与它一致。
+ *
+ * 这是一条比 Redis 更严的口径：Redis 允许 cluster-announce-ip 与源地址不同（NAT 后
+ * 的多主机场景），它靠总线签名（cluster-secret 的 HMAC）弥补。本仓库没有签名机制，
+ * 所以在跨 NAT 的部署里这条会拒收对端报文——那是一个明确的、可诊断的功能限制，比
+ * "谁都能伪造集群成员判定"要安全。两侧都为空的字段一律判不通过：观察不到来源
+ * 不构成免检理由。
+ *
+ * @param claimed_ip 报文 sender_name 里声称的 IP（冒号前的部分）
+ * @param observed_ip 本端实际看到的那条链路的对端 IP
+ */
+[[nodiscard]] bool bus_sender_ip_matches_peer(const std::string& claimed_ip,
+                                               const std::string& observed_ip);
+
+
 // ClusterConnection 类：管理所有集群节点间的连接
 class ClusterConnection {
 public:
