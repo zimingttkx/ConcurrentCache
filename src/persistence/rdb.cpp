@@ -450,6 +450,7 @@ bool RdbPersistence::load(const std::string& filepath, GlobalStorage& storage) {
         const long body_pos = ftell(file_);
         fseek(file_, 0, SEEK_END);
         const long file_size = ftell(file_);
+        file_size_ = file_size;
         if (file_size < 4) {
             LOG_ERROR(RDB, "RDB file too short to contain a CRC trailer: %ld bytes", file_size);
             file_ = nullptr;
@@ -601,6 +602,18 @@ uint8_t RdbPersistence::read_uint8() {
 std::string RdbPersistence::read_string() {
     uint32_t len = read_uint32();
     if (len == 0) return "";
+
+    // 长度字段是从文件里读来的，先拿"文件里还剩多少字节"卡一道再分配。
+    // 少了这一步，一个自带合法 CRC 的构造文件只要把长度写成 0xFFFFFFFF，
+    // 就能让这里先申请 4GB、再在 fread 上失败——"加载一个外部 RDB"于是变成
+    // 一次现成的内存放大，而 CRC 前置校验挡不住它（校验和没有密钥，写文件
+    // 的人同样能算出正确的尾部）。
+    const long remaining = file_size_ - ftell(file_);
+    if (remaining < 0 || static_cast<long long>(len) > static_cast<long long>(remaining)) {
+        LOG_ERROR(RDB, "read_string - declared length %u exceeds %ld bytes left in file", len, remaining);
+        throw std::runtime_error("invalid string length in RDB file");
+    }
+
     std::string val(len, '\0');
     if (fread(val.data(), 1, len, file_) != len) {
         LOG_ERROR(RDB, "read_string - fread failed, expected %u bytes", len);

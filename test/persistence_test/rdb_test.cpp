@@ -4,6 +4,14 @@
 #include <fstream>
 #include <thread>
 #include <chrono>
+#include <algorithm>
+#include <cstdint>
+#include <string>
+#include <vector>
+#ifdef __linux__
+#include <sys/resource.h>
+#endif
+#include <zlib.h>
 #include "../trace/test_assertions.h"
 #include "persistence/rdb.h"
 #include "cache/storage.h"
@@ -535,6 +543,118 @@ void test_rdb_empty_file_is_a_valid_start_point() {
     std::remove(truncated_path.c_str());
 }
 
+namespace {
+
+void push_be32(std::vector<char>& data, size_t pos, uint32_t value) {
+    data[pos] = static_cast<char>((value >> 24) & 0xFF);
+    data[pos + 1] = static_cast<char>((value >> 16) & 0xFF);
+    data[pos + 2] = static_cast<char>((value >> 8) & 0xFF);
+    data[pos + 3] = static_cast<char>(value & 0xFF);
+}
+
+// 把文件里 value 的长度字段改成 bogus_len，然后重算尾部 CRC 写回去。
+//
+// 为什么要费劲把 CRC 也算对：CRC32 只是校验和，没有密钥，写文件的人顺手就能
+// 算出正确尾部，所以"过了 CRC"从来不等于"长度字段可信"。只有带着正确 CRC 的
+// 文件才能走到正文解析那一步，从而检验长度字段本身。
+// 返回 false 表示没找到锚点（落盘格式变了，这条测试就该红）。
+bool forge_value_length(const std::string& path, const std::string& value, uint32_t bogus_len) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in.good()) return false;
+    std::vector<char> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    if (data.size() < value.size() + 8) return false;
+
+    std::vector<char> needle(4 + value.size());
+    push_be32(needle, 0, static_cast<uint32_t>(value.size()));
+    std::copy(value.begin(), value.end(), needle.begin() + 4);
+
+    const auto hit = std::search(data.begin(), data.end(), needle.begin(), needle.end());
+    if (hit == data.end()) return false;
+    const size_t pos = static_cast<size_t>(hit - data.begin());
+
+    push_be32(data, pos, bogus_len);
+
+    const size_t crc_pos = data.size() - 4;
+    uLong crc = crc32(0L, Z_NULL, 0);
+    crc = crc32(crc, reinterpret_cast<const Bytef*>(data.data()), static_cast<uInt>(crc_pos));
+    push_be32(data, crc_pos, static_cast<uint32_t>(crc));
+
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out.write(data.data(), static_cast<std::streamsize>(data.size()));
+    return out.good();
+}
+
+}  // namespace
+
+// 长度字段大于"文件里还剩的字节数"就必须被拒，且不碰存储。
+void test_rdb_bogus_string_length_is_rejected() {
+    TEST_SUITE("RDB Bogus String Length");
+
+    const std::string path = "/tmp/test_rdb_bogus_len.rdb";
+    std::remove(path.c_str());
+
+    GlobalStorage src;
+    CacheObject obj;
+    obj.set_string("payload-anchor");
+    src.set("k", obj);
+
+    auto& rdb = RdbPersistence::instance();
+    rdb.set_filepath(path);
+    EXPECT_TRUE(rdb.save(path, src));
+    EXPECT_TRUE(forge_value_length(path, "payload-anchor", 0xFFFFFFFFu));
+
+    GlobalStorage dst;
+    EXPECT_TRUE(!rdb.load(path, dst));
+    EXPECT_EQ(dst.size(), static_cast<size_t>(0));
+    std::remove(path.c_str());
+}
+
+// 判别项：拒绝必须发生在分配之前。
+//
+// 上面那条在"先分配再 fread 失败"的旧实现里同样返回 false，所以它对修复前后
+// 都绿。这条量的是另一件事——旧实现会真的申请 200MB（std::string 会把每一页
+// 写零，所以峰值 RSS 一定涨），新实现一个字节都不该为这个长度分配。
+void test_rdb_bogus_string_length_does_not_allocate() {
+    TEST_SUITE("RDB Bogus Length Allocates Nothing");
+
+    const std::string path = "/tmp/test_rdb_bogus_alloc.rdb";
+    std::remove(path.c_str());
+
+    constexpr uint32_t kBogusLen = 200u * 1024u * 1024u;  // 200MB
+
+    GlobalStorage src;
+    CacheObject obj;
+    obj.set_string("payload-anchor");
+    src.set("k", obj);
+
+    auto& rdb = RdbPersistence::instance();
+    rdb.set_filepath(path);
+    EXPECT_TRUE(rdb.save(path, src));
+    EXPECT_TRUE(forge_value_length(path, "payload-anchor", kBogusLen));
+
+    GlobalStorage dst;
+#ifdef __linux__
+    rusage before{};
+    getrusage(RUSAGE_SELF, &before);
+#endif
+
+    EXPECT_TRUE(!rdb.load(path, dst));
+
+#ifdef __linux__
+    rusage after{};
+    getrusage(RUSAGE_SELF, &after);
+    // ru_maxrss 单位是 kB，且单调不降，所以这个差值只可能来自本次 load
+    const long delta_kb = after.ru_maxrss - before.ru_maxrss;
+    std::cout << "  load(声明 " << kBogusLen / (1024 * 1024) << "MB) 期间峰值 RSS 增长 = "
+              << delta_kb / 1024 << " MB\n";
+    EXPECT_LT(delta_kb, 50L * 1024);
+#endif
+
+    EXPECT_EQ(dst.size(), static_cast<size_t>(0));
+    std::remove(path.c_str());
+}
+
 void run_all_rdb_tests() {
     std::cout << "\n========================================\n";
     std::cout << "Running RDB Persistence Tests\n";
@@ -548,6 +668,8 @@ void run_all_rdb_tests() {
     test_rdb_file_not_exist();
     test_rdb_corrupt_file_leaves_storage_untouched();
     test_rdb_empty_file_is_a_valid_start_point();
+    test_rdb_bogus_string_length_is_rejected();
+    test_rdb_bogus_string_length_does_not_allocate();
     test_rdb_stats();
     test_rdb_bgsave();
     test_rdb_bgsave_reports_success();

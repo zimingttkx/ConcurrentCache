@@ -208,6 +208,8 @@ namespace cc_server {
 
         FILE* file_ = nullptr;
         std::string filepath_;
+        // load() 期间记录的文件总字节数，用于把文件里声明的长度卡在真实数据之内
+        long file_size_ = 0;
         std::atomic<int> bgsave_in_progress_{0};  // 原子标记是否正在保存
         RdbStats stats_;
 
