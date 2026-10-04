@@ -300,6 +300,12 @@ async def main():
                      nodes_restart and str(B_PORT) in str(nodes_restart),
                      str(nodes_restart)[:200])
             await a_new.close()
+        else:
+            # 连不上 = 重启的节点没回来，这本身就是要报的失败。以前两条 record
+            # 整个挂在 if 里面，连不上时这节直接跳过，而退出码只看 r.failed，
+            # 于是"节点起不来"反而是一次静默通过。
+            r.record("Restarted Node-A accepts connections", False, "connect() failed")
+            r.record("Restarted A sees other nodes", False, "skipped: 连不上重启后的节点")
 
         # ─── 8. Data ops after recovery ───
         print("\n── Testing data operations after recovery ──")
