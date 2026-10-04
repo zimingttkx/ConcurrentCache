@@ -239,7 +239,7 @@ jobs:
           set -o pipefail
           docker run -d --name cc-ci -p 6379:6379 concurrentcache:ci
           ok=""
-          for i in $(seq 1 30); do
+          for i in $(seq 1 45); do   # ~135s：HEALTHCHECK 是 interval=30s/retries=3，窗口要容得下至少三次探针
             status=$(docker inspect --format '{{.State.Health.Status}}' cc-ci)
             echo "attempt $i: health=$status"
             if [ "$status" = "healthy" ]; then ok=yes; break; fi
