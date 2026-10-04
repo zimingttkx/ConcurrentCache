@@ -59,11 +59,18 @@ jobs:
       #
       # 原来挂着 continue-on-error，理由是"lock-race/deadlock 里存在故意构造的竞争与
       # 死锁场景，TSAN 报它们是预期行为"。取证看步骤级结论而不是 Job 级（Job 级正是被
-      # 这层容错刷绿的）：最近两轮 daily 里 sanitizer-thread / sanitizer-address /
-      # sanitizer-undefined 三个矩阵项的 "Run gate + contract suites" 都是 success，
-      # 也就是当前 gate|contract 这套用例在三种 sanitizer 下没有任何报告。
-      # 以后若真需要保留一个故意构造的竞争用例，正确做法是把它移出 gate|contract 标签
-      # （它本来就不是给 sanitizer 读的），而不是把整步重新调成容错。
+      # 这层容错刷绿的）。
+      #
+      # 撤掉容错之后它立刻证明了自己有用：main 上连续两轮 daily 的 sanitizer-thread
+      # 真的红了——LockRaceTests 里 5 条 TSan 报告，位置是 test/lock_test/
+      # lock_race_test.cpp:88 / :129 / :320 / :360，全都在名字或注释自己就写着
+      # "无保护""没有锁保护"的演示用例里。也就是说：报的是测试故意造的竞争，不是
+      # 锁写错了；而当时那句"三个矩阵项都是 success"的取证结论已经不成立了。
+      #
+      # 按这段注释原本写的做法处理：把那三条演示从 gate|contract 标签里移出去
+      # （现在在 lock-race-demo-tests，标签 slow，仍在 daily 的 Release 构建里真跑），
+      # 而不是把整步重新调成容错。sanitizer-address / sanitizer-undefined 两档没有
+      # 因这条改动而少跑任何用例。
       - name: Run gate + contract suites
         run: |
           set -o pipefail
