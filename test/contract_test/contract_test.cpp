@@ -183,6 +183,39 @@ void run_atomicity_contract_tests(int port) {
     });
 }
 
+// 协议健壮性：深度嵌套的数组不能把服务端的工作线程栈打穿。
+// parse_one → parse_array → parse_one 是递归的，没有深度上限时，任何一个能连上
+// 端口的客户端发 800KB 的 "*1\r\n" 重复串就够了 —— 不需要认证、不需要合法命令。
+void run_protocol_limit_tests(int port) {
+    TEST_SUITE("协议健壮性契约");
+
+    RUN_TEST(deeply_nested_array_must_not_kill_the_server) {
+        constexpr int kDepth = 200000;
+        std::string payload;
+        payload.reserve(static_cast<size_t>(kDepth) * 4 + 16);
+        for (int i = 0; i < kDepth; ++i) {
+            payload += "*1\r\n";
+        }
+        payload += "$2\r\nok\r\n";
+
+        {
+            RespClient client = connected_client(port);
+            EXPECT_TRUE(client.send_raw(payload));
+            Reply reply;
+            // 回一个协议错误、或者直接断开连接都算"处理掉了"，这里不比内容。
+            // 真正要证明的是进程还活着。
+            client.read_reply(reply);
+        }
+
+        RespClient probe = connected_client(port);
+        Reply reply;
+        const bool answered = do_cmd(probe, {"PING"}, reply);
+        std::cout << "  PING after 200000-level nesting: "
+                  << (answered ? reply_text(reply) : "no reply") << "\n";
+        EXPECT_TRUE(answered);
+    });
+}
+
 void run_all_contract_tests() {
     const char* server_bin = std::getenv("CC_SERVER_BIN");
     // 环境变量没传来说明 CMake 接线断了，那必须是失败而不是跳过——
@@ -213,6 +246,7 @@ void run_all_contract_tests() {
     run_type_contract_tests(port);
     run_ttl_contract_tests(port);
     run_atomicity_contract_tests(port);
+    run_protocol_limit_tests(port);
 
     kill(server_pid, SIGTERM);
     waitpid(server_pid, nullptr, 0);

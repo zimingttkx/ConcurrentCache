@@ -227,6 +227,13 @@ private:
     // 这个是内部使用的方法，不对外开放
     
     bool parse_one(Buffer* buffer, RespValue& out);
+
+    // 数组嵌套深度上限。parse_one → parse_array → parse_one 是递归的，没有上限时
+    // 一个客户端只要发 "*1\r\n" 重复几十万遍就能把服务端的工作线程栈打穿
+    // （远程可达的进程崩溃，不需要任何凭证）。RESP2 规范里客户端命令最多嵌 7 层，
+    // 内部还要用来解析副本/集群总线回来的回复，所以留到 32。
+    static constexpr int kMaxNestingDepth = 32;
+    int array_depth_ = 0;
     
     
     // find_crlf() - 静态方法，查找 \r\n 位置

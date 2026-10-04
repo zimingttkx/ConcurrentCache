@@ -98,6 +98,11 @@ public:
         return write_all(out.data(), out.size());
     }
 
+    // 原样发送一段字节，用来构造 send_command 组不出来的畸形/超大报文。
+    bool send_raw(const std::string& payload) {
+        return write_all(payload.data(), payload.size());
+    }
+
     // 阻塞读一条完整回复；失败（超时/断链/协议不符）返回 false。
     bool read_reply(Reply& out) { return read_reply_impl(out, 0); }
 
