@@ -261,13 +261,11 @@ bool ClusterConnection::send_command_to_node(const std::string& node_name,
         return false;
     }
 
-    // 将命令包装在 ClusterMsg 中（使用 kRepData 类型）
+    // 将命令包装在 ClusterMsg 中（使用 kRepData 类型）。
+    // 帧长不在这里算：send_msg() 会按 args 重新计算并校验上限，这里再算一遍就是
+    // 第二处真相（而且它是 uint32 累加，参数够多时会回绕——正是 P0-1 的老形状）。
     ClusterMsg msg;
     msg.header.type = static_cast<uint16_t>(ClusterMsgType::kRepData);
-    msg.header.length = static_cast<uint32_t>(sizeof(msg.header));
-    for (const auto& arg : args) {
-        msg.header.length += static_cast<uint32_t>(arg.size() + 1);
-    }
     msg.args = args;
     return link->send_msg(msg);
 }
