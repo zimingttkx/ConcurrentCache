@@ -89,8 +89,10 @@ void test_bus_frame_valid_is_delivered() {
     EXPECT_TRUE(h.link.is_connected());
 }
 
-// 声明 3MB 的帧必须当场断链。旧上限是 256MB，这种帧会被当成"还没收完"一直挂着，
-// 攻击者只要声明大帧再慢慢滴，就能按链路数量线性地把内存吃掉。
+// 声明 300MB 的帧（超过 kMaxPacketBytes=256MB）必须当场断链，且一条消息都不许投递。
+// 旧实现在这里不是"不断链"，而是更糟：read_complete 返回 true 表示畸形，handle_read
+// 于是叫起 decode_msg，后者按 300MB 去遍历参数区，而缓冲区里只有那 2KB 帧头 ——
+// 测试进程会直接段错误，看不出是断言失败。
 void test_bus_frame_oversized_disconnects() {
     TEST_SUITE("Cluster Bus Frame Bounds");
 
@@ -100,7 +102,7 @@ void test_bus_frame_oversized_disconnects() {
         return;
     }
 
-    h.feed(make_header(3u * 1024u * 1024u, static_cast<uint16_t>(ClusterMsgType::kPing)));
+    h.feed(make_header(300u * 1024u * 1024u, static_cast<uint16_t>(ClusterMsgType::kPing)));
     h.link.handle_read();
 
     EXPECT_TRUE(h.disconnected);
@@ -148,8 +150,14 @@ void test_bus_frame_shorter_than_header_disconnects() {
     EXPECT_EQ(h.delivered, 0);
 }
 
-// 发送端与接收端的上限必须对称：自己不能发出会被对端判为畸形并断链的帧。
-void test_bus_send_refuses_frame_over_the_limit() {
+// 一个 3MB 的写命令必须还能发出去。
+//
+// 本仓库把被复制的写命令也塞进总线帧（cluster_connection.cpp 的 kRepData ←
+// replication_mgr 的 send_command_to_node），所以 SET 一个 3MB 的 value 就是一个 3MB
+// 的帧。这条用例是给"把单帧上限往小里收"这个念头的刹车：接收端的 type 是发件人自报的，
+// 没法按类型给数据帧单独开额度，上限一旦小于某些合法 value，大 value 的复制就会被静默
+// 拒绝——测试与一致性检查都发现不了，因为副本只是少收了一条命令。
+void test_bus_send_still_allows_large_replicated_value() {
     TEST_SUITE("Cluster Bus Frame Bounds");
 
     BusHarness h;
@@ -159,16 +167,13 @@ void test_bus_send_refuses_frame_over_the_limit() {
     }
 
     ClusterMsg msg;
-    msg.header.type = static_cast<uint16_t>(ClusterMsgType::kPing);
-    // 三个 1MB 的参数：合计 > 2MB 上限
-    msg.args.emplace_back(1024u * 1024u, 'a');
-    msg.args.emplace_back(1024u * 1024u, 'b');
-    msg.args.emplace_back(1024u * 1024u, 'c');
+    msg.header.type = static_cast<uint16_t>(ClusterMsgType::kRepData);
+    msg.args.emplace_back("SET", 3);
+    msg.args.emplace_back("big_key", 7);
+    msg.args.emplace_back(std::string(3u * 1024u * 1024u, 'v'));
 
-    // 旧代码把长度累加进 uint32 的 header.length 并不设上限；
-    // 现在必须在发送之前就拒绝
-    EXPECT_TRUE(!h.link.send_msg(msg));
-    EXPECT_TRUE(h.link.is_connected());   // 拒绝发送不该顺带把链路搞断
+    EXPECT_TRUE(h.link.send_msg(msg));
+    EXPECT_TRUE(h.link.is_connected());
 }
 
 void run_all_cluster_bus_framing_tests() {
@@ -180,7 +185,7 @@ void run_all_cluster_bus_framing_tests() {
     test_bus_frame_oversized_disconnects();
     test_bus_frame_absurd_length_does_not_overread();
     test_bus_frame_shorter_than_header_disconnects();
-    test_bus_send_refuses_frame_over_the_limit();
+    test_bus_send_still_allows_large_replicated_value();
 
     std::cout << "\n========================================\n";
     std::cout << "All Cluster Bus Framing Tests Done!\n";

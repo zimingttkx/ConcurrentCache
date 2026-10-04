@@ -417,11 +417,11 @@ bool ClusterLink::read_complete() {
         return false;
     }
 
-    // 单帧上限对齐 Redis 的 CLUSTER_BUS_MAX_PACKET_SIZE（2MB）。
-    // 原来是 256MB：判断时机没问题（拿到 header 就能判，不用等正文到齐），但那个数字
-    // 本身就是攻击面——一条链路声明一个 200MB 的帧再慢慢滴，就要占 200MB 常驻，十来条
-    // 这样的链路足以把进程吃穿，而总线端口是不认证的输入。本仓库自己发的最大帧是
-    // header(2116B) + 节点列表参数，千节点量级也在几百 KB 内，2MB 留有余量。
+    // 单帧上限（kMaxPacketBytes，值本身见 cluster_link.h 里的注释：它被大 value 的
+    // 复制帧绑住了，不能贸然按 Redis 的 2MB 收）。判断时机是对的——拿到 header 就能判，
+    // 不必等正文到齐，因此这里不需要"积累到某个大小再拒"。
+    // 关键是拒绝方式：必须置 frame_invalid_ 并返回 false，绝不能返回 true 让
+    // decode_msg 起来——那正是越过缓冲区结尾读几十 GB 的入口。
     if (msg_len > kMaxPacketBytes) {
         LOG_ERROR(CLUSTER, "Oversized frame from %s: length=%u > limit=%u",
                   node_name_.c_str(), msg_len, kMaxPacketBytes);

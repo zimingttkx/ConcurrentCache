@@ -140,8 +140,15 @@ private:
 
     static constexpr uint32_t kMsgMagic = 0x43;  // 'C'
     static constexpr size_t kHeaderSize = sizeof(ClusterMsgHeader);
-    /// @brief 单帧上限，对齐 Redis 的 CLUSTER_BUS_MAX_PACKET_SIZE（2MB）
-    static constexpr uint32_t kMaxPacketBytes = 2u * 1024 * 1024;
+    /// @brief 单帧上限。
+    ///
+    /// 这个值不能按 Redis 的 CLUSTER_BUS_MAX_PACKET_SIZE（2MB）来收：本仓库把被复制的
+    /// 写命令也塞进了总线帧（cluster_connection.cpp 的 kRepData → replication_mgr 的
+    /// send_command_to_node），SET 一个 10MB 的 value 就是一个 10MB 的帧；而接收端不能
+    /// 按 type 区分上限——type 和 sender_name 一样是发件人自报的，声明 kRepData 就能拿到
+    /// 大额度。所以真要收这个数，得先把数据面从总线控制面拆出去（未在本仓库实现），
+    /// 而不是在这里改一个数字。现在保持原值，本次只修"照声明长度越界读"的崩溃。
+    static constexpr uint32_t kMaxPacketBytes = 256u * 1024u * 1024u;
 
     /// @brief 收到畸形帧（length 装不下 header，或超过单帧上限）时置位。
     /// 必须由 handle_read 单独判断并断链：不能让 decode_msg 拿着一个缓冲区里
