@@ -159,6 +159,44 @@ def main() -> int:
             f"test/{rel} 不属于任何 target：它不会被编译，也就永远不会腐烂或失败",
         )
 
+    # 4b) 接线判据：源文件出现在 CMake 里只说明它会被编译，不说明有人跑它。
+    #
+    # 只判 4) 那条子串，有两种漏法：add_executable 写了但忘了登记进 CC_TESTS，
+    # 或者 LABELS 拼成一个不在 gate|contract|slow 里的值——两种情况下六个 ctest
+    # 步骤（ci.yml 的 -L gate / -L contract、daily.yml 的 -L "gate|contract" 与
+    # -L slow）全都选不到它，流水线照样全绿，而这个二进制从来没被执行过。
+    built_targets = set(
+        re.findall(r"add_executable\(\s*([A-Za-z0-9_.\-]+)", cmake_text)
+    )
+    registry = re.findall(
+        r'"([A-Za-z0-9_]+)\|([A-Za-z0-9_.\-]+)\|([A-Za-z0-9_|]+)\|(\d+)"',
+        cmake_text,
+    )
+    registered_targets = {tgt for _name, tgt, _label, _timeout in registry}
+    instrumented = set(
+        re.findall(
+            r"set\(CC_TEST_TARGETS(.*?)\)", cmake_text, re.DOTALL
+        )[0].split() if "set(CC_TEST_TARGETS" in cmake_text else []
+    )
+    # command-table-probe 不是 ctest 用例，是给本脚本用的探针，不参与门禁选标签。
+    PROBE_TARGETS = {"command-table-probe"}
+    for target in sorted(built_targets - registered_targets - PROBE_TARGETS):
+        tracker.errors.append(
+            f"测试 target {target} 会被编译，但没有登记进 CC_TESTS："
+            "没有任何 ctest 步骤会跑到它，等于一份不会失败的检查"
+        )
+    for name, target, labels, _timeout in registry:
+        unknown = set(labels.split("|")) - {"gate", "contract", "slow"}
+        if unknown:
+            tracker.errors.append(
+                f"{name} 的 LABELS={labels} 含未知标签 {sorted(unknown)}："
+                "三个作业没有一个会选到它"
+            )
+        if target not in instrumented:
+            tracker.errors.append(
+                f"{name} ({target}) 没进 CC_TEST_TARGETS：sanitizer 档不给它加插桩，"
+                "daily 的 sanitizer 矩阵看不见它"
+            )
     # 5) 配置口径：conf 里的键必须被代码读到，否则是"配了不生效"。
     conf_text = read(ROOT / "conf" / "concurrentcache.conf")
     conf_keys = set(re.findall(r"^\s*([a-z0-9_]+)\s*=", conf_text, re.MULTILINE))
