@@ -232,7 +232,7 @@ private:
     // 一个客户端只要发 "*1\r\n" 重复几十万遍就能把服务端的工作线程栈打穿
     // （远程可达的进程崩溃，不需要任何凭证）。RESP2 规范里客户端命令最多嵌 7 层，
     // 内部还要用来解析副本/集群总线回来的回复，所以留到 32。
-    static constexpr int kMaxNestingDepth = 32;
+    static constexpr int kMaxNestingDepth = 1000000;  // MUTATION PROBE
     int array_depth_ = 0;
     
     
