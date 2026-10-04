@@ -197,6 +197,24 @@ def main() -> int:
                 f"{name} ({target}) 没进 CC_TEST_TARGETS：sanitizer 档不给它加插桩，"
                 "daily 的 sanitizer 矩阵看不见它"
             )
+    # 4c) e2e 的 .py 也要"被某个 job 跑起来"。
+    #
+    # 4) 只 rglob *.cpp，所以 test/e2e_test 下那批 Python 用例可以整年不执行而
+    # 没人发现——和 4b) 修的是同一类腐烂，只是换了语言。判据：test/e2e_test/*.py
+    # 里出现的脚本要么被某个 workflow 步骤引用，要么登记进 legacy-file 那条棘轮
+    # （登记 = 公开承认"这个文件没接线"，而不是让它悄悄躺着）。
+    workflow_text = ""
+    for wf in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+        workflow_text += read(wf)
+    for path in sorted((ROOT / "test" / "e2e_test").glob("*.py")):
+        if path.name in workflow_text:
+            continue
+        tracker.allowed(
+            "legacy-file",
+            f"test/e2e_test/{path.name}",
+            f"test/e2e_test/{path.name} 没有被任何 workflow 步骤引用：它不会被执行，"
+            "也就永远不会腐烂或失败",
+        )
     # 5) 配置口径：conf 里的键必须被代码读到，否则是"配了不生效"。
     conf_text = read(ROOT / "conf" / "concurrentcache.conf")
     conf_keys = set(re.findall(r"^\s*([a-z0-9_]+)\s*=", conf_text, re.MULTILINE))
