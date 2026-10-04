@@ -54,6 +54,7 @@ class RespClient:
         self.port = port
         self.reader = None
         self.writer = None
+        self.pending = b""   # 上一次 read 多读进来的字节，留给下一次 execute
 
     async def connect(self) -> bool:
         for _ in range(20):
@@ -72,14 +73,37 @@ class RespClient:
             except Exception: pass
 
     async def execute(self, *args: str) -> Optional[str]:
+        # 三个盲区一起补：
+        # 1) 旧代码只 read 一次（64KB）就去 parse_line。回复跨多个 TCP 段时（CLUSTER
+        #    NODES、大 bulk）parse 拿到的是不完整的数据，于是返回 None —— 用例报
+        #    "None"，分不清是服务器没答还是客户端读法不对。现在读到能解析为止。
+        # 2) 超时和连接被关闭以前也返回 None，与"合法的 nil 回复"混在一起。现在返回
+        #    可区分的标记，红了就在日志里写明是哪一种。
+        # 3) 一次 read 可能带回比一条回复更多的字节，剩下的必须留给下一次 execute，
+        #    否则回复流会错位，后面每条命令都读错答案。
+        if self.writer is None:
+            return "<NO-CONNECTION>"
+        buf = self.pending
+        self.pending = b""
         try:
             self.writer.write(RESP.encode_cmd(*args))
             await self.writer.drain()
-            raw = await asyncio.wait_for(self.reader.read(65536), timeout=5.0)
-            result, _ = RESP.parse_line(raw)
-            return result
-        except Exception:
-            return None
+            while True:
+                if buf.startswith(b"$-1"):
+                    self.pending = buf[5:]
+                    return None
+                result, rest = RESP.parse_line(buf)
+                if result is not None:
+                    self.pending = rest
+                    return result
+                raw = await asyncio.wait_for(self.reader.read(65536), timeout=5.0)
+                if not raw:
+                    return "<CONNECTION-CLOSED>"
+                buf += raw
+        except asyncio.TimeoutError:
+            return f"<TIMEOUT after 5s, got {len(buf)} bytes: {buf[:60]!r}>"
+        except Exception as exc:
+            return f"<ERROR {type(exc).__name__}: {exc}>"
 
 
 class TestResults:
@@ -111,8 +135,15 @@ rdb_save_interval = 0
 max_entries = 200000
 """)
     (Path(tmp_dir) / "dump.rdb").touch()
+    # 节点的 stdout/stderr 落到文件。原来是 DEVNULL：一次 [FAIL] 里那句 "None"
+    # 到底是"进程崩了"还是"进程卡住了"，事后完全无从判断，而这两种是完全不同的
+    # 缺陷。日志留在 tmp 目录里，失败时由 dump_diagnostics 打出来。
+    log_path = Path(tmp_dir) / "server.log"
+    log_file = open(log_path, "wb")
     proc = subprocess.Popen([str(server_bin)], cwd=tmp_dir,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            stdout=log_file, stderr=subprocess.STDOUT)
+    proc.cc_log_path = str(log_path)   # type: ignore[attr-defined]
+    log_file.close()   # 已经 dup 进子进程，父进程这份不需要留着
     return proc, tmp_dir
 
 
@@ -286,6 +317,30 @@ async def main():
         import traceback; traceback.print_exc()
         r.failed += 1
     finally:
+        # 红了要能就地解释。放在杀进程/删临时目录之前：节点日志和进程状态只有
+        # 在这个时刻还在。#33 给 contract 层加过同样的东西，这里是 e2e 侧的缺口——
+        # 以前 "CLUSTER NODES after FAIL — None" 只说明"没拿到回复"，分不清是
+        # 节点崩了、还是卡住了、还是客户端读法不对。
+        if r.failed > 0:
+            print("\n── 诊断：节点进程状态与日志尾巴 ──")
+            for label, proc in procs.items():
+                alive = proc.poll() is None
+                print(f"  {label}: pid={proc.pid} "
+                      f"{'ALIVE（还活着，多半是卡住）' if alive else f'EXITED code={proc.returncode}'}")
+                log_path = getattr(proc, "cc_log_path", None)
+                if not log_path:
+                    continue
+                try:
+                    text = Path(log_path).read_text(encoding="utf-8", errors="replace")
+                except OSError as exc:
+                    print(f"    读不到日志 {log_path}: {exc}")
+                    continue
+                tail = text.strip().splitlines()[-40:]
+                if not tail:
+                    print("    （日志为空——进程可能没起来或输出被重定向走了）")
+                for line in tail:
+                    print(f"    | {line}")
+
         for proc in procs.values():
             try: proc.send_signal(signal.SIGTERM); proc.wait(timeout=5)
             except:
