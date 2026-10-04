@@ -746,21 +746,14 @@ class FunctionalTester:
         r1 = await c.execute("ZADD", "cmp_zset", "1.0", "a", "2.0", "b", "3.0", "c")
         r2 = await c.execute("ZSCORE", "cmp_zset", "b")
         await c.close()
-        # ZSCORE 的返回值按数值比，不按字符串比。原来写的是 r2 == "2.0"，而真 Redis
-        # 打印整数值分数是 "2"（ld2string 会去掉多余的 .0），于是这一条在 Redis 那一栏
-        # 也是 FAIL —— 两栏同时红，作业报成"与 Redis 行为不符"，其实不符的是脚本自己
-        # 的期望值。改成数值比较之后，仍然拦得住真正的偏离：返回 nil、类型错、分数不对
-        # 都会红。
+        # 按字符串断言。分数是**以文本送出去**的，所以文本形态本身就是契约：
+        # 真 Redis 把整数值分数打成 "2"，我们以前是 "2.0"，ZRANGE WITHSCORES
+        # 那栏甚至是 "10.000000"——而 0.1234567 会被打成 "0.123457"，那是让
+        # 客户端读回一个不一样大的数。
         #
-        # 但**格式差异是真的**：本项目把 2.0 打成 "2.0"，Redis 打成 "2"。客户端按字符串
-        # 解析分数时会看到差别，属于兼容性缺口，只是不该由这一条用例以"两栏都红"的方式
-        # 报出来。缺口挂在缺陷队列里，等做分数格式化（对齐 Redis 的 ld2string）那一版
-        # 一起改，届时这一条要改回按字符串断言。
-        try:
-            score_matches = r2 is not None and float(r2) == 2.0
-        except (TypeError, ValueError):
-            score_matches = False
-        ok = r1 == "3" and score_matches
+        # 这一条以前按数值比，是为了不让"两栏同时红"糊掉报告（Redis 那栏本来就
+        # 该给 "2"）。Formatter 对齐 Redis 之后按字符串比才是对的。
+        ok = r1 == "3" and r2 == "2"
         return (f"ZADD={r1}, ZSCORE(b)={r2}", ok, "")
 
     async def _test_zcard(self, port, tag):
@@ -790,7 +783,9 @@ class FunctionalTester:
         await c.execute("ZADD", "cmp_zrws", "10", "x", "20", "y")
         r = await c.execute("ZRANGE", "cmp_zrws", "0", "-1", "WITHSCORES")
         await c.close()
-        ok = r is not None and "x" in str(r) and "10" in str(r) and "y" in str(r) and "20" in str(r)
+        # 整表逐元素比。原来用的是 "10" in str(r) 这种子串判断，
+        # 而 "10.000000" 里也含 "10" —— 分数打成什么形态它都拦不住。
+        ok = r is not None and list(r) == ["x", "10", "y", "20"]
         return (f"ZRANGE WITHSCORES={r}", ok, "")
 
     # ── 过期机制测试 ──

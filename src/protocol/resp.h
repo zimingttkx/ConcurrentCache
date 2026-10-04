@@ -356,6 +356,20 @@ public:
     static std::string encode_bulk_string(const std::string& s);
     
     
+    // format_double() - 把 double 写成 Redis 的文本形式
+    
+    // 参数：value - 要格式化的浮点数
+    // 返回：不带科学计数法、且能被 strtod 原样读回的最短表示
+    //
+    // ZSCORE / ZRANGE ... WITHSCORES 这类回复里分数是**以文本送出去**的，
+    // 所以格式化规则本身就是一种数据契约：std::to_string(double) 等价于 %f，
+    // 会把 2.0 写成 "2.000000"、把 0.1234567 写成 "0.123457"（后者是读回了
+    // 一个不一样大的数）。Redis 的 d2string/longDoubleToString 走的是另一套，
+    // 这里与它对齐。
+    
+    static std::string format_double(double value);
+    
+    
     // encode_null() - 编码 null 值
     
     // 返回：RESP 格式的 null
