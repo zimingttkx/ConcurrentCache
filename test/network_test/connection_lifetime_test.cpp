@@ -175,6 +175,58 @@ void test_output_buffer_high_water_closes_client() {
     ::close(sv[1]);
 }
 
+// quit 之前投出去的任务必须被收尾，不能随循环一起被丢掉。
+//
+// 这里不用线程、不用睡眠：先把任务 queue_in_loop，再 quit()，然后才 loop()。
+// 循环第一圈就看到 quit_ 直接 break，于是唯一可能执行它的地方就是退出路径上的
+// 那次 drain —— 少那一次，任务就永久留在队列里，而它带着一个已经 accept 到的 fd。
+void test_event_loop_drains_pending_tasks_on_exit() {
+    TEST_SUITE("EventLoop Exit Drain");
+
+    EventLoop loop;
+    std::atomic<int> executed{0};
+
+    loop.queue_in_loop([&executed]() { executed.fetch_add(1); });
+    EXPECT_EQ(executed.load(), 0);  // 还没跑循环，只许排队
+
+    loop.quit();
+    loop.loop();                    // 立刻看到 quit_，不会进 epoll_wait
+
+    EXPECT_EQ(executed.load(), 1);  // 退出路径把这条任务收尾了
+}
+
+// 同一次 pipeline 里，某条命令关掉连接之后，后面的命令不许再交给回调。
+//
+// 触发路径是真实存在的：#37 的输出缓冲高水位就在命令回调里调 close()。fd 已经关了、
+// 表项也已经被 SubReactor 摘走，继续把剩下的命令喂进去就是在对一条已摘表的连接做
+// 业务处理（回复会静默丢掉，看起来是"少回了几条"）。
+void test_command_loop_stops_once_connection_is_closed() {
+    TEST_SUITE("Connection Command Loop");
+
+    int sv[2] = {-1, -1};
+    EXPECT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+
+    EventLoop loop;
+    auto owner = std::make_unique<Connection>(sv[0], &loop);
+
+    int delivered = 0;
+    owner->set_command_callback([&delivered](const RespValue&, Connection* conn) {
+        ++delivered;
+        conn->close();  // 第一条命令就把这条连接关掉
+    });
+
+    const std::string pipelined = "*1\r\n$4\r\nPING\r\n" "*1\r\n$4\r\nPING\r\n";
+    EXPECT_EQ(::write(sv[1], pipelined.data(), pipelined.size()),
+              static_cast<ssize_t>(pipelined.size()));
+
+    owner->handle_read();
+
+    EXPECT_EQ(delivered, 1);
+    EXPECT_TRUE(owner->fd() < 0);
+
+    ::close(sv[1]);
+}
+
 void run_all_connection_tests() {
     std::cout << "\n========================================\n";
     std::cout << "Running Connection / EventLoop Lifetime Tests\n";
@@ -184,6 +236,8 @@ void run_all_connection_tests() {
     test_event_loop_runs_queued_tasks();
     test_input_buffer_high_water_closes_client();
     test_output_buffer_high_water_closes_client();
+    test_event_loop_drains_pending_tasks_on_exit();
+    test_command_loop_stops_once_connection_is_closed();
 
     std::cout << "\n========================================\n";
     std::cout << "All Connection Lifetime Tests Done!\n";
