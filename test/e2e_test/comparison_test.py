@@ -211,8 +211,51 @@ class ServerManager:
         self.redis_proc: Optional[subprocess.Popen] = None
         self.cc_tmpdir: Optional[str] = None
         self.redis_tmpdir: Optional[str] = None
+        # 两个被比照的进程的输出去处：以前直接进 DEVNULL，启动失败时作业里什么线索都没有
+        self.cc_log_fh = None
+        self.redis_log_fh = None
         self.cc_port = 16379
         self.redis_port = 16380
+
+    def _ping(self, port: int) -> bool:
+        try:
+            result = subprocess.run(
+                ["redis-cli", "-p", str(port), "PING"],
+                capture_output=True, text=True, timeout=3
+            )
+            return "PONG" in result.stdout
+        except Exception:
+            return False
+
+    def _wait_until_up(self, label: str, display: str, port: int, proc, log_path: Path,
+                       timeout_s: float = 20.0) -> bool:
+        """轮询 PING 直到起来了或者超时，失败时把日志尾巴和退出码一起打出来。
+
+        原来这里是"sleep 一个固定秒数 + 试一次 PING"，而且两个进程的输出都进了
+        DEVNULL。结果作业里只剩一行"启动失败"，看不出是启动慢、配置读不了、还是
+        进程直接崩了——2026-10-04 daily 的 redis-compat 就是在 5 秒内报了这一行，
+        没有任何可用于定位的输出。
+        """
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                break                      # 进程已经退了，再等也没用
+            if self._ping(port):
+                print(f"  [{label}] {display} 启动成功 ✓")
+                return True
+            time.sleep(0.3)
+
+        print(f"  [{label}] 启动验证失败（退出码={proc.poll()}，等了 {timeout_s:.0f}s）")
+        try:
+            tail = log_path.read_text(errors="replace").splitlines()[-40:]
+        except OSError as exc:
+            print(f"  [{label}] 读不到日志 {log_path}: {exc}")
+            return False
+        print(f"  [{label}] ----- {log_path} 末尾 {len(tail)} 行 -----")
+        for line in tail:
+            print(f"  [{label}] | {line}")
+        print(f"  [{label}] ----- 日志结束 -----")
+        return False
 
     def start_concurrentcache(self) -> bool:
         project_root = Path(__file__).resolve().parent.parent.parent
@@ -235,28 +278,16 @@ max_entries = 2000000
 
         print(f"  [CC] 启动 ConcurrentCache (端口 {self.cc_port})...")
         env = os.environ.copy()
+        cc_log = Path(self.cc_tmpdir) / "server.log"
+        self.cc_log_fh = open(cc_log, "wb")
         self.cc_proc = subprocess.Popen(
             [str(server_bin)],
             cwd=self.cc_tmpdir,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=self.cc_log_fh,
+            stderr=subprocess.STDOUT,
             env=env,
         )
-        time.sleep(2.0)
-
-        # 验证启动
-        try:
-            result = subprocess.run(
-                ["redis-cli", "-p", str(self.cc_port), "PING"],
-                capture_output=True, text=True, timeout=5
-            )
-            if "PONG" in result.stdout:
-                print(f"  [CC] ConcurrentCache 启动成功 ✓")
-                return True
-        except Exception:
-            pass
-        print(f"  [CC] ConcurrentCache 启动验证失败")
-        return False
+        return self._wait_until_up("CC", "ConcurrentCache", self.cc_port, self.cc_proc, cc_log)
 
     def start_redis(self) -> bool:
         self.redis_tmpdir = tempfile.mkdtemp(prefix="redis_cmp_")
@@ -264,31 +295,21 @@ max_entries = 2000000
         conf_file.write_text(f"""port {self.redis_port}
 bind 127.0.0.1
 daemonize no
+dir {self.redis_tmpdir}
 loglevel warning
 save ""
 appendonly no
 """)
 
         print(f"  [Redis] 启动 Redis (端口 {self.redis_port})...")
+        redis_log = Path(self.redis_tmpdir) / "redis.log"
+        self.redis_log_fh = open(redis_log, "wb")
         self.redis_proc = subprocess.Popen(
             ["redis-server", str(conf_file)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=self.redis_log_fh,
+            stderr=subprocess.STDOUT,
         )
-        time.sleep(1.5)
-
-        try:
-            result = subprocess.run(
-                ["redis-cli", "-p", str(self.redis_port), "PING"],
-                capture_output=True, text=True, timeout=5
-            )
-            if "PONG" in result.stdout:
-                print(f"  [Redis] Redis 启动成功 ✓")
-                return True
-        except Exception:
-            pass
-        print(f"  [Redis] Redis 启动验证失败")
-        return False
+        return self._wait_until_up("Redis", "Redis", self.redis_port, self.redis_proc, redis_log)
 
     def stop_all(self):
         for name, proc in [("ConcurrentCache", self.cc_proc), ("Redis", self.redis_proc)]:
@@ -300,6 +321,12 @@ appendonly no
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.wait()
+        for fh in [self.cc_log_fh, self.redis_log_fh]:
+            if fh:
+                try:
+                    fh.close()
+                except OSError:
+                    pass
         for d in [self.cc_tmpdir, self.redis_tmpdir]:
             if d:
                 shutil.rmtree(d, ignore_errors=True)
