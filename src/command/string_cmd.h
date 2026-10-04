@@ -1014,7 +1014,7 @@ namespace cc_server {
                 return RespEncoder::encode_nil();
             }
 
-            return RespEncoder::encode_bulk_string(std::to_string(score.value()));
+            return RespEncoder::encode_bulk_string(RespEncoder::format_double(score.value()));
         }
 
         [[nodiscard]] std::unique_ptr<Command> clone() const override {
@@ -1097,7 +1097,7 @@ namespace cc_server {
             for (const auto& [member, score] : members) {
                 response.push_back(member);
                 if (with_scores) {
-                    response.push_back(std::to_string(score));
+                    response.push_back(RespEncoder::format_double(score));
                 }
             }
 

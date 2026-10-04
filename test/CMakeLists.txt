@@ -61,6 +61,7 @@ add_executable(concurrentcache-v3-tests
     memorypool_test/thread_cache_test.cpp
     network_test/connection_lifetime_test.cpp
     persistence_test/rdb_test.cpp
+    protocol_test/resp_format_test.cpp
     storage_test/storage_v3_test.cpp
 )
 

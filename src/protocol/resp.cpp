@@ -1,5 +1,9 @@
 // E:/CPPProjects/ConcurrentCache/src/protocol/resp.cpp
 #include "resp.h"
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <sstream>
 #include "../base/log.h"
 
@@ -849,6 +853,39 @@ std::string RespEncoder::encode_integer(int n) {
 std::string RespEncoder::encode_bulk_string(const std::string& s) {
     // 格式: $<length>\r\n<content>\r\n
     return "$" + std::to_string(s.size()) + "\r\n" + s + "\r\n";
+}
+
+// 把 double 写成 Redis 的文本形式（对齐 util.c 的 d2string / longDoubleToString）
+std::string RespEncoder::format_double(double value) {
+    // nan / inf 走不了下面的数字格式化，Redis 回复的也是这三个字面量
+    if (std::isnan(value)) return "nan";
+    if (std::isinf(value)) return value < 0 ? "-inf" : "inf";
+
+    // 600 的位置余量：最坏是小数点前 16 位 + 小数点后 341 位（double 的最小
+    // 次正规数 4.9e-324 要 324 位小数才写得回来）
+    char buf[600];
+
+    double int_part = 0.0;
+    if (std::modf(value, &int_part) == 0.0) {
+        // 整数值不留小数点：2.0 → "2"。这里不用 %g——量级一大 %g 会跳成
+        // "1e+20"，而 Redis 那边始终是展开的十进制。
+        std::snprintf(buf, sizeof(buf), "%.0f", value);
+        return std::string(buf);
+    }
+
+    // 小数：从最短往长试，第一个能被 strtod 原样读回来的就是它。
+    // 上限按量级换算——17 位有效数字对 double 永远够，换成小数位就是
+    // 17 - log10(|value|)；少一位可能读不回来。
+    const int exponent = static_cast<int>(std::floor(std::log10(std::fabs(value))));
+    const int max_digits = std::max(1, std::min(341, 17 - exponent));
+    for (int digits = 1; digits < max_digits; ++digits) {
+        std::snprintf(buf, sizeof(buf), "%.*f", digits, value);
+        if (std::strtod(buf, nullptr) == value) {
+            return std::string(buf);
+        }
+    }
+    std::snprintf(buf, sizeof(buf), "%.*f", max_digits, value);
+    return std::string(buf);
 }
 
 // 编码 null: $-1\r\n
