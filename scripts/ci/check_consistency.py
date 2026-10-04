@@ -31,10 +31,25 @@ def strip_line_comments(text: str) -> str:
     return "\n".join(line.split("//", 1)[0] for line in text.splitlines())
 
 
-def strip_cmake_comments(text: str) -> str:
+def strip_hash_comments(text: str) -> str:
     """去掉 # 之后的内容。不剥掉的话，"解释某文件为何不接入构建"的注释本身
-    会让那个文件被判定为已被引用——这个坑是实跑时暴露出来的。"""
+    会让那个文件被判定为已被引用——这个坑是实跑时暴露出来的。
+    CMake 和 GitHub 的 YAML 都用 # 起注释，两边共用这一个。"""
     return "\n".join(line.split("#", 1)[0] for line in text.splitlines())
+
+
+def load_workflow_text() -> str:
+    """把所有 workflow 拼成一份**已经去掉注释**的正文。
+
+    4c) 拿它判断某个 e2e 脚本有没有真的被 job 跑起来。在注释里写一句
+    "以后可以接 e2e_chaos_test.py" 并不构成接线，但如果用的是没剥注释的原文，
+    这句注释就会让那个脚本被判成"已被引用"——判据想防的正好是这种事，所以
+    必须先剥注释再匹配。
+    """
+    text = ""
+    for wf in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+        text += strip_hash_comments(read(wf))
+    return text
 
 
 def read(path: Path) -> str:
@@ -148,7 +163,7 @@ def main() -> int:
     # CMake 里这些源文件都是相对 test/ 写的（tests.cpp / datatype_test/object_test.cpp），
     # 所以用同一个相对路径比对即可，不做 basename 回退（那会让
     # network_stress_test_main.cpp 顺带把 test_main.cpp 判成已引用）。
-    cmake_text = strip_cmake_comments(read(ROOT / "test" / "CMakeLists.txt"))
+    cmake_text = strip_hash_comments(read(ROOT / "test" / "CMakeLists.txt"))
     for path in sorted((ROOT / "test").rglob("*.cpp")):
         rel = path.relative_to(ROOT / "test").as_posix()
         if rel in cmake_text:
@@ -203,9 +218,7 @@ def main() -> int:
     # 没人发现——和 4b) 修的是同一类腐烂，只是换了语言。判据：test/e2e_test/*.py
     # 里出现的脚本要么被某个 workflow 步骤引用，要么登记进 legacy-file 那条棘轮
     # （登记 = 公开承认"这个文件没接线"，而不是让它悄悄躺着）。
-    workflow_text = ""
-    for wf in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
-        workflow_text += read(wf)
+    workflow_text = load_workflow_text()
     for path in sorted((ROOT / "test" / "e2e_test").glob("*.py")):
         if path.name in workflow_text:
             continue
