@@ -82,6 +82,11 @@ add_executable(lock-race-tests
     lock_test/lock_race_test.cpp
 )
 
+# 故意构造的数据竞争演示，单独成二进制（ctest 标签 slow，理由见源文件开头）
+add_executable(lock-race-demo-tests
+    lock_test/lock_race_demo_test.cpp
+)
+
 add_executable(lock-boundary-tests
     lock_test/lock_boundary_test.cpp
 )
@@ -164,6 +169,7 @@ set(CC_TEST_TARGETS
     lock-correctness-tests
     lock-deadlock-tests
     lock-race-tests
+    lock-race-demo-tests
     lock-boundary-tests
     lock-stress-tests
     sync-primitives-tests
@@ -246,6 +252,7 @@ set(CC_TESTS
     "LockCorrectnessTests|lock-correctness-tests|gate|120"
     "LockDeadlockTests|lock-deadlock-tests|gate|120"
     "LockRaceTests|lock-race-tests|gate|120"
+    "LockRaceDemoTests|lock-race-demo-tests|slow|120"
     "LockBoundaryTests|lock-boundary-tests|gate|120"
     "V3Tests|concurrentcache-v3-tests|gate|600"
     "ContractTests|contract-tests|gate|180"
