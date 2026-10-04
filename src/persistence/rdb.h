@@ -208,11 +208,6 @@ namespace cc_server {
 
         FILE* file_ = nullptr;
         std::string filepath_;
-
-        // 正文（不含尾部 4 字节 CRC）的字节数，仅在 load() 验完 CRC 之后到读取结束
-        // 之间有效，其余时候是 -1。read_string() 用它把长度字段限制在文件真有的
-        // 字节数以内，见该函数注释。
-        long authenticated_body_len_ = -1;
         std::atomic<int> bgsave_in_progress_{0};  // 原子标记是否正在保存
         RdbStats stats_;
 

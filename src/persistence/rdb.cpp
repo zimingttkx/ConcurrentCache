@@ -410,7 +410,6 @@ bool RdbPersistence::load(const std::string& filepath, GlobalStorage& storage) {
     if (initial_size == 0) {
         LOG_INFO(RDB, "RDB file is empty: %s, starting with an empty dataset", filepath.c_str());
         file_ = nullptr;
-        authenticated_body_len_ = -1;
         return true;
     }
 
@@ -467,7 +466,6 @@ bool RdbPersistence::load(const std::string& filepath, GlobalStorage& storage) {
             return false;
         }
         fseek(file_, body_pos, SEEK_SET);
-        authenticated_body_len_ = data_len;
 
         // 3. 读取数据库数量
         uint32_t db_count = read_uint32();
@@ -502,26 +500,9 @@ bool RdbPersistence::load(const std::string& filepath, GlobalStorage& storage) {
         }
 
         // 4. 读取 EOF 标记
-        //
-        // 正文必须以 EOF 标记结尾、后面直接跟 4 字节 CRC。原来这里只在标记不是
-        // 0xFF 时打一条 WARN，然后照样 return true：一个头部计数与正文不一致的文件
-        // （多一条、少一条、长度字段错位）会被报成"加载成功"，客户端从此分不清
-        // 这就是全部数据，还是启动时把文件读崩了。既然 save() 写出的文件必然满足
-        // 这个条件，把它当硬约束来看不会误伤自己生成的 RDB。
-        const long body_end = ftell(file_);
-        if (body_end != data_len - 1) {
-            LOG_ERROR(RDB, "RDB body does not match its header: consumed %ld bytes, body is %ld bytes",
-                      body_end, data_len);
-            file_ = nullptr;
-            authenticated_body_len_ = -1;
-            return false;
-        }
         uint8_t eof = read_uint8();
         if (eof != static_cast<uint8_t>(RdbSpecialMarker::EOF_MARKER)) {
-            LOG_ERROR(RDB, "Missing EOF marker at end of RDB body: 0x%02X", eof);
-            file_ = nullptr;
-            authenticated_body_len_ = -1;
-            return false;
+            LOG_WARN(RDB, "Unexpected EOF marker: 0x%02X", eof);
         }
 
         // CRC 已经在第 2 步验过（那时一个字节都还没写进存储），这里不必再读一遍
@@ -529,7 +510,6 @@ bool RdbPersistence::load(const std::string& filepath, GlobalStorage& storage) {
 
         // file_guard 会自动关闭文件
         file_ = nullptr;
-        authenticated_body_len_ = -1;
 
         LOG_INFO(RDB, "RDB load completed successfully");
         return true;
@@ -538,7 +518,6 @@ bool RdbPersistence::load(const std::string& filepath, GlobalStorage& storage) {
         LOG_ERROR(RDB, "Exception during load: %s", e.what());
         // file_guard 会自动关闭文件
         file_ = nullptr;
-        authenticated_body_len_ = -1;
         return false;
     }
 }
@@ -622,22 +601,6 @@ uint8_t RdbPersistence::read_uint8() {
 std::string RdbPersistence::read_string() {
     uint32_t len = read_uint32();
     if (len == 0) return "";
-
-    // len 是文件里的一个字段，在核实之前不能拿它去分配内存。原来的顺序是
-    // `std::string val(len, '\0')` 先分配、再 fread：一个几十字节的 dump.rdb 只要
-    // 把 len 写成 0xFFFFFFFF，就能让进程在申请上立刻打满 4GB（构造还会把每个字节
-    // 填成 '\0'，是真读写，不是保留地址）。小文件换掉进程的内存，不需要改 CRC，
-    // 所以这一步先跟正文真正还剩多少字节比一比。
-    if (authenticated_body_len_ >= 0) {
-        const long pos = ftell(file_);
-        const long remaining = authenticated_body_len_ - pos;
-        if (pos < 0 || remaining < 0 || static_cast<long>(len) > remaining) {
-            LOG_ERROR(RDB, "read_string - declared length %u at offset %ld exceeds %ld readable bytes, refusing to allocate",
-                      len, pos, remaining);
-            throw std::runtime_error("string length exceeds remaining RDB body");
-        }
-    }
-
     std::string val(len, '\0');
     if (fread(val.data(), 1, len, file_) != len) {
         LOG_ERROR(RDB, "read_string - fread failed, expected %u bytes", len);
@@ -702,35 +665,25 @@ bool RdbPersistence::read_kv_pair(std::string& key, CacheObject& value, int64_t&
 
     // 读取 key
     key = read_string();
+    if (key.empty()) return false;
 
     // 读取 value type
     uint8_t type_val = read_uint8();
     RdbValueType type = static_cast<RdbValueType>(type_val);
 
+    bool success = true;
     switch (type) {
-        case RdbValueType::STRING: deserialize_string(value); break;
-        case RdbValueType::LIST: deserialize_list(value); break;
-        case RdbValueType::HASH: deserialize_hash(value); break;
-        case RdbValueType::SET: deserialize_set(value); break;
-        case RdbValueType::ZSET: deserialize_zset(value); break;
+        case RdbValueType::STRING: success = deserialize_string(value); break;
+        case RdbValueType::LIST: success = deserialize_list(value); break;
+        case RdbValueType::HASH: success = deserialize_hash(value); break;
+        case RdbValueType::SET: success = deserialize_set(value); break;
+        case RdbValueType::ZSET: success = deserialize_zset(value); break;
         default:
-            // 未知类型不能"跳过这条、读下一条"：类型字节后面的正文是按这个类型
-            // 排的，跳过它等于把这段正文当新记录的头部来解析，游标就错位了。
-            // 而 load() 里的循环原本真的会继续（返回值没人看），最后连 EOF 标记
-            // 都可能读到 0xFF，于是整个文件报"加载成功"，键却一条都没有。
-            LOG_ERROR(RDB, "Unknown value type: %u", type_val);
-            throw std::runtime_error("unknown RDB value type");
+            LOG_WARN(RDB, "Unknown value type: %u", type_val);
+            success = false;
     }
 
-    // 空 key 是本项目存储层不接受的（GlobalStorage::set 里有 assert），但整条记录
-    // 到这里已经读完了，游标落在下一条记录的开头。这种情况按"跳过"处理，不算解析
-    // 失败——返回 false 让调用方不写它，偏移不会错。
-    if (key.empty()) {
-        LOG_WARN(RDB, "Skipping RDB record with an empty key");
-        return false;
-    }
-
-    return true;
+    return success;
 }
 
 void RdbPersistence::serialize_string(const std::string& val) {
