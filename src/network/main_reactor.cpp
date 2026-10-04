@@ -110,9 +110,17 @@ void MainReactor::add_new_connection(int client_fd) {
     // 但我们目前的实现比较简单：直接调用（因为SubReactor还没启动时我们不会accept）
     // 更好的做法是用pending queue + wakeup
 
-    // 直接调用add_connection（简化版本）
-    // 注意：这样是在MainReactor线程调用的
-    // 如果要完全无锁，需要用pending queue
+    // 上面的注释描述的是旧实现。现在 add_connection 不再就地登记：它把
+    // "建 Connection、加进 epoll、放进 connections_" 整段投递给 SubReactor
+    // 自己的线程去做（EventLoop::queue_in_loop + wakeup pipe），accept 线程
+    // 从此不碰 epoll，也不存在"事件跑到登记前面"的窗口。
+    if (!target_reactor) {
+        // 线程池已停却还在 accept，通常是关闭时序问题；fd 必须自己收掉。
+        LOG_ERROR(NETWORK, "No SubReactor available for fd=%d, closing it", client_fd);
+        ::close(client_fd);
+        return;
+    }
+
     target_reactor->add_connection(client_fd);
 
     LOG_INFO(NETWORK, "New connection assigned to SubReactor, fd=%d", client_fd);

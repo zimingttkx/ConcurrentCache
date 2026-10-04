@@ -1,0 +1,103 @@
+// 连接与事件循环的生命周期测试
+//
+// 这一层以前没有任何单元测试：Connection 的关闭时序、EventLoop 的跨线程任务队列
+// 都只能靠起真服务器去猜。下面两条把这两处时序直接钉住，改坏了会立刻红。
+
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/socket.h>
+
+#include <atomic>
+#include <memory>
+#include <thread>
+#include <chrono>
+
+#include "../trace/test_assertions.h"
+#include "network/connection.h"
+#include "network/event_loop.h"
+
+namespace cc_server {
+namespace testing {
+
+// 契约：Connection::close() 必须先关掉自己的 fd，再通知所有者。
+//
+// 所有者收到的回调就是 SubReactor::remove_connection——它 erase 掉 map 里唯一的
+// unique_ptr，回调返回时 this 已经析构。旧顺序（先回调、后 client_socket_.close()）
+// 因此在已释放的内存上再读一次 fd_：单线程下读到 ~Socket 写的 -1，是无害的空操作；
+// 那块内存被下一个 Connection 复用时，关掉的就是新连接的 fd。
+void test_connection_close_frees_fd_before_notifying_owner() {
+    TEST_SUITE("Connection Close Lifetime");
+
+    int sv[2] = {-1, -1};
+    EXPECT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+    const int peer_fd = sv[1];  // 保持打开，让本用例只操作 sv[0] 这一端
+
+    EventLoop loop;
+    auto owner = std::make_unique<Connection>(sv[0], &loop);
+    const int conn_fd = owner->fd();
+    EXPECT_TRUE(conn_fd >= 0);
+
+    // 回调只做两件事：记录 fd 此刻的状态，然后把唯一所有者摘走。
+    // reset() 放在最后一句——回调本身也住在这个对象里，摘走之后不能再读捕获。
+    int fd_state_at_callback = -2;
+    owner->set_close_callback([&owner, &fd_state_at_callback, conn_fd]() {
+        fd_state_at_callback = ::fcntl(conn_fd, F_GETFD);
+        owner.reset();
+    });
+
+    owner->close();
+
+    // fd 必须在通知所有者之前就关掉
+    EXPECT_EQ(fd_state_at_callback, -1);
+    // 关掉的是自己那一条，不是别人的：三个标准 fd 必须还在
+    EXPECT_TRUE(::fcntl(0, F_GETFD) != -1);
+    EXPECT_TRUE(::fcntl(1, F_GETFD) != -1);
+    EXPECT_TRUE(::fcntl(2, F_GETFD) != -1);
+
+    ::close(peer_fd);
+}
+
+// 契约：queue_in_loop 投递的任务由 loop() 线程执行。
+//
+// 客户端连接的登记整体走这条队列（SubReactor::add_connection 不再在 accept
+// 线程里碰 epoll），所以"排进去的任务一定会被执行"是连接能不能通的前提。
+void test_event_loop_runs_queued_tasks() {
+    TEST_SUITE("EventLoop Pending Tasks");
+
+    EventLoop loop;
+    std::atomic<int> executed{0};
+
+    loop.queue_in_loop([&executed]() { executed.fetch_add(1); });
+    // loop 线程还没跑起来，任务只能排队，不能就地执行
+    EXPECT_EQ(executed.load(), 0);
+
+    std::thread loop_thread([&loop]() { loop.loop(); });
+
+    bool drained = false;
+    for (int i = 0; i < 200 && !drained; ++i) {
+        drained = executed.load() == 1;
+        if (!drained) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
+    EXPECT_TRUE(drained);
+
+    loop.quit();
+    loop_thread.join();
+}
+
+void run_all_connection_tests() {
+    std::cout << "\n========================================\n";
+    std::cout << "Running Connection / EventLoop Lifetime Tests\n";
+    std::cout << "========================================\n\n";
+
+    test_connection_close_frees_fd_before_notifying_owner();
+    test_event_loop_runs_queued_tasks();
+
+    std::cout << "\n========================================\n";
+    std::cout << "All Connection Lifetime Tests Done!\n";
+    std::cout << "========================================\n\n";
+}
+
+}  // namespace testing
+}  // namespace cc_server

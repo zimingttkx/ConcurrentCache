@@ -57,6 +57,7 @@ set(TEST_INCLUDE_DIRS
 add_executable(concurrentcache-v3-tests
     test_v3_main.cpp
     datatype_test/object_test.cpp
+    network_test/connection_lifetime_test.cpp
     persistence_test/rdb_test.cpp
     storage_test/storage_v3_test.cpp
 )

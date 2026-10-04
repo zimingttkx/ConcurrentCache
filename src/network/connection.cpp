@@ -360,20 +360,24 @@ namespace cc_server {
             loop_->remove_channel(channel_.get());
         }
 
-        // 修复 P0-4（Connection 泄漏）：必须先触发 close_callback_ 再关闭 fd。
-        // 旧代码先 client_socket_.close()（fd_ 置 -1）再触发回调，
-        // 回调里 SubReactor::remove_connection 用 conn->fd()（恒为 -1）作 key
-        // 去 erase connections_ —— 永远删不掉，每次断开泄漏整个 Connection
-        // 对象（含 Channel、双 Buffer、RespParser）直至 OOM。
-        // 注意：回调会销毁 this，返回后不得再访问任何成员。
+        // 先关 fd，再通知所有者。顺序反过来会 use-after-free：
+        // close_callback_ 就是 SubReactor::remove_connection，它把 connections_ 里
+        // 唯一持有本对象的 unique_ptr 摘走，回调返回时 this 已经析构，而旧代码接
+        // 着还要执行一句 client_socket_.close()，读的是已释放内存里的 fd_。
+        // 单线程下那块内存刚被 ~Socket 写过 -1，多半是无害的空操作；一旦这块
+        // 内存被下一个 Connection 复用（accept 与关闭交叉时很常见），这条语句关掉
+        // 的就是**新连接的 fd**：新客户端的回复写进已关闭的 socket，表现出来是
+        // "少一条回复、之后这个连接上的命令全部超时"。
+        //
+        // 代价是回调里不能再向对象索取 fd（此刻它已经是 -1），所以 SubReactor 的
+        // 关闭回调改为捕获建连时的 client_fd —— 这正是 P0-4「断开即泄漏」要求
+        // 回调仍能找到表项的那条约束。
+        client_socket_.close();
+
         if (close_callback_) {
             close_callback_();
         }
-
-        // 回调（及其触发的销毁流程）结束后 fd 通常已随对象析构关闭；
-        // 若 Connection 未被销毁（例如所有者选择保留），这里兜底关闭。
-        // client_socket_ 析构时也会自动 close，此处保证不依赖析构顺序。
-        client_socket_.close();
+        // 回调可能已经销毁 this，此后不得再访问任何成员。
     }
 
     /**
