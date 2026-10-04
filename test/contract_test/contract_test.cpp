@@ -493,6 +493,54 @@ void run_zadd_score_contract_tests(int port) {
     });
 }
 
+// EXPIRE 的非正秒数：Redis 的语义是"按立即过期删掉"，不是"失败"。
+//
+// 原来这一支回 :0 而且键原样留着。:0 在客户端眼里是"没设成功"，它不会重试，
+// 于是 `EXPIRE k 0`（拿过期当删除的常见写法）留下一个永存的键。
+// Redis（expireGenericCommand）的顺序是：先查键在不在（不在 → 0），再查目标
+// 时间是否已经过去（已过 → 删键 + 1）。
+void run_expire_semantics_contract_tests(int port) {
+    TEST_SUITE("EXPIRE 语义契约");
+
+    RUN_TEST(expire_zero_deletes_the_key_and_replies_one) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client, {"SET", "ec_zero", "v"}, reply));
+        EXPECT_TRUE(do_cmd(client, {"EXPIRE", "ec_zero", "0"}, reply));
+        std::cout << "  EXPIRE 0 返回: " << reply_text(reply) << "\n";
+        EXPECT_EQ(reply.integer, 1);
+        EXPECT_TRUE(do_cmd(client, {"EXISTS", "ec_zero"}, reply));
+        EXPECT_EQ(reply.integer, 0);
+        EXPECT_TRUE(do_cmd(client, {"TTL", "ec_zero"}, reply));
+        EXPECT_EQ(reply.integer, -2);
+    });
+
+    RUN_TEST(expire_negative_deletes_the_key_and_replies_one) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client, {"SET", "ec_neg", "v"}, reply));
+        EXPECT_TRUE(do_cmd(client, {"EXPIRE", "ec_neg", "-5"}, reply));
+        std::cout << "  EXPIRE -5 返回: " << reply_text(reply) << "\n";
+        EXPECT_EQ(reply.integer, 1);
+        EXPECT_TRUE(do_cmd(client, {"EXISTS", "ec_neg"}, reply));
+        EXPECT_EQ(reply.integer, 0);
+    });
+
+    // 键不存在时仍然是 0，而且不许把键凭空建出来
+    RUN_TEST(expire_on_missing_key_replies_zero_and_creates_nothing) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client, {"DEL", "ec_missing"}, reply));
+        EXPECT_TRUE(do_cmd(client, {"EXPIRE", "ec_missing", "10"}, reply));
+        EXPECT_EQ(reply.integer, 0);
+        EXPECT_TRUE(do_cmd(client, {"EXISTS", "ec_missing"}, reply));
+        EXPECT_EQ(reply.integer, 0);
+        // 同一套顺序用在非正秒数上：不存在的键 + EXPIRE 0 仍然是 0，不是 1
+        EXPECT_TRUE(do_cmd(client, {"EXPIRE", "ec_missing", "0"}, reply));
+        EXPECT_EQ(reply.integer, 0);
+    });
+}
+
 void run_all_contract_tests() {
     const char* server_bin = std::getenv("CC_SERVER_BIN");
     // 环境变量没传来说明 CMake 接线断了，那必须是失败而不是跳过——
@@ -522,6 +570,7 @@ void run_all_contract_tests() {
 
     run_type_contract_tests(port);
     run_ttl_contract_tests(port);
+    run_expire_semantics_contract_tests(port);
     run_atomicity_contract_tests(port);
     run_protocol_limit_tests(port);
     run_zadd_score_contract_tests(port);
