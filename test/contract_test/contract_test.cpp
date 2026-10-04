@@ -32,11 +32,12 @@ int contract_port() {
     return 20000 + (static_cast<int>(getpid()) % 20000);
 }
 
-pid_t start_server(const std::string& binary, int port) {
+pid_t start_server(const std::string& binary, int port,
+                   const std::string& config_path = "",
+                   const std::string& log_path = "server.log") {
     pid_t pid = fork();
     if (pid != 0) return pid;
 
-    const std::string log_path = "server.log";
     int fd = open(log_path.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0644);
     if (fd >= 0) {
         dup2(fd, STDOUT_FILENO);
@@ -45,11 +46,19 @@ pid_t start_server(const std::string& binary, int port) {
     }
 
     const std::string port_str = std::to_string(port);
-    char* const argv[] = {const_cast<char*>(binary.c_str()),
-                          const_cast<char*>("--port"),
-                          const_cast<char*>(port_str.c_str()),
-                          nullptr};
-    execv(binary.c_str(), argv);
+    // config_path 为空时不带 --config，走"从 build 目录启动、用默认配置"的受支持用法
+    char* const argv_default[] = {const_cast<char*>(binary.c_str()),
+                                  const_cast<char*>("--port"),
+                                  const_cast<char*>(port_str.c_str()),
+                                  nullptr};
+    char* const argv_with_config[] = {const_cast<char*>(binary.c_str()),
+                                      const_cast<char*>("--port"),
+                                      const_cast<char*>(port_str.c_str()),
+                                      const_cast<char*>("--config"),
+                                      const_cast<char*>(config_path.c_str()),
+                                      nullptr};
+    char* const* argv = config_path.empty() ? argv_default : argv_with_config;
+    execv(binary.c_str(), const_cast<char**>(argv));
     _exit(127);  // 只有 execv 失败才会走到
 }
 
@@ -337,6 +346,76 @@ void run_protocol_limit_tests(int port) {
     });
 }
 
+// 容量契约：conf 里的 max_entries 必须真的决定键数量上限。
+//
+// 接线之前 main.cpp 从不读这个键，GlobalStorage 一直用类内的 200 万默认值，于是
+// "配了上限却没有上限"：写 400 个键，一个都不会被淘汰。这条用例为这一点而存在——
+// 它测的是配置到产品的连线，不是淘汰算法本身（算法在 storage 的单测里）。
+void run_capacity_contract_tests(const std::string& binary) {
+    TEST_SUITE("容量上限契约");
+
+    constexpr int kMaxEntries = 60;
+    constexpr int kWrites = 400;
+
+    const int port = contract_port() + 1;  // 与主服务器错开一个端口
+    const std::string tag = std::to_string(static_cast<long>(getpid()));
+    const std::string conf_path = "/tmp/cc_maxentries_" + tag + ".conf";
+    const std::string rdb_path = "/tmp/cc_maxentries_" + tag + ".rdb";
+    const std::string log_path = "/tmp/cc_maxentries_" + tag + ".log";
+    {
+        std::ofstream out(conf_path, std::ios::trunc);
+        out << "port = " << port << "\n"
+            << "max_entries = " << kMaxEntries << "\n"
+            << "rdb_path = " << rdb_path << "\n"
+            << "rdb_save_interval = 0\n"
+            << "log_level = 4\n"
+            << "cluster_enabled = false\n";
+    }
+
+    pid_t server_pid = start_server(binary, port, conf_path, log_path);
+    if (!wait_until_listening(port, 10000)) {
+        std::cout << "带 max_entries 的服务器没有在 10s 内监听 " << port
+                  << "（见 " << log_path << "）\n";
+        EXPECT_TRUE(false);
+        kill(server_pid, SIGTERM);
+        waitpid(server_pid, nullptr, 0);
+        std::remove(conf_path.c_str());
+        return;
+    }
+
+    RUN_TEST(conf_max_entries_actually_limits_key_count) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        for (int i = 0; i < kWrites; ++i) {
+            EXPECT_TRUE(do_cmd(client, {"SET", "mk_" + std::to_string(i), "v"}, reply));
+        }
+        EXPECT_TRUE(do_cmd(client, {"DBSIZE"}, reply));
+        std::cout << "  写完 " << kWrites << " 个键后 DBSIZE = " << reply_text(reply) << "\n";
+        // 淘汰在 90% 触发、回到 60%：留点余量，但必须远低于写入总数
+        EXPECT_TRUE(reply.integer <= kMaxEntries);
+        EXPECT_TRUE(reply.integer < kWrites / 2);
+    });
+
+    RUN_TEST(eviction_keeps_the_newest_and_drops_the_oldest) {
+        RespClient client = connected_client(port);
+        Reply reply;
+
+        EXPECT_TRUE(do_cmd(client, {"GET", "mk_0"}, reply));
+        std::cout << "  GET mk_0（最早写入） = " << reply_text(reply) << "\n";
+        EXPECT_TRUE(reply.nil);
+
+        EXPECT_TRUE(do_cmd(client, {"GET", "mk_" + std::to_string(kWrites - 1)}, reply));
+        std::cout << "  GET mk_" << (kWrites - 1) << "（最新写入） = " << reply_text(reply) << "\n";
+        EXPECT_TRUE(!reply.nil);
+    });
+
+    kill(server_pid, SIGTERM);
+    waitpid(server_pid, nullptr, 0);
+    std::remove(conf_path.c_str());
+    std::remove(rdb_path.c_str());
+    std::remove(log_path.c_str());
+}
+
 void run_all_contract_tests() {
     const char* server_bin = std::getenv("CC_SERVER_BIN");
     // 环境变量没传来说明 CMake 接线断了，那必须是失败而不是跳过——
@@ -368,6 +447,7 @@ void run_all_contract_tests() {
     run_ttl_contract_tests(port);
     run_atomicity_contract_tests(port);
     run_protocol_limit_tests(port);
+    run_capacity_contract_tests(binary);
 
     // 红了要能就地解释。WNOHANG 先问一次：服务器是自己死了还是还活着，决定了
     // 后面这些超时是崩溃还是行为不符 —— #29 那次 main 变红时就分不出来。

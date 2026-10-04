@@ -27,4 +27,8 @@ legacy-file|test/atomic_test/atomic_progressive_test.cpp|历史复现脚本，�
 legacy-file|test/atomic_test/atomic_memory_order_test.cpp|历史复现脚本，与 atomic_correctness_test.cpp 的 main() 互斥
 
 # 配置文件里存在、但代码从未读取的键（配了不生效）。
-config-warn|max_entries|淘汰只按条数上限、未接内存口径，见 set_max_entries 无调用方
+# 已修复：main.cpp 在启动 SubReactorPool 之前把 max_entries 交给
+# GlobalStorage::set_max_entries()，contract 层新增的 run_capacity_contract_tests
+# 会起一个 max_entries = 60 的服务器写 400 个键来验证连线真的生效。
+# 遗留口径说明（不是基线项）：淘汰仍然只按"键条数"判断，没有 Redis 那种按字节
+# 的 maxmemory —— 这是设计选择，不是"配了不生效"。
