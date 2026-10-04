@@ -198,17 +198,25 @@ jobs:
             echo "构建配置：Debug + -fsanitize=address，全部测试 target 编译链接通过。"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # 运行阶段暂时只观察不拦：这是 gate 第一次在 Debug 下跑，而 assert() 只在
-      # Debug 生效且 SIGABRT 不会被 TestSuite 的 try/catch 接住（整个二进制直接没）。
-      # 攒够连续干净结果后，把 continue-on-error 去掉即完成收紧。
-      - name: ASan sweep (observe)
-        continue-on-error: true
+      # 收紧完成：这一步现在拦合并。
+      #
+      # 以前挂着 continue-on-error，理由是"gate 第一次在 Debug 下跑，而 assert() 只在
+      # Debug 生效且 SIGABRT 不会被 TestSuite 的 try/catch 接住"。这个组合的代价是：
+      # asan-smoke 是 required check，而它的测试步骤失败不影响 Job 结论 —— 只要编译过
+      # 就永远显示绿，ASan 报的堆错误、Debug 下活着的 assert 全都拦不住东西。required
+      # 检查里带容错，比这一层干脆不存在更糟，因为它提供的是"已经查过"的错觉。
+      #
+      # 取证（步骤级结论，不是 Job 级）：该步骤在 #40/#41/#42/#43/#44/#45 这一串运行里
+      # 连续 5 次 success；daily 的 sanitizer-address 作业用同一套 Debug+ASan 构型跑
+      # `-L "gate|contract"`，最近两轮也是 success。所以去掉容错不会凭空造红，只是把
+      # 已经存在的信息变成拦截。
+      - name: ASan sweep
         run: |
           set -o pipefail
           ctest --test-dir build -L "gate|contract" -j1 --output-on-failure 2>&1 | tee asan.log
           {
             echo
-            echo "### ASAN 运行结果（不拦合并）"
+            echo "### ASAN 运行结果"
             grep -E "tests passed|tests failed" asan.log || echo "见上方日志"
           } >> "$GITHUB_STEP_SUMMARY"
 
