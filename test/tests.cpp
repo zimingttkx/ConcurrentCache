@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <cassert>
+#include <mutex>
 #include <random>
 #include <future>
 #include <sstream>
@@ -145,10 +146,7 @@ public:
     ThreadPoolOrderTest(size_t num_threads, size_t num_tasks)
         : num_threads_(num_threads)
         , num_tasks_(num_tasks)
-        , task_counter_(0)
-        , completed_counter_(0)
-        , expected_order_(num_tasks + 1, 0)
-        , actual_order_(num_tasks + 1, 0) {
+        , executed_counts_(num_tasks, 0) {
         pool_ = std::make_unique<ThreadPool>(num_threads_);
     }
 
@@ -156,46 +154,45 @@ public:
         std::cout << "  Submitting " << num_tasks_ << " tasks...\n";
 
         for (size_t i = 0; i < num_tasks_; ++i) {
-            size_t order = task_counter_++;
-            pool_->submit([this, order]() {
-                execute_task(order);
+            pool_->submit([this, i]() {
+                execute_task(i);
             });
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(2000));
 
-        std::cout << "  Verifying task order...\n";
-        size_t errors = 0;
+        // 原来这里比的是"完成顺序 == 提交顺序"。4 个 worker 谁先取到任务由调度
+        // 决定，那条断言绿只说明当时的排程凑巧——它不是线程池的性质。改成断言性
+        // 质本身：提交过的每个任务恰好执行一次（没丢、没重复）。
+        std::cout << "  Verifying each task ran exactly once...\n";
+        size_t never_ran = 0;
+        size_t ran_more_than_once = 0;
         for (size_t i = 0; i < num_tasks_; ++i) {
-            if (expected_order_[i] != actual_order_[i]) {
-                errors++;
-                if (errors <= 5) {
-                    std::cout << "    Order mismatch at task " << i << "\n";
-                }
+            if (executed_counts_[i] == 0) {
+                ++never_ran;
+            } else if (executed_counts_[i] != 1) {
+                ++ran_more_than_once;
             }
         }
 
-        if (errors > 0) {
-            std::cout << "  Order errors: " << errors << "\n";
-        } else {
-            std::cout << "  All tasks completed in expected order\n";
-        }
+        EXPECT_EQ(never_ran, static_cast<size_t>(0));
+        EXPECT_EQ(ran_more_than_once, static_cast<size_t>(0));
     }
 
 private:
-    void execute_task(size_t order) {
-        size_t slot = completed_counter_++;
-        actual_order_[slot] = order;
+    void execute_task(const size_t order) {
+        {
+            std::lock_guard<std::mutex> lock(executed_mutex_);
+            ++executed_counts_[order];
+        }
         std::this_thread::sleep_for(std::chrono::microseconds(100));
     }
 
     size_t num_threads_;
     size_t num_tasks_;
     std::unique_ptr<ThreadPool> pool_;
-    std::atomic<size_t> task_counter_;
-    std::atomic<size_t> completed_counter_;
-    std::vector<size_t> expected_order_;
-    std::vector<size_t> actual_order_;
+    std::mutex executed_mutex_;
+    std::vector<size_t> executed_counts_;
 };
 
 class ThreadPoolShutdownTest {
@@ -332,13 +329,12 @@ public:
 
 private:
     void check_result(const std::string& name) {
-        int final_value = counter_.load();
-        if (final_value == expected_final_) {
-            std::cout << "  [" << name << "] Counter correct: " << final_value << "\n";
-        } else {
-            std::cout << "  [" << name << "] Counter WRONG: expected " << expected_final_
-                     << ", got " << final_value << "\n";
-        }
+        const int final_value = counter_.load();
+        std::cout << "  [" << name << "] Counter = " << final_value
+                  << " (expected " << expected_final_ << ")\n";
+        // 原来这条只在 final != expected 时打印一行 "Counter WRONG"，退出码照样
+        // 是 0。Mutex / SpinLock / atomic 三条路径都不允许丢更新，所以直接断言。
+        EXPECT_EQ(final_value, expected_final_);
     }
 
     int num_threads_;
@@ -464,11 +460,9 @@ public:
         int64_t expected = static_cast<int64_t>(num_threads_) * ops_per_thread_;
         std::cout << "  Total operations: " << total << " (expected: " << expected << ")\n";
 
-        if (total == expected) {
-            std::cout << "  [OK] All operations counted correctly\n";
-        } else {
-            std::cout << "  [FAIL] Operation count mismatch\n";
-        }
+        // 这条以前只打印 [FAIL]。打印不会让二进制变红，只有断言会——丢更新恰恰
+        // 是这个用例存在的理由。
+        EXPECT_EQ(total, expected);
     }
 
 private:
@@ -686,9 +680,10 @@ public:
 
         std::cout << "  Success: " << success_count << ", Failures: " << fail_count << "\n";
 
-        if (fail_count == 0) {
-            std::cout << "  [OK] All boundary tests passed\n";
-        }
+        // 每个边界尺寸都必须真的拿到可写的内存。同样是"只打印"的那种检查：
+        // fail_count 非零时二进制照样退出 0。
+        EXPECT_EQ(fail_count, 0);
+        EXPECT_EQ(success_count, static_cast<int>(test_sizes.size()));
     }
 };
 
