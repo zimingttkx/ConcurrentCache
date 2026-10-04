@@ -517,22 +517,18 @@ namespace cc_server {
             const std::string& field = args[2];
             const std::string& value = args[3];
 
-            auto result = GlobalStorage::instance().get(key);
-
-            CacheObject obj;
-            if (result.has_value()) {
-                if (result.value().type() != ObjectType::HASH && result.value().type() != ObjectType::STRING) {
-                    return RespEncoder::encode_error(
-                        "WRONGTYPE Operation against a key holding the wrong kind of value");
-                }
-                obj = std::move(result.value());
+            int64_t added = 0;
+            const bool ok = GlobalStorage::instance().mutate(
+                key, ObjectType::HASH, [&](CacheObject& obj) {
+                    added = obj.hash_exists(field) ? 0 : 1;
+                    obj.hash_set(field, value);
+                    return StoreOp::kWrite;
+                });
+            if (!ok) {
+                return RespEncoder::encode_error(
+                    "WRONGTYPE Operation against a key holding the wrong kind of value");
             }
-
-            bool is_new = !obj.hash_exists(field);
-            obj.hash_set(field, value);
-
-            GlobalStorage::instance().set(key, obj);
-            return RespEncoder::encode_integer(is_new ? 1 : 0);
+            return RespEncoder::encode_integer(added);
         }
 
         [[nodiscard]] std::unique_ptr<Command> clone() const override {
@@ -596,28 +592,24 @@ namespace cc_server {
             }
 
             const std::string& key = args[1];
-            auto result = GlobalStorage::instance().get(key);
-
-            if (!result.has_value()) {
-                return RespEncoder::encode_integer(0);
-            }
-
-            if (result.value().type() != ObjectType::HASH) {
+            int64_t deleted = 0;
+            const bool ok = GlobalStorage::instance().mutate(
+                key, ObjectType::HASH, [&](CacheObject& obj) {
+                    for (size_t i = 2; i < args.size(); ++i) {
+                        if (obj.hash_del(args[i])) {
+                            ++deleted;
+                        }
+                    }
+                    if (deleted == 0) return StoreOp::kNoop;
+                    // 最后一个字段删掉之后键必须消失，不能留一张空哈希
+                    return obj.hash_size() == 0 ? StoreOp::kErase : StoreOp::kWrite;
+                },
+                StringPromotion::kReject);
+            if (!ok) {
                 return RespEncoder::encode_error(
                     "WRONGTYPE Operation against a key holding the wrong kind of value");
             }
-
-            auto obj = std::move(result.value());
-            size_t deleted = 0;
-
-            for (size_t i = 2; i < args.size(); ++i) {
-                if (obj.hash_del(args[i])) {
-                    deleted++;
-                }
-            }
-
-            GlobalStorage::instance().set(key, obj);
-            return RespEncoder::encode_integer(static_cast<int64_t>(deleted));
+            return RespEncoder::encode_integer(deleted);
         }
 
         [[nodiscard]] std::unique_ptr<Command> clone() const override {
@@ -717,26 +709,22 @@ namespace cc_server {
             }
 
             const std::string& key = args[1];
-            auto result = GlobalStorage::instance().get(key);
-
-            CacheObject obj;
-            if (result.has_value()) {
-                if (result.value().type() != ObjectType::SET && result.value().type() != ObjectType::STRING) {
-                    return RespEncoder::encode_error(
-                        "WRONGTYPE Operation against a key holding the wrong kind of value");
-                }
-                obj = std::move(result.value());
+            int64_t added = 0;
+            const bool ok = GlobalStorage::instance().mutate(
+                key, ObjectType::SET, [&](CacheObject& obj) {
+                    for (size_t i = 2; i < args.size(); ++i) {
+                        if (obj.set_add(args[i])) {
+                            ++added;
+                        }
+                    }
+                    // 全是已有成员时什么都没变，不必写回也不该动脏计数
+                    return added == 0 ? StoreOp::kNoop : StoreOp::kWrite;
+                });
+            if (!ok) {
+                return RespEncoder::encode_error(
+                    "WRONGTYPE Operation against a key holding the wrong kind of value");
             }
-
-            size_t added = 0;
-            for (size_t i = 2; i < args.size(); ++i) {
-                if (obj.set_add(args[i])) {
-                    added++;
-                }
-            }
-
-            GlobalStorage::instance().set(key, obj);
-            return RespEncoder::encode_integer(static_cast<int64_t>(added));
+            return RespEncoder::encode_integer(added);
         }
 
         [[nodiscard]] std::unique_ptr<Command> clone() const override {
@@ -759,33 +747,32 @@ namespace cc_server {
             }
 
             const std::string& key = args[1];
-            auto result = GlobalStorage::instance().get(key);
+            std::optional<std::string> popped;
+            const bool ok = GlobalStorage::instance().mutate(
+                key, ObjectType::SET, [&](CacheObject& obj) {
+                    const auto members = obj.set_members();
+                    if (members.empty()) return StoreOp::kNoop;
 
-            if (!result.has_value()) {
-                return RespEncoder::encode_nil();
-            }
+                    // 使用高质量随机数生成器
+                    static thread_local std::mt19937 rng(std::random_device{}());
+                    std::uniform_int_distribution<size_t> dist(0, members.size() - 1);
+                    const size_t idx = dist(rng);
 
-            if (result.value().type() != ObjectType::SET) {
+                    const std::string member = members[idx];
+                    obj.set_remove(member);
+                    popped = member;
+                    // 弹空即删键
+                    return obj.set_size() == 0 ? StoreOp::kErase : StoreOp::kWrite;
+                },
+                StringPromotion::kReject);
+            if (!ok) {
                 return RespEncoder::encode_error(
                     "WRONGTYPE Operation against a key holding the wrong kind of value");
             }
-
-            auto members = result.value().set_members();
-            if (members.empty()) {
+            if (!popped) {
                 return RespEncoder::encode_nil();
             }
-
-            // 使用高质量随机数生成器
-            static thread_local std::mt19937 rng(std::random_device{}());
-            std::uniform_int_distribution<size_t> dist(0, members.size() - 1);
-            size_t idx = dist(rng);
-
-            const std::string& member = members[idx];
-            auto obj = std::move(result.value());
-            obj.set_remove(member);
-
-            GlobalStorage::instance().set(key, obj);
-            return RespEncoder::encode_bulk_string(member);
+            return RespEncoder::encode_bulk_string(popped.value());
         }
 
         [[nodiscard]] std::unique_ptr<Command> clone() const override {
@@ -917,18 +904,11 @@ namespace cc_server {
 
             const std::string& key = args[1];
 
-            auto result = GlobalStorage::instance().get(key);
-
-            CacheObject obj;
-            if (result.has_value()) {
-                if (result.value().type() != ObjectType::ZSET && result.value().type() != ObjectType::STRING) {
-                    return RespEncoder::encode_error(
-                        "WRONGTYPE Operation against a key holding the wrong kind of value");
-                }
-                obj = std::move(result.value());
-            }
-
-            size_t added = 0;
+            // 先把 score 全部解析完再改库：Redis 的语义是任一 score 非法则整条
+            // 命令不做任何改动。放在 mutate 的回调里做不了这件事（回调 return 不
+            // 到外层函数），而且解析失败时键已经被凭空建出来了。
+            std::vector<std::pair<std::string, double>> entries;
+            entries.reserve((args.size() - 2) / 2);
             for (size_t i = 2; i < args.size(); i += 2) {
                 double score;
                 try {
@@ -936,14 +916,24 @@ namespace cc_server {
                 } catch (...) {
                     return RespEncoder::encode_error("ERR invalid score");
                 }
-                const std::string& member = args[i + 1];
-                if (obj.zset_add(member, score)) {
-                    added++;
-                }
+                entries.emplace_back(args[i + 1], score);
             }
 
-            GlobalStorage::instance().set(key, obj);
-            return RespEncoder::encode_integer(static_cast<int64_t>(added));
+            int64_t added = 0;
+            const bool ok = GlobalStorage::instance().mutate(
+                key, ObjectType::ZSET, [&](CacheObject& obj) {
+                    for (const auto& entry : entries) {
+                        if (obj.zset_add(entry.first, entry.second)) {
+                            ++added;
+                        }
+                    }
+                    return added == 0 ? StoreOp::kNoop : StoreOp::kWrite;
+                });
+            if (!ok) {
+                return RespEncoder::encode_error(
+                    "WRONGTYPE Operation against a key holding the wrong kind of value");
+            }
+            return RespEncoder::encode_integer(added);
         }
 
         [[nodiscard]] std::unique_ptr<Command> clone() const override {
