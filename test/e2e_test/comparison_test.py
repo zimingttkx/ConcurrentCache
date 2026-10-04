@@ -783,9 +783,13 @@ class FunctionalTester:
         await c.execute("ZADD", "cmp_zrws", "10", "x", "20", "y")
         r = await c.execute("ZRANGE", "cmp_zrws", "0", "-1", "WITHSCORES")
         await c.close()
-        # 整表逐元素比。原来用的是 "10" in str(r) 这种子串判断，
-        # 而 "10.000000" 里也含 "10" —— 分数打成什么形态它都拦不住。
-        ok = r is not None and list(r) == ["x", "10", "y", "20"]
+        # 整串比。这条脚本的 RESP 客户端**不返回列表**：数组在
+        # `RESP.parse_line` 的 '*' 分支里被拼成一个 "a|b|c" 字符串返回。
+        # #80 写的 list(r) == [...] 于是对两个服务端都永远不成立——那是一次
+        # "两栏同时红"，红的是判据自己，不是行为偏离。
+        # 而原来的 "10" in str(r) 又太松（"10.000000" 里也含 "10"，分数打成
+        # 什么形态都拦不住），所以两头都要：直接比整串。
+        ok = r == "x|10|y|20"
         return (f"ZRANGE WITHSCORES={r}", ok, "")
 
     # ── 过期机制测试 ──
