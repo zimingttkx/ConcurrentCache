@@ -39,6 +39,14 @@
 
 `ci.yml` 的必过门禁覆盖：Release 与 Debug（`assert` 生效）构建、`gate` 层测试、ASan 构建、Docker 构建，以及 `scripts/ci/check_consistency.py` 的四项一致性（命令注册表 vs 复制写白名单、`test/` 文件是否真的进入构建、配置项是否真的被读取、端口三处是否一致）。
 
-覆盖不到的：`contract` 层（断言正确语义而产品尚未满足的用例）与 `daily.yml` 的 sanitizer / 长压测 / e2e 只报告不拦合并。已知尚未修复的缺陷逐条登记在 [`ci/known-failures.txt`](ci/known-failures.txt)——名单规则是每项都必须当前真的失败，所以它只能变短，少一行就是修好一个。
+覆盖不到的：`daily.yml` 的 sanitizer / 长压测 / e2e / 与真 Redis 的对照只报告不拦合并（它们不在 required check 里，红了要人去看，但不会挡住合并）。已知尚未修复的缺陷逐条登记在 [`ci/known-failures.txt`](ci/known-failures.txt)——名单规则是每项都必须当前真的失败，所以它只能变短，少一行就是修好一个。
 
-安全相关的已知未修项（都在名单或审计队列里，不在这份政策粉饰）：RESP 嵌套无深度上限、输入缓冲无上限、集群总线帧长度上界缺失、总线消息不校验来源。
+## 安全相关的已知未修项
+
+只有一条，而且它不是"文档里写着以后再说"就完事的：
+
+**集群总线报文没有真实性认证。** 端口 `port + 10000` 收到的报文不携带任何共享密钥衍生的签名，因此收到即被信任其内容。现有缓解是三道各自的门：帧长上界 256MB 且畸形帧直接断链（否则 `length` 会让接收端越界读最多 4GB）、报文自称的来源地址必须与实际链路地址一致、拒绝自称是本节点的报文。最后一点在同机多节点的部署下（本仓库 e2e 与 daily 的拓扑就是全 `127.0.0.1`）分不出真假——那时任何本机进程都能伪装成任意一个集群成员，而 `sender_name` 正是故障判定与 failover 法定人数的计票单位。
+
+要补的是签名本身，做法与 Redis 的 cluster 总线一致：用一个所有节点相同的共享密钥对帧做 HMAC-SHA256、截断 16 字节附在帧尾，接收端在解析之前用常量时间比较验完再动状态。这需要引入 OpenSSL（`find_package(OpenSSL)` 与全部构建环境的 `libssl-dev`），并把"没配密钥就拒绝总线"定成显式选项而不是静默放过——所以上面那三道门是当前的实际边界，别把它当成已经关闭的洞。
+
+历史上登记在同一处、如今已经修掉的：RESP 数组嵌套深度上限（`resp.{h,cpp}` 的 `kMaxNestingDepth` + `DepthGuard`）、客户端输入/输出缓冲上限与高水位断开（`Connection` 构造时读 `client_query_buffer_limit` / `client_output_buffer_limit`，超限即断链）、总线帧长上界、总线自称来源校验。其中三条有会红的用例守着：缓冲高水位在 `V3Tests`（`test/network_test/connection_lifetime_test.cpp`），帧长边界与来源对账在 `ClusterTests`（`test/cluster_test/cluster_link_framing_test.cpp`），都在 `gate` 层，改回去就挡住合并。嵌套深度那条目前没有专门用例，只有实现里的上限在起作用。
