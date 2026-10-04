@@ -32,3 +32,13 @@ legacy-file|test/atomic_test/atomic_memory_order_test.cpp|历史复现脚本，�
 # 会起一个 max_entries = 60 的服务器写 400 个键来验证连线真的生效。
 # 遗留口径说明（不是基线项）：淘汰仍然只按"键条数"判断，没有 Redis 那种按字节
 # 的 maxmemory —— 这是设计选择，不是"配了不生效"。
+
+# e2e 的 Python 脚本：check_consistency.py 的 4c) 现在要求每个 test/e2e_test/*.py
+# 都被某个 workflow 步骤引用，没接线的登记在这里（每天真跑的只有 failover /
+# psync / cluster_stress / cluster_full / stress_find_limit 这五个，加上对照测试）。
+# 登记的代价是"这脚本从没人跑过、坏了也没人知道"，接进 daily 之后删一行。
+legacy-file|test/e2e_test/e2e_chaos_test.py|未接进任何 job：chaos 场景需要节点被反复杀，跑前要先定判据与耗时预算
+legacy-file|test/e2e_test/e2e_connection_storm.py|未接进任何 job：连接风暴正是 close/生命周期那批修复的靶子，接线价值最高，但要先确认它自己的客户端判据不会误红
+legacy-file|test/e2e_test/e2e_consistency_check.py|未接进任何 job：它的 GET+SET 客户端判据被 #42 判过松（final<=expected 合法成立），接线前先收紧判据
+legacy-file|test/e2e_test/e2e_high_concurrency_load.py|未接进任何 job：与 cluster_stress 的阶梯高度重复，先不重复占用夜间时间
+legacy-file|test/e2e_test/run_all_tests.py|未接进任何 job：只是本地一键入口，真正跑的是它调用的那几个脚本
