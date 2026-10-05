@@ -197,11 +197,19 @@ CLUSTER <SUBCOMMAND> [arg ...]
 
 | 命令 | 语法 | 用途 |
 |------|------|------|
-| `PSYNC` | `PSYNC <runid> <offset>` / `PSYNC ? -1` | 主从同步（增量 / 全量） |
-| `SYNC` | `SYNC` | 旧版同步（已废弃，保留兼容） |
-| `REPLCONF` | `REPLCONF <key> <value>` | 复制配置（`listening-port` / `ack` / `getack`） |
+| `PSYNC` | `PSYNC <runid> <offset>` / `PSYNC ? -1` | **显式拒绝**：本服务器不接受外部 Redis 副本 |
+| `SYNC` | `SYNC` | **显式拒绝**：同上 |
+| `REPLCONF` | `REPLCONF <key> <value>` | **显式拒绝**：同上 |
 
-`PSYNC ? -1` 触发全量同步（主发 RESTORE 键流，详见[集群架构](architecture/cluster.md)）；`PSYNC <runid> <offset>` 尝试增量。复制命令以 RESP 数组二进制安全传输。
+这三条是外部 Redis 副本握手用的。本项目的内部复制**不走客户端口**：`CLUSTER REPLICATE`
+通过集群总线向主节点发 `REPLSYNC:<node>`，主节点侧由 `ReplicationMgr::send_rdb_to_replica()`
+推 RDB 快照，之后的写命令也走总线复制。所以 `REPLICAOF <host> <port>` /
+`redis-cli --replica` 接一个本项目节点不会被支持。
+
+在支持外部副本之前必须先把 RDB 换成 Redis 的方言（版本字节、类型操作码、EOF + CRC64），
+否则"握手成功但一个键都没传"比拒绝更坏。另外 `REPLCONF ACK <n>` 原来会把 `n` 直接写进
+本节点的 `master_repl_offset`，而 failover 的新鲜度判据读的就是这个值 —— 该写入路径
+已随这三条命令一起移除。
 
 ## 14. 迁移
 

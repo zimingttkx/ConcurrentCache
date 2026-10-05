@@ -17,122 +17,41 @@ std::string PsyncCommand::execute(const std::vector<std::string>& args) {
     // PSYNC <runid> <offset>
     // PSYNC ? -1 (full sync request)
 
-    if (!ClusterServer::instance().isEnabled()) {
-        return RespEncoder::encode_error("ERR REPLICAOF is not supported in standalone mode");
-    }
-
-    // 解析参数
-    std::string runid;
-    int64_t offset = -1;
-
-    if (args.size() >= 2) {
-        runid = args[1];
-    }
-    if (args.size() >= 3) {
-        try {
-            offset = std::stoll(args[2]);
-        } catch (...) {
-            // ignore parse error
-        }
-    }
-
-    LOG_INFO(CLUSTER, "PSYNC received: runid=%s, offset=%ld", runid.c_str(), offset);
-
-    auto& repl_mgr = ReplicationMgr::instance();
-
-    // 分支1: 本节点是主节点 — 收到副本发来的 PSYNC 同步请求
-    if (!ClusterServer::instance().isReplica()) {
-        std::string my_runid = repl_mgr.get_master_runid();
-        int64_t my_offset = repl_mgr.get_master_repl_offset();
-
-        // 全量同步: runid 为 "?" 或 offset 为 -1，或 runid 不匹配
-        if (runid == "?" || offset == -1 || runid != my_runid) {
-            std::string response = "+FULLRESYNC " + my_runid + " " + std::to_string(my_offset) + "\r\n";
-            LOG_INFO(CLUSTER, "Sending FULLRESYNC to replica: runid=%s, offset=%ld",
-                     my_runid.c_str(), my_offset);
-            // RESP 简单字符串格式: +FULLRESYNC <runid> <offset>\r\n
-            // 使用 bulk string 编码以便客户端正确解析
-            return RespEncoder::encode_simple_string("FULLRESYNC " + my_runid + " " + std::to_string(my_offset));
-        }
-
-        // 增量同步: runid 匹配
-        LOG_INFO(CLUSTER, "Partial sync: runid matches, offset=%ld, my_offset=%ld",
-                 offset, my_offset);
-        return RespEncoder::encode_simple_string("CONTINUE");
-    }
-
-    // 分支2: 本节点是从节点 — 收到来自主节点的 PSYNC 响应 (不常见，主节点不会主动发 PSYNC)
-    LOG_WARN(CLUSTER, "PSYNC received on replica node, ignoring");
-    return RespEncoder::encode_error("ERR PSYNC not expected on replica node");
+    // 本项目的内部复制不走客户端口的 PSYNC：副本是在 CLUSTER REPLICATE 时通过总线
+    // 发 "REPLSYNC:<node>"，主节点那边调 ReplicationMgr::send_rdb_to_replica()。
+    //
+    // 这个处理器原来的行为是：回 "+FULLRESYNC <runid> <offset>"，然后**什么都不发**
+    // ——不发 RDB，也不接命令流。真 Redis 拿 REPLICAOF 接上来会得到"握手成功、
+    // 零数据、状态 online"，比直接拒绝坏得多（运维以为已经有副本了）。
+    // 要对外提供副本服务，得先把 RDB 换成 Redis 的方言（版本字节、类型操作码、
+    // EOF + CRC64），那是另一件事；在没做之前必须显式拒绝，见 docs/api.md §13。
+    (void)args;
+    LOG_WARN(CLUSTER, "PSYNC rejected: 不接受外部 Redis 副本，内部复制走集群总线（REPLSYNC）");
+    return RespEncoder::encode_error(
+        "ERR this server does not accept external replicas; internal replication uses the cluster bus");
 }
 
 std::string SyncCommand::execute(const std::vector<std::string>& args) {
-    // SYNC 命令（兼容旧版 Redis，等同于 PSYNC ? -1）
-    // 直接委托给 PSYNC 全量同步逻辑
+    // 同 PSYNC：不再委托给一个"只握手不回数据"的处理器。
     (void)args;
-
-    LOG_INFO(CLUSTER, "SYNC command received (legacy, delegating to PSYNC)");
-
-    if (!ClusterServer::instance().isEnabled()) {
-        return RespEncoder::encode_error("ERR SYNC not supported in standalone mode");
-    }
-
-    // 构建 PSYNC ? -1 参数列表，委托给 PsyncCommand
-    std::vector<std::string> psync_args = {"PSYNC", "?", "-1"};
-    PsyncCommand psync_cmd;
-    return psync_cmd.execute(psync_args);
+    LOG_WARN(CLUSTER, "SYNC rejected: 不接受外部 Redis 副本，内部复制走集群总线（REPLSYNC）");
+    return RespEncoder::encode_error(
+        "ERR this server does not accept external replicas; internal replication uses the cluster bus");
 }
 
 std::string ReplconfCommand::execute(const std::vector<std::string>& args) {
-    // REPLCONF 命令处理
-    // 格式：
-    //   REPLCONF listening-port <port>
-    //   REPLCONF ACK <offset>
-    //   REPLCONF GETACK <ack_offset>
-
-    if (args.size() < 2) {
-        return RespEncoder::encode_error("ERR wrong number of arguments for 'replconf' command");
-    }
-
-    const std::string& subcmd = args[1];
-
-    if (subcmd == "listening-port" && args.size() >= 3) {
-        // 副本报告监听的端口
-        std::string port_str = args[2];
-        LOG_DEBUG(CLUSTER, "REPLCONF listening-port: %s", port_str.c_str());
-        return RespEncoder::encode_simple_string("OK");
-
-    } else if (subcmd == "ACK" && args.size() >= 3) {
-        // 副本确认已处理的复制偏移量
-        std::string offset_str = args[2];
-        try {
-            int64_t offset = std::stoll(offset_str);
-            ReplicationMgr::instance().set_master_repl_offset(offset);
-            LOG_DEBUG(CLUSTER, "REPLCONF ACK: offset=%ld", offset);
-        } catch (...) {
-            // ignore
-        }
-        return RespEncoder::encode_simple_string("OK");
-
-    } else if (subcmd == "GETACK" && args.size() >= 3) {
-        // 主节点请求副本确认偏移量
-        std::string ack_offset_str = args[2];
-        int64_t ack_offset = 0;
-        try {
-            ack_offset = std::stoll(ack_offset_str);
-        } catch (...) {
-            // ignore
-        }
-
-        int64_t master_offset = ReplicationMgr::instance().get_master_repl_offset();
-        std::string response = "REPLCONF ACK " + std::to_string(master_offset) + "\r\n";
-        LOG_DEBUG(CLUSTER, "REPLCONF GETACK: requested=%ld, current=%ld", ack_offset, master_offset);
-
-        return RespEncoder::encode_bulk_string(response);
-
-    } else {
-        return RespEncoder::encode_error("ERR syntax error in REPLCONF command");
-    }
+    // REPLCONF 是外部副本握手的一部分，本服务器不接受外部副本（见 PsyncCommand）。
+    //
+    // 这里另外有两条真问题，一并拿掉：
+    //   1. "REPLCONF ACK <n>" 把 <n> 直接写进本节点的 master_repl_offset，而 failover
+    //      的新鲜度判据读的就是这个值 —— 客户端口上任何进程都能把一个空副本的偏移量
+    //      报成很新，让它在选举里被当成合格副本。
+    //   2. GETACK 把 "REPLCONF ACK <n>\r\n" 整行当 bulk string 回出去，那是 Redis 的
+    //      行协议文本，不是一个 RESP 值。
+    (void)args;
+    LOG_WARN(CLUSTER, "REPLCONF rejected: 外部副本握手不受支持（原先 ACK 会改写主节点偏移量）");
+    return RespEncoder::encode_error(
+        "ERR this server does not accept external replicas; internal replication uses the cluster bus");
 }
 
 } // namespace cc_server
