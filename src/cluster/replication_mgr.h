@@ -96,6 +96,18 @@ public:
     // 处理收到的复制命令（副本端调用）
     void handle_replication_command(const std::string& cmd_line);
 
+    /**
+     * @brief 执行一条总线送来的命令，并把 RESP 回复**带回来**
+     *
+     * handle_replication_command() 是 fire-and-forget：副本只需要写生效，回复被丢掉。
+     * CLUSTER MIGRATE 不一样 —— 它必须知道目标节点回的是 +OK 还是 -BUSYKEY，
+     * 因为只有确认成功才能删源键；否则就是"目标没收下、源已经删了"的数据丢失。
+     *
+     * @param cmd_line RESP 数组文本（与复制键流同一种编码）
+     * @return 命令的 RESP 回复；解析失败/命令不存在时返回对应的错误回复
+     */
+    std::string execute_bus_command_line(const std::string& cmd_line);
+
     // 更新副本的确认偏移量
     void update_replica_ack_offset(const std::string& replica_name, int64_t offset);
 

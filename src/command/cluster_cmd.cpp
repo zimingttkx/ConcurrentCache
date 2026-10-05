@@ -863,12 +863,35 @@ std::string ClusterCommand::handleMigrate(const std::vector<std::string>& args) 
         restore_args.push_back("REPLACE");
     }
 
-    // 发送 RESTORE 命令到目标节点
-    if (!conn->send_command_to_node(target_name, restore_args)) {
-        return RespEncoder::encode_error("ERR failed to send data to target node");
+    // 把 RESTORE 发过去，并**等目标节点的回复**。
+    //
+    // 两处原来都不对：
+    //   1. 以前用 send_command_to_node()，它只告诉你"发出去了没有"，而回复被
+    //      接收端丢弃 —— 于是这条命令其实从来没把数据搬走过（RESTORE 的参数
+    //      被拆成多个总线参数，接收端只执行 args[0] 那个裸的 "RESTORE"），
+    //      客户端却收到 +OK。现在整条命令按复制键流那种 RESP 数组发，并且
+    //      要求回复。
+    //   2. 就算数据送到了，也不能凭空删源键：目标可能回 -BUSYKEY（键已存在且
+    //      没带 REPLACE）。"目标没收下、源已经删了"是数据丢失，比留下重复键更糟。
+    //      所以只有确认 +OK 之后才删。timeout 是这次往返的上限，到点报错、源键不动。
+    std::string target_reply;
+    if (!conn->send_command_and_wait(target_name, restore_args, timeout, target_reply)) {
+        return RespEncoder::encode_error(
+            "ERR MIGRATE timed out or could not reach the target node; the source key was kept");
+    }
+    if (target_reply.compare(0, 3, "+OK") != 0) {
+        // 把对端的错误原样转给客户端（-BUSYKEY ... 之类），但别顺手删源键
+        if (!target_reply.empty() && target_reply[0] == '-') {
+            return RespEncoder::encode_error("ERR target node replied: " +
+                                             target_reply.substr(1, target_reply.find("\r\n") - 1));
+        }
+        return RespEncoder::encode_error("ERR target node returned an unexpected reply");
     }
 
-    LOG_INFO(CLUSTER, "MIGRATE completed: key=%s -> %s:%d", key.c_str(), host.c_str(), port);
+    // 目标确认收下了，才动源键（Redis 的 MIGRATE 语义：默认就是移动，不是复制）
+    const bool removed = GlobalStorage::instance().del(key);
+    LOG_INFO(CLUSTER, "MIGRATE completed: key=%s -> %s:%d source_removed=%d",
+             key.c_str(), host.c_str(), port, removed ? 1 : 0);
     return RespEncoder::encode_simple_string("OK");
 }
 

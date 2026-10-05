@@ -287,6 +287,99 @@ bool ClusterConnection::send_command_to_node(const std::string& node_name,
     return link->send_msg(msg);
 }
 
+namespace {
+
+    int64_t bus_steady_now_ms() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+
+    // "CCREQ <id> <其余全部>" / "CCRESP <id> <其余全部>"。id 之后的所有内容都算载荷，
+    // 因为回复本身是 RESP 文本，里面出现空格和 \r\n 是正常的。
+    bool parse_bus_tagged(const std::string& text, const char* prefix,
+                          uint64_t& id, std::string& body) {
+        const std::string head(prefix);
+        if (text.size() <= head.size() || text.compare(0, head.size(), head) != 0) return false;
+        const size_t space = text.find(' ', head.size());
+        if (space == std::string::npos) return false;
+        const std::string id_text = text.substr(head.size(), space - head.size());
+        try {
+            size_t consumed = 0;
+            id = std::stoull(id_text, &consumed);
+            if (consumed != id_text.size()) return false;   // "12x" 不许当 12 收下
+        } catch (...) {
+            return false;
+        }
+        body = text.substr(space + 1);
+        return true;
+    }
+
+}  // namespace
+
+bool ClusterConnection::send_command_and_wait(const std::string& node_name,
+                                              const std::vector<std::string>& args,
+                                              int timeout_ms, std::string& reply) {
+    reply.clear();
+    if (args.empty() || timeout_ms <= 0) return false;
+
+    // 与复制键流同一种编码：整条命令编成 RESP 数组，作为**一个**参数发出去。
+    // MIGRATE 原来是把 token 逐个放进 msg.args，而接收端只执行 msg.args[0]，
+    // 也就是裸的 "RESTORE"：参数一个都没送到，回复又被丢掉，于是这条命令其实
+    // 从来没把数据搬走过，却照样给客户端回 +OK。
+    const std::string resp_cmd = RespEncoder::encode_array(args);
+
+    const uint64_t request_id = next_request_id_.fetch_add(1);
+    const int64_t now_ms = bus_steady_now_ms();
+    {
+        std::lock_guard<std::mutex> lock(pending_replies_mutex_);
+        // 顺手清掉已经没人等的条目（回复比超时晚到的那种：慢对端或中途断链）
+        for (auto stale = pending_replies_.begin(); stale != pending_replies_.end();) {
+            if (stale->second.deadline_ms < now_ms) stale = pending_replies_.erase(stale);
+            else ++stale;
+        }
+        PendingBusReply entry;
+        entry.deadline_ms = now_ms + timeout_ms;
+        pending_replies_.emplace(request_id, std::move(entry));
+    }
+
+    std::vector<std::string> bus_args;
+    bus_args.push_back("CCREQ " + std::to_string(request_id) + " " + resp_cmd);
+    if (!send_command_to_node(node_name, bus_args)) {
+        std::lock_guard<std::mutex> lock(pending_replies_mutex_);
+        pending_replies_.erase(request_id);
+        return false;
+    }
+
+    std::unique_lock<std::mutex> lock(pending_replies_mutex_);
+    const bool arrived = pending_replies_cv_.wait_for(
+        lock, std::chrono::milliseconds(timeout_ms), [this, request_id] {
+            const auto done_it = pending_replies_.find(request_id);
+            return done_it == pending_replies_.end() || done_it->second.done;
+        });
+
+    const auto found = pending_replies_.find(request_id);
+    if (!arrived || found == pending_replies_.end() || !found->second.done) {
+        pending_replies_.erase(request_id);
+        LOG_WARN(CLUSTER, "send_command_and_wait: %s 在 %dms 内没有回复这条命令",
+                 node_name.c_str(), timeout_ms);
+        return false;
+    }
+    reply = found->second.reply;
+    pending_replies_.erase(found);
+    return true;
+}
+
+void ClusterConnection::deliver_command_reply(uint64_t request_id, const std::string& reply) {
+    {
+        std::lock_guard<std::mutex> lock(pending_replies_mutex_);
+        const auto it = pending_replies_.find(request_id);
+        if (it == pending_replies_.end()) return;   // 等待者已经超时走人，回复直接丢
+        it->second.reply = reply;
+        it->second.done = true;
+    }
+    pending_replies_cv_.notify_all();
+}
+
 bool ClusterConnection::send_raw_to_node(const std::string& node_name,
                                          const std::string& data) {
     auto link = find_link(node_name);
@@ -627,7 +720,31 @@ void ClusterConnection::handle_link_msg(ClusterMsg&& msg, ClusterLink* link) {
                  sender_name_str.c_str(), msg.args.empty() ? "empty" : msg.args[0].c_str());
         if (!msg.args.empty()) {
             const std::string& cmd_line = msg.args[0];
-            if (cmd_line.rfind("REPLSYNC:", 0) == 0) {
+            uint64_t tagged_id = 0;
+            std::string tagged_body;
+            if (parse_bus_tagged(cmd_line, "CCREQ ", tagged_id, tagged_body)) {
+                // 这是一条要求回复的命令（目前只有 CLUSTER MIGRATE 的 RESTORE）。
+                // 执行完沿同一条 link 把回复送回去。这里不销毁任何东西，
+                // 所以从 handle_read 的栈里回写是安全的（#79 管的是销毁，不是发送）。
+                std::string exec_out;
+                try {
+                    exec_out = ReplicationMgr::instance().execute_bus_command_line(tagged_body);
+                } catch (const std::exception& e) {
+                    exec_out = RespEncoder::encode_error(std::string("ERR command threw: ") + e.what());
+                } catch (...) {
+                    exec_out = RespEncoder::encode_error("ERR command threw unknown exception");
+                }
+                ClusterMsg ack;
+                ack.header.type = static_cast<uint16_t>(ClusterMsgType::kRepData);
+                ack.args.push_back("CCRESP " + std::to_string(tagged_id) + " " + exec_out);
+                if (link != nullptr) {
+                    link->send_msg(ack);
+                }
+            } else if (parse_bus_tagged(cmd_line, "CCRESP ", tagged_id, tagged_body)) {
+                // 对端还来的命令回复：交给等待者。绝对不能当成写命令执行一遍 ——
+                // "+OK\r\n" 走到 handle_replication_command 会被空格切成一条假命令。
+                deliver_command_reply(tagged_id, tagged_body);
+            } else if (cmd_line.rfind("REPLSYNC:", 0) == 0) {
                 // 这是复制同步请求: "REPLSYNC:<replica_name>"
                 std::string replica_name = cmd_line.substr(9);
                 LOG_INFO(CLUSTER, "Received replication sync request from %s (replica=%s)",
