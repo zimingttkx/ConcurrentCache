@@ -541,6 +541,153 @@ void run_expire_semantics_contract_tests(int port) {
     });
 }
 
+// SET 的选项契约。
+//
+// 这一条补的是最容易被真实客户端撞到、又完全没有覆盖的缺口：以前 SET 只认
+// "SET key value" 三个参数，redis-py 的 set(..., ex=…) 和 Jedis 的 SetParams
+// 直接打不进来。每个用例都同时断言"回复"和"落库的副作用"，只断言回复的话，
+// 一个把 TTL 吞掉但照样回 +OK 的实现能蒙过去。
+void run_set_option_contract_tests(int port) {
+    TEST_SUITE("SET 选项契约");
+
+    RUN_TEST(set_ex_sets_a_real_ttl) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client, {"SET", "so_ex", "v", "EX", "100"}, reply));
+        EXPECT_TRUE(reply.starts_with("OK"));
+        EXPECT_TRUE(do_cmd(client, {"TTL", "so_ex"}, reply));
+        // 必须真的装了过期时间：0 或 -1 都说明 TTL 被吞了
+        EXPECT_TRUE(reply.integer > 0 && reply.integer <= 100);
+    });
+
+    RUN_TEST(set_px_sets_millisecond_ttl) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client, {"SET", "so_px", "v", "PX", "10000"}, reply));
+        EXPECT_TRUE(reply.starts_with("OK"));
+        EXPECT_TRUE(do_cmd(client, {"PTTL", "so_px"}, reply));
+        EXPECT_TRUE(reply.integer > 0 && reply.integer <= 10000);
+    });
+
+    RUN_TEST(set_rejects_non_positive_and_non_numeric_expiry) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client, {"SET", "so_bad", "v", "EX", "0"}, reply));
+        EXPECT_TRUE(reply.is_error());
+        EXPECT_TRUE(do_cmd(client, {"SET", "so_bad", "v", "EX", "-5"}, reply));
+        EXPECT_TRUE(reply.is_error());
+        // "10abc" 不能读个前缀就当 10 收下
+        EXPECT_TRUE(do_cmd(client, {"SET", "so_bad", "v", "EX", "10abc"}, reply));
+        EXPECT_TRUE(reply.is_error());
+        EXPECT_TRUE(do_cmd(client, {"EXISTS", "so_bad"}, reply));
+        EXPECT_EQ(reply.integer, 0);
+    });
+
+    RUN_TEST(set_nx_only_writes_when_absent) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client, {"SET", "so_nx", "first", "NX"}, reply));
+        EXPECT_TRUE(reply.starts_with("OK"));
+        EXPECT_TRUE(do_cmd(client, {"SET", "so_nx", "second", "NX"}, reply));
+        EXPECT_TRUE(reply.nil);                      // 条件不满足必须回 nil，不是 +OK
+        EXPECT_TRUE(do_cmd(client, {"GET", "so_nx"}, reply));
+        EXPECT_EQ(reply.str, std::string("first"));   // 而且旧值没被动过
+    });
+
+    RUN_TEST(set_xx_only_writes_when_present) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client, {"DEL", "so_xx"}, reply));
+        EXPECT_TRUE(do_cmd(client, {"SET", "so_xx", "v", "XX"}, reply));
+        EXPECT_TRUE(reply.nil);
+        EXPECT_TRUE(do_cmd(client, {"EXISTS", "so_xx"}, reply));
+        EXPECT_EQ(reply.integer, 0);                  // 键不存在时 XX 不能把它创建出来
+        EXPECT_TRUE(do_cmd(client, {"SET", "so_xx", "base"}, reply));
+        EXPECT_TRUE(do_cmd(client, {"SET", "so_xx", "v2", "XX"}, reply));
+        EXPECT_TRUE(reply.starts_with("OK"));
+        EXPECT_TRUE(do_cmd(client, {"GET", "so_xx"}, reply));
+        EXPECT_EQ(reply.str, std::string("v2"));
+    });
+
+    RUN_TEST(set_get_returns_the_previous_value) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client, {"DEL", "so_get"}, reply));
+        EXPECT_TRUE(do_cmd(client, {"SET", "so_get", "old", "GET"}, reply));
+        EXPECT_TRUE(reply.nil);                        // 原来没有值 → nil
+        EXPECT_TRUE(do_cmd(client, {"SET", "so_get", "new", "GET"}, reply));
+        EXPECT_EQ(reply.str, std::string("old"));      // 回的是写入前的旧值，不是 +OK
+        EXPECT_TRUE(do_cmd(client, {"GET", "so_get"}, reply));
+        EXPECT_EQ(reply.str, std::string("new"));      // 新值确实写进去了
+    });
+
+    RUN_TEST(set_keepttl_preserves_expiry_but_plain_set_clears_it) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client, {"SET", "so_keep", "v", "EX", "100"}, reply));
+        EXPECT_TRUE(do_cmd(client, {"SET", "so_keep", "v2", "KEEPTTL"}, reply));
+        EXPECT_TRUE(reply.starts_with("OK"));
+        EXPECT_TRUE(do_cmd(client, {"TTL", "so_keep"}, reply));
+        EXPECT_TRUE(reply.integer > 0);                // KEEPTTL 保住了 TTL
+        EXPECT_TRUE(do_cmd(client, {"SET", "so_keep", "v3"}, reply));
+        EXPECT_TRUE(do_cmd(client, {"TTL", "so_keep"}, reply));
+        EXPECT_EQ(reply.integer, -1);                  // 普通 SET 按 Redis 语义清掉 TTL
+    });
+
+    RUN_TEST(set_rejects_bad_option_combinations) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client, {"SET", "so_combo", "v", "NX", "XX"}, reply));
+        EXPECT_TRUE(reply.is_error());
+        EXPECT_TRUE(do_cmd(client, {"SET", "so_combo", "v", "EX", "10", "PX", "10"}, reply));
+        EXPECT_TRUE(reply.is_error());
+        EXPECT_TRUE(do_cmd(client, {"SET", "so_combo", "v", "EX", "10", "KEEPTTL"}, reply));
+        EXPECT_TRUE(reply.is_error());
+        EXPECT_TRUE(do_cmd(client, {"SET", "so_combo", "v", "NX", "GET"}, reply));
+        EXPECT_TRUE(reply.is_error());
+        EXPECT_TRUE(do_cmd(client, {"SET", "so_combo", "v", "FOO"}, reply));
+        EXPECT_TRUE(reply.is_error());
+        EXPECT_TRUE(do_cmd(client, {"SET", "so_combo", "v", "EX"}, reply));   // 选项缺参数
+        EXPECT_TRUE(reply.is_error());
+        EXPECT_TRUE(do_cmd(client, {"EXISTS", "so_combo"}, reply));
+        EXPECT_EQ(reply.integer, 0);
+    });
+
+    RUN_TEST(set_options_are_case_insensitive) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client, {"SET", "so_case", "v", "ex", "100", "nx"}, reply));
+        EXPECT_TRUE(reply.starts_with("OK"));
+        EXPECT_TRUE(do_cmd(client, {"TTL", "so_case"}, reply));
+        EXPECT_TRUE(reply.integer > 0 && reply.integer <= 100);
+    });
+
+    RUN_TEST(set_exat_in_the_past_deletes_instead_of_writing) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client, {"SET", "so_past", "base"}, reply));
+        EXPECT_TRUE(do_cmd(client, {"SET", "so_past", "gone", "EXAT", "1000"}, reply));
+        EXPECT_TRUE(reply.starts_with("OK"));
+        EXPECT_TRUE(do_cmd(client, {"EXISTS", "so_past"}, reply));
+        EXPECT_EQ(reply.integer, 0);                   // 绝对时刻已过：键被删掉，不留新值
+        EXPECT_TRUE(do_cmd(client, {"SET", "so_past2", "base"}, reply));
+        EXPECT_TRUE(do_cmd(client, {"SET", "so_past2", "gone", "EXAT", "1000", "GET"}, reply));
+        EXPECT_EQ(reply.str, std::string("base"));      // GET 变体回的是被删前的旧值
+    });
+
+    RUN_TEST(set_get_on_a_hash_key_is_wrongtype) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client, {"DEL", "so_type"}, reply));
+        EXPECT_TRUE(do_cmd(client, {"HSET", "so_type", "f", "v"}, reply));
+        EXPECT_TRUE(do_cmd(client, {"SET", "so_type", "v2", "GET"}, reply));
+        EXPECT_TRUE(reply.is_error());
+        EXPECT_EQ(reply.str, std::string("WRONGTYPE Operation against a key holding the wrong kind of value"));
+        EXPECT_TRUE(do_cmd(client, {"HGET", "so_type", "f"}, reply));
+        EXPECT_EQ(reply.str, std::string("v"));         // 报 WRONGTYPE 时不许动原对象
+    });
+}
+
 void run_all_contract_tests() {
     const char* server_bin = std::getenv("CC_SERVER_BIN");
     // 环境变量没传来说明 CMake 接线断了，那必须是失败而不是跳过——
@@ -574,6 +721,7 @@ void run_all_contract_tests() {
     run_atomicity_contract_tests(port);
     run_protocol_limit_tests(port);
     run_zadd_score_contract_tests(port);
+    run_set_option_contract_tests(port);
     run_capacity_contract_tests(binary);
 
     // 红了要能就地解释。WNOHANG 先问一次：服务器是自己死了还是还活着，决定了

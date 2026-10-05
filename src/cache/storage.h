@@ -20,6 +20,13 @@ namespace cc_server {
     // entry.expire_at_ms" 双判，于是 PERSIST 只清得掉字典、清不掉条目，
     // GET 仍然把键当过期删掉（SETEX/PERSIST 组合下必现，v3 单测和契约测试
     // 都撞过）。冗余副本已经没有读者，直接删掉，避免下一条读路径又去 OR 它。
+    /**
+     * @brief SET 的 NX / XX 条件
+     *
+     * 用枚举而不是两个 bool：这两种条件互斥，bool 组合能被调用方同时置 true。
+     */
+    enum class SetCondition { kNone, kOnlyIfAbsent, kOnlyIfExists };
+
     struct CacheEntry {
         CacheObject value;  // 替换原来的 std::string value
         std::atomic<int64_t> last_access_time_ms;  // 原子：读路径可能并发更新（修复 P1-4）
@@ -178,6 +185,25 @@ namespace cc_server {
          * @note 用于 SETEX 等需要原子性设置值和过期时间的场景
          */
         void set_with_expire(const std::string& key, const CacheObject& value, int64_t ttl_ms);
+
+        /**
+         * @brief SET 的条件写：判定、取旧值、写入、TTL 变更在同一次分片独占锁里完成
+         *
+         * 不能用 exist() + set() 拼出来 —— 判断和写入之间别的线程可以插进去，
+         * 于是两个客户端都认为自己抢到了 NX。容器命令的读-改-写踩过同一个坑，
+         * 后来由 mutate() 收口，这里是同一件事的 SET 版本。
+         *
+         * @param condition  kOnlyIfAbsent = NX，kOnlyIfExists = XX，kNone = 无条件写
+         * @param ttl_ms     >0 设相对过期；<=0 表示"无过期"，会清掉键上原有的 TTL
+         * @param keep_ttl   为真时保留原有绝对过期时刻，忽略 ttl_ms（SET KEEPTTL）
+         * @param previous   带出写入前键里的值；键不存在或已过期时为空（SET GET 用）
+         * @return 是否真的写入了。条件不满足时返回 false，此时不改动任何状态。
+         *
+         * @note 已过期的键按"不存在"处理（Redis 语义），并且顺手把条目和过期记录清掉。
+         */
+        bool set_conditional(const std::string& key, const CacheObject& value,
+                             SetCondition condition, int64_t ttl_ms, bool keep_ttl,
+                             std::optional<CacheObject>& previous);
 
         // 设置键的过期时间（供 RDB 加载时使用）
         void set_expire(const std::string& key, int64_t ttl_ms);

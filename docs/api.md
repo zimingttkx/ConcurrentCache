@@ -53,7 +53,7 @@ PING [message]
 | 命令 | 语法 | 返回 | 复杂度 |
 |------|------|------|--------|
 | `GET` | `GET key` | `$N\r\nvalue\r\n` 或 `$-1\r\n` | O(1) |
-| `SET` | `SET key value` | `+OK\r\n`（覆盖写入并清除该 key 已有的 TTL，等同 PERSIST） | O(1) |
+| `SET` | `SET key value [EX s \| PX ms \| EXAT unix秒 \| PXAT unix毫秒 \| KEEPTTL] [NX \| XX] [GET]` | 无选项时 `+OK\r\n`（覆盖写入并清除该 key 已有的 TTL，等同 PERSIST）；`NX`/`XX` 条件不满足回 `$-1\r\n`；带 `GET` 回写入前的旧值（旧值不是字符串类型时回 `WRONGTYPE`） | O(1) |
 | `DEL` | `DEL key [key ...]` | `:N\r\n`（删除成功的 key 数） | O(N) |
 | `EXISTS` | `EXISTS key` | `:1\r\n` 或 `:0\r\n`（已过期但尚未被删除的 key 返回 0） | O(1) |
 | `INCR` | `INCR key` | 递增后整数值（原子） | O(1) |
