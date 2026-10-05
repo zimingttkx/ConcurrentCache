@@ -7,6 +7,8 @@
 #include "datatype/object.h"
 #include <chrono>
 #include <cmath>
+#include <cctype>
+#include <charconv>
 #include <limits>
 #include <random>
 
@@ -99,22 +101,153 @@ namespace cc_server {
     class SetCommand : public Command {
     public:
         std::string execute(const std::vector<std::string> &args) override {
-            // 参数验证：SET 命令需要 3 个参数 [命令名, key, value]
-            if (args.size() != 3) {
+            // SET key value [EX 秒 | PX 毫秒 | EXAT unix秒 | PXAT unix毫秒 | KEEPTTL]
+            //             [NX | XX] [GET]
+            //
+            // 以前这里只认 args.size() == 3，多余参数一律 wrong number of arguments，
+            // 于是 redis-py 的 set(..., ex=…)、Jedis 的 SetParams 全都打不进来。
+            if (args.size() < 3) {
                 return RespEncoder::encode_error("ERR wrong number of arguments for 'set' command");
             }
 
             const std::string& key = args[1];
             const std::string& value = args[2];
 
-            // 将字符串包装为 CacheObject
-            GlobalStorage::instance().set(key, CacheObject(value));
+            enum class ExpMode { kNone, kEx, kPx, kExat, kPxat };
+            ExpMode mode = ExpMode::kNone;
+            long long raw = 0;
+            bool nx = false, xx = false, want_get = false, keep_ttl = false;
 
-            return RespEncoder::encode_ok();
+            for (size_t i = 3; i < args.size(); ++i) {
+                const std::string opt = to_upper(args[i]);   // Redis 的 SET 选项大小写不敏感
+                if (opt == "EX" || opt == "PX" || opt == "EXAT" || opt == "PXAT") {
+                    if (mode != ExpMode::kNone || keep_ttl) {
+                        return RespEncoder::encode_error("ERR syntax error");  // 只能指定一种过期方式
+                    }
+                    if (i + 1 >= args.size()) {
+                        return RespEncoder::encode_error("ERR syntax error");
+                    }
+                    if (!parse_ll(args[++i], raw)) {
+                        return RespEncoder::encode_error("ERR value is not an integer or out of range");
+                    }
+                    mode = (opt == "EX")     ? ExpMode::kEx
+                           : (opt == "PX")   ? ExpMode::kPx
+                           : (opt == "EXAT") ? ExpMode::kExat
+                                             : ExpMode::kPxat;
+                } else if (opt == "NX") {
+                    if (xx || nx) return RespEncoder::encode_error("ERR syntax error");
+                    nx = true;
+                } else if (opt == "XX") {
+                    if (xx || nx) return RespEncoder::encode_error("ERR syntax error");
+                    xx = true;
+                } else if (opt == "GET") {
+                    want_get = true;
+                } else if (opt == "KEEPTTL") {
+                    if (mode != ExpMode::kNone || keep_ttl) {
+                        return RespEncoder::encode_error("ERR syntax error");
+                    }
+                    keep_ttl = true;
+                } else {
+                    return RespEncoder::encode_error("ERR syntax error");
+                }
+            }
+
+            // Redis 明确拒绝 NX 与 GET 同时出现（两者对"没写成功"的回复互相矛盾）。
+            // 文案没对真 Redis 核过，所以用例只断言它必须报错。
+            if (nx && want_get) {
+                return RespEncoder::encode_error("ERR syntax error");
+            }
+
+            const int64_t now = GlobalStorage::instance().current_time_ms();
+            constexpr long long kMax = std::numeric_limits<long long>::max();
+            int64_t ttl_ms = 0;
+            bool already_expired = false;
+            if (mode == ExpMode::kEx || mode == ExpMode::kPx) {
+                if (raw <= 0) {
+                    return RespEncoder::encode_error("ERR invalid expire time in 'set' command");
+                }
+                if (mode == ExpMode::kEx && raw > kMax / 1000) {
+                    return RespEncoder::encode_error("ERR invalid expire time in 'set' command");
+                }
+                ttl_ms = (mode == ExpMode::kEx) ? raw * 1000 : raw;
+            } else if (mode == ExpMode::kExat || mode == ExpMode::kPxat) {
+                if (raw < 0) {
+                    return RespEncoder::encode_error("ERR invalid expire time in 'set' command");
+                }
+                const int64_t abs_ms = (mode == ExpMode::kExat)
+                                           ? (raw > kMax / 1000 ? kMax : raw * 1000)
+                                           : raw;
+                if (abs_ms <= now) {
+                    already_expired = true;   // 绝对时刻已经过去：SET 不写值，改成删键
+                } else {
+                    ttl_ms = abs_ms - now;    // 存储层只吃相对时长
+                }
+            }
+
+            const bool wrong_type = want_get && is_non_string(key);
+            if (wrong_type) {
+                return RespEncoder::encode_error(
+                    "WRONGTYPE Operation against a key holding the wrong kind of value");
+            }
+
+            if (already_expired) {
+                std::optional<CacheObject> cur = GlobalStorage::instance().get(key);
+                const bool present = cur.has_value();
+                if ((nx && present) || (xx && !present)) {
+                    return RespEncoder::encode_nil();   // 条件不满足：一个字节都不动
+                }
+                GlobalStorage::instance().del(key);
+                if (want_get) {
+                    if (!present) return RespEncoder::encode_nil();
+                    return RespEncoder::encode_bulk_string(cur->get_string().value_or(""));
+                }
+                return RespEncoder::encode_ok();
+            }
+
+            const SetCondition condition = nx ? SetCondition::kOnlyIfAbsent
+                                              : (xx ? SetCondition::kOnlyIfExists
+                                                    : SetCondition::kNone);
+            std::optional<CacheObject> previous;
+            const bool applied = GlobalStorage::instance().set_conditional(
+                key, CacheObject(value), condition, keep_ttl ? 0 : ttl_ms, keep_ttl, previous);
+
+            if (want_get) {
+                if (!applied || !previous) return RespEncoder::encode_nil();
+                return RespEncoder::encode_bulk_string(previous->get_string().value_or(""));
+            }
+            return applied ? RespEncoder::encode_ok() : RespEncoder::encode_nil();
         }
 
         [[nodiscard]] std::unique_ptr<Command> clone() const override {
             return std::make_unique<SetCommand>(*this);
+        }
+
+    private:
+        static std::string to_upper(const std::string& s) {
+            std::string out = s;
+            // toupper 的入参必须是 unsigned char（负数 char 是 UB），这里显式转一次：
+            // -Werror=sign-conversion 不接受隐式的 char→unsigned char。
+            for (char& ch : out) {
+                ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+            }
+            return out;
+        }
+
+        // 严格整数：整个串都被吃掉才算数。用 from_chars 而不是 stoll —— 后者读前缀
+        // 就返回（"10abc" 给出 10），溢出还得靠异常兜。
+        static bool parse_ll(const std::string& s, long long& out) {
+            const char* first = s.data();
+            const char* last = first + s.size();
+            const std::from_chars_result r = std::from_chars(first, last, out);
+            return r.ec == std::errc() && r.ptr == last;
+        }
+
+        // SET GET 要求旧值是字符串类型。这一步和后面的写入之间有一次取锁间隙：
+        // 并发下最坏结果是"这轮判成 WRONGTYPE、并没有写"，不会丢数据也不会写错值。
+        // 要彻底收口得让 set_conditional 带类型回调，不在这个改动里做。
+        static bool is_non_string(const std::string& key) {
+            std::optional<CacheObject> cur = GlobalStorage::instance().get(key);
+            return cur.has_value() && !cur->get_string().has_value();
         }
     };
 

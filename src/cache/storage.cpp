@@ -405,6 +405,66 @@ namespace cc_server {
         LOG_DEBUG(STORAGE, "Set expire for key=%s, ttl_ms=%ld", key.c_str(), ttl_ms);
     }
 
+    bool GlobalStorage::set_conditional(const std::string& key, const CacheObject& value,
+                                        SetCondition condition, int64_t ttl_ms, bool keep_ttl,
+                                        std::optional<CacheObject>& previous) {
+        assert(!key.empty() && "GlobalStorage::set_conditional - key is empty");
+        previous.reset();
+
+        // 和 set() 一样在取锁之前做淘汰检查，避免长时间持锁
+        evict_if_needed(key);
+
+        const size_t shard_idx = get_shard_index(key);
+        std::unique_lock<std::shared_mutex> lock(mutexes_[shard_idx]);
+
+        auto& store = stores_[shard_idx];
+        auto it = store.find(key);
+        const int64_t now = current_time_ms();
+
+        // 已经到点的键按"不存在"算：Redis 的 lookupKeyWrite 就是这么处理的。
+        // 留着它再写一遍会留下一条已经没人认的过期记录。
+        bool present = (it != store.end());
+        if (present && expire_dict_.is_expired(key)) {
+            store.erase(it);
+            expire_dict_.remove(key);
+            present = false;
+        }
+
+        previous = present ? std::optional<CacheObject>(it->second.value) : std::nullopt;
+
+        if (condition == SetCondition::kOnlyIfAbsent && present) return false;
+        if (condition == SetCondition::kOnlyIfExists && !present) return false;
+
+        // KEEPTTL 要保住的是"绝对过期时刻"，不是剩余时长：拿剩余时长再设一遍会
+        // 因为这段时间里的执行耗时而漂移，而且中途键可能被别的写清掉了。
+        const int64_t kept_expire_at = keep_ttl ? expire_dict_.get_expire_time(key) : -1;
+
+        CacheEntry entry(value, now);
+        store.insert_or_assign(key, std::move(entry));
+        dirty_counter_.fetch_add(1, std::memory_order_relaxed);
+
+        if (keep_ttl) {
+            if (kept_expire_at > 0) {
+                expire_dict_.set_expire_time(key, kept_expire_at);
+            } else {
+                expire_dict_.remove(key);
+            }
+        } else if (ttl_ms > 0) {
+            // 饱和加：和 set_with_expire() 同一个理由，极大的毫秒数会绕成负数，
+            // "设了个很长的 TTL"变成"立刻就过期"。
+            constexpr int64_t max_ms = std::numeric_limits<int64_t>::max();
+            const int64_t expire_at = (ttl_ms > max_ms - now) ? max_ms : now + ttl_ms;
+            expire_dict_.set_expire_time(key, expire_at);
+        } else {
+            expire_dict_.remove(key);  // 不带 TTL 的 SET 清掉旧 TTL，和 set() 一致
+        }
+
+        LOG_DEBUG(STORAGE, "Set_conditional key=%s applied condition=%d ttl_ms=%ld keep_ttl=%d shard=%zu",
+                  key.c_str(), static_cast<int>(condition), static_cast<long>(ttl_ms),
+                  keep_ttl ? 1 : 0, shard_idx);
+        return true;
+    }
+
     void GlobalStorage::set_with_expire(const std::string& key, const CacheObject& value, int64_t ttl_ms) {
         assert(!key.empty() && "GlobalStorage::set_with_expire - key is empty");
 
