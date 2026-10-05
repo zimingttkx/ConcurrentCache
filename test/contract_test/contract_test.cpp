@@ -779,6 +779,66 @@ void run_restore_payload_contract_tests(int port) {
     });
 }
 
+// CLUSTER MIGRATE 的 timeout 参数边界。
+//
+// #92 起这个值真的决定"阻塞多久"：命令跑在 SubReactor 的事件循环线程上，等目标回复
+// 期间这条 reactor 上的所有连接都停着。改之前 timeout 被完全忽略，所以收下
+// 999999999 无害；改之后它就是"把整条 reactor 冻十几天"。这里同时钉住校验顺序：
+// 参数问题必须先于"集群没启用"报出来，否则单机模式下这条判据永远走不到。
+void run_migrate_timeout_contract_tests(int port) {
+    TEST_SUITE("CLUSTER MIGRATE 超时边界");
+
+    RUN_TEST(migrate_rejects_timeout_above_the_ceiling) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client,
+                           {"CLUSTER", "MIGRATE", "127.0.0.1", "16399", "mt_key", "999999999"},
+                           reply));
+        std::cout << "  超大 timeout 返回: " << reply_text(reply) << "\n";
+        EXPECT_TRUE(reply.is_error());
+        EXPECT_TRUE(reply.starts_with("ERR timeout must be between"));
+    });
+
+    RUN_TEST(migrate_rejects_non_positive_timeout) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client, {"CLUSTER", "MIGRATE", "127.0.0.1", "16399", "mt_key", "0"},
+                           reply));
+        EXPECT_TRUE(reply.is_error());
+        EXPECT_TRUE(reply.starts_with("ERR timeout must be between"));
+        EXPECT_TRUE(do_cmd(client, {"CLUSTER", "MIGRATE", "127.0.0.1", "16399", "mt_key", "-5"},
+                           reply));
+        EXPECT_TRUE(reply.is_error());
+        EXPECT_TRUE(reply.starts_with("ERR timeout must be between"));
+    });
+
+    RUN_TEST(migrate_rejects_a_timeout_with_trailing_garbage) {
+        // std::stoi("5000abc") 返回 5000 且不抛 —— 对决定阻塞多久的参数不能这么猜
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client,
+                           {"CLUSTER", "MIGRATE", "127.0.0.1", "16399", "mt_key", "5000abc"},
+                           reply));
+        std::cout << "  带尾巴的 timeout 返回: " << reply_text(reply) << "\n";
+        EXPECT_TRUE(reply.is_error());
+        EXPECT_TRUE(reply.starts_with("ERR timeout is not an integer"));
+    });
+
+    RUN_TEST(valid_timeout_still_reports_cluster_disabled) {
+        // 顺序探针：参数合法时才会走到"集群没启用"。改之前任何 timeout 都直接走到这里，
+        // 所以这条同时证明上面三条是真的被边界拦下，而不是被 disabled 抢先。
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client, {"CLUSTER", "MIGRATE", "127.0.0.1", "16399", "mt_key", "5000"},
+                           reply));
+        std::cout << "  合法 timeout 返回: " << reply_text(reply) << "\n";
+        EXPECT_TRUE(reply.is_error());
+        EXPECT_TRUE(reply.starts_with("ERR cluster mode is not enabled"));
+        EXPECT_TRUE(do_cmd(client, {"EXISTS", "mt_key"}, reply));
+        EXPECT_EQ(reply.integer, 0);
+    });
+}
+
 void run_all_contract_tests() {
     const char* server_bin = std::getenv("CC_SERVER_BIN");
     // 环境变量没传来说明 CMake 接线断了，那必须是失败而不是跳过——
@@ -815,6 +875,7 @@ void run_all_contract_tests() {
     run_set_option_contract_tests(port);
     run_replica_handshake_contract_tests(port);
     run_restore_payload_contract_tests(port);
+    run_migrate_timeout_contract_tests(port);
     run_capacity_contract_tests(binary);
 
     // 红了要能就地解释。WNOHANG 先问一次：服务器是自己死了还是还活着，决定了
