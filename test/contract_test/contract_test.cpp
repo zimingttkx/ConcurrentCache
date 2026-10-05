@@ -738,6 +738,47 @@ void run_replica_handshake_contract_tests(int port) {
     });
 }
 
+// RESTORE 载荷的客户端可见契约：坏载荷必须报错，不能"回 +OK 但内容不对"。
+//
+// 改动前 RESTORE 用 std::getline 逐条读，遇到截断载荷会 break 出已读到的部分然后
+// 照样回 +OK；而空/无标签的载荷会被当成 STRING 建出一个键。所以这三条钉的是
+// "失败要看起来像失败"，配合 object_test.cpp 里的往返用例（那边钉框架本身）。
+void run_restore_payload_contract_tests(int port) {
+    TEST_SUITE("RESTORE 载荷契约");
+
+    RUN_TEST(restore_accepts_a_well_formed_payload) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client, {"DEL", "rp_ok"}, reply));
+        // STRING 载荷：类型标签一行 + 一条 "字节数\n原始字节" 记录
+        EXPECT_TRUE(do_cmd(client, {"RESTORE", "rp_ok", "0", std::string("STRING\n3\nabc")}, reply));
+        EXPECT_TRUE(reply.starts_with("OK"));
+        EXPECT_TRUE(do_cmd(client, {"GET", "rp_ok"}, reply));
+        EXPECT_EQ(reply.str, std::string("abc"));
+    });
+
+    RUN_TEST(restore_rejects_garbage_instead_of_creating_a_key) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client, {"DEL", "rp_junk"}, reply));
+        EXPECT_TRUE(do_cmd(client, {"RESTORE", "rp_junk", "0", "total nonsense"}, reply));
+        EXPECT_TRUE(reply.is_error());
+        EXPECT_TRUE(do_cmd(client, {"EXISTS", "rp_junk"}, reply));
+        EXPECT_EQ(reply.integer, 0);   // 改动前这里会建出一个空串键并回 +OK
+    });
+
+    RUN_TEST(restore_rejects_truncated_payload_without_leaving_a_partial_key) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client, {"DEL", "rp_cut"}, reply));
+        // 声明 3 个字节只给了 2 个
+        EXPECT_TRUE(do_cmd(client, {"RESTORE", "rp_cut", "0", std::string("STRING\n3\nab")}, reply));
+        EXPECT_TRUE(reply.is_error());
+        EXPECT_TRUE(do_cmd(client, {"EXISTS", "rp_cut"}, reply));
+        EXPECT_EQ(reply.integer, 0);
+    });
+}
+
 void run_all_contract_tests() {
     const char* server_bin = std::getenv("CC_SERVER_BIN");
     // 环境变量没传来说明 CMake 接线断了，那必须是失败而不是跳过——
@@ -773,6 +814,7 @@ void run_all_contract_tests() {
     run_zadd_score_contract_tests(port);
     run_set_option_contract_tests(port);
     run_replica_handshake_contract_tests(port);
+    run_restore_payload_contract_tests(port);
     run_capacity_contract_tests(binary);
 
     // 红了要能就地解释。WNOHANG 先问一次：服务器是自己死了还是还活着，决定了
