@@ -441,6 +441,127 @@ void test_memory_size() {
 }
 
 // ============================================================================
+// serialize / deserialize —— 迁移与复制键流用的载荷框架
+//
+// 旧写法每条记录以 "\n" 结尾，于是内容里带换行的元素会被提前收条：
+// LPUSH k "a\nb" 之后迁移/复制出去，解码器按声明的数量读到 "a" 就停了，"b" 丢掉，
+// 而且它照样回 +OK。下面四条钉的是"原样读回来"，不是"读出来像是对的"。
+// ============================================================================
+void test_serialize_roundtrip_with_newlines_in_members() {
+    TEST_SUITE("CacheObject 载荷框架往返");
+
+    CacheObject src;
+    const std::vector<std::string> elems = {"a\nb", "plain", "\n", "", "c\r\nd", "尾随换行\n"};
+    for (const auto& e : elems) {
+        src.list_push(e);
+    }
+
+    const std::string payload = src.serialize();
+
+    CacheObject dst;
+    std::string err;
+    EXPECT_TRUE(dst.deserialize(payload, err));
+    if (dst.list_size() != elems.size()) {
+        std::cout << "  元素数量不符: 读到 " << dst.list_size()
+                  << " 个，声明 " << elems.size() << " 个\n";
+    }
+    EXPECT_EQ(dst.list_size(), elems.size());
+
+    const std::vector<std::string> got = dst.list_range(0, -1);
+    for (size_t i = 0; i < elems.size(); ++i) {
+        EXPECT_TRUE(i < got.size());
+        if (i < got.size()) {
+            EXPECT_EQ(got[i], elems[i]);
+        }
+    }
+}
+
+void test_serialize_roundtrip_hash_set_zset() {
+    TEST_SUITE("CacheObject 载荷框架往返");
+
+    // 一个 CacheObject 只能装一种类型，所以三种载荷各用各的源对象
+    CacheObject src_hash;
+    src_hash.hash_set("f\n1", "v\n2");
+    src_hash.hash_set("normal", "value");
+    CacheObject src_set;
+    src_set.set_add("m\n1");
+    src_set.set_add("plain");
+    CacheObject src_zset;
+    src_zset.zset_add("z\nmember", 0.123456789);
+    src_zset.zset_add("second", 2.0);
+
+    CacheObject dst_hash, dst_set, dst_zset;
+    std::string err;
+    EXPECT_TRUE(dst_hash.deserialize(src_hash.serialize(), err));
+    EXPECT_TRUE(dst_set.deserialize(src_set.serialize(), err));
+    EXPECT_TRUE(dst_zset.deserialize(src_zset.serialize(), err));
+
+    EXPECT_EQ(dst_hash.hash_size(), static_cast<size_t>(2));
+    EXPECT_EQ(dst_hash.hash_get("f\n1").value_or("<没有读回来>"), std::string("v\n2"));
+    EXPECT_EQ(dst_set.set_size(), static_cast<size_t>(2));
+    EXPECT_TRUE(dst_set.set_contains("m\n1"));
+    EXPECT_EQ(dst_zset.zset_size(), static_cast<size_t>(2));
+
+    // 分数要按位原样回来：%.17g + from_chars 这一对是 P1-13 的约定，
+    // 若读侧退回宽松解析，0.123456789 会先被截成 6 位小数
+    bool precision_kept = false;
+    for (const auto& item : dst_zset.zset_all()) {
+        if (item.first == "z\nmember") {
+            precision_kept = (item.second == 0.123456789);
+        }
+    }
+    EXPECT_TRUE(precision_kept);
+}
+
+void test_serialize_roundtrip_string_with_newlines() {
+    TEST_SUITE("CacheObject 载荷框架往返");
+
+    const std::string value = "第一行\n第二行\n";
+    const std::string payload = CacheObject(value).serialize();
+
+    CacheObject dst;
+    std::string err;
+    EXPECT_TRUE(dst.deserialize(payload, err));
+    EXPECT_EQ(dst.get_string().value_or("<没有读回来>"), value);
+
+    // 记录读完还有尾巴 = 发的人用的是别的框架。必须拒，不能让两种字节流互相误读
+    CacheObject bad;
+    std::string bad_err;
+    EXPECT_TRUE(!bad.deserialize(payload + "extra", bad_err));
+}
+
+void test_deserialize_fails_closed_on_malformed_payload() {
+    TEST_SUITE("CacheObject 载荷框架 fail-closed");
+
+    CacheObject src;
+    src.list_push("a\nb");
+    src.list_push("c");
+    const std::string payload = src.serialize();
+
+    // 截掉最后一个字节：整条必须失败，且不许留下半个键（旧实现会交出已读到的部分然后回成功）
+    const std::string truncated = payload.substr(0, payload.size() - 1);
+    CacheObject cut;
+    std::string cut_err;
+    EXPECT_TRUE(!cut.deserialize(truncated, cut_err));
+    EXPECT_EQ(cut.list_size(), static_cast<size_t>(0));
+    std::cout << "  截断载荷的拒绝理由: " << cut_err << "\n";
+
+    // 旧框架（"LIST\n1\na\nb\n"，数量 1 后面其实跟着两条内容）必须被拒
+    CacheObject legacy;
+    std::string legacy_err;
+    EXPECT_TRUE(!legacy.deserialize(std::string("LIST") + "\n1\na\nb\n", legacy_err));
+    std::cout << "  旧框架载荷的拒绝理由: " << legacy_err << "\n";
+
+    CacheObject junk;
+    std::string junk_err;
+    EXPECT_TRUE(!junk.deserialize("", junk_err));                          // 空载荷
+    EXPECT_TRUE(!junk.deserialize("no-type-tag-here", junk_err));          // 没有换行
+    EXPECT_TRUE(!junk.deserialize("STREAM\n3\nabc", junk_err));            // 类型不认识
+    EXPECT_TRUE(!junk.deserialize("ZSET\n1\nmember\nnot-a-number\n", junk_err));  // 分数不是数
+    EXPECT_EQ(junk.zset_size(), static_cast<size_t>(0));
+}
+
+// ============================================================================
 // 主测试函数
 // ============================================================================
 
@@ -466,6 +587,12 @@ void run_all_datatype_tests() {
     // ZSet 测试
     test_zset_basic_operations();
     test_zset_range_operations();
+
+    // 载荷框架（MIGRATE / 复制键流）往返与 fail-closed
+    test_serialize_roundtrip_with_newlines_in_members();
+    test_serialize_roundtrip_hash_set_zset();
+    test_serialize_roundtrip_string_with_newlines();
+    test_deserialize_fails_closed_on_malformed_payload();
 
     // 其他测试
     test_string_type_contract();

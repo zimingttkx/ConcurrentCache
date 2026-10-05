@@ -131,6 +131,18 @@ namespace cc_server {
         // 格式：type:string_value 或 type:json_value
         std::string serialize() const;
 
+    /**
+     * @brief serialize() 的逆运算
+     *
+     * 任何一帧不完整都算失败，绝不"读到哪算哪"：旧实现遇到截断载荷会 break 出已读到的
+     * 那部分然后照样回 +OK，副本/目标节点于是拿到一个"看起来成功、内容少了几条"的键。
+     *
+     * @param payload serialize() 产出的字节串
+     * @param err     失败时带上原因，供 RESTORE 回错误
+     * @return 成功时本对象被填好并返回 true
+     */
+    bool deserialize(const std::string& payload, std::string& err);
+
     private:
         // ZSet 成员结构体（按分数排序）
         struct ZSetMember {

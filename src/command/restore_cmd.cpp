@@ -5,7 +5,7 @@
 #include "restore_cmd.h"
 #include "protocol/resp.h"
 #include "base/log.h"
-#include <sstream>
+#include <string>
 
 namespace cc_server {
 
@@ -37,111 +37,14 @@ std::string RestoreCommand::execute(const std::vector<std::string>& args) {
         return RespEncoder::encode_error("BUSYKEY Target key name already exists");
     }
 
-    // 反序列化数据
-    std::istringstream ss(serialized);
-    std::string type;
-    if (!std::getline(ss, type)) {
-        return RespEncoder::encode_error("ERR invalid serialized data");
-    }
-
+    // 反序列化交给 CacheObject 自己做：载荷的编解码是它的事，放在这里就会有两份
+    // 互相对不上的框架描述（旧代码正是如此 —— 遇到截断载荷 break 出已读到的部分，
+    // 然后照样回 +OK，副本/目标节点拿到一个"成功但少了几条"的键）。
     CacheObject obj;
-
-    if (type == "STRING" || type.empty()) {
-        // STRING 类型：STRING\n<value>
-        std::string value = serialized.substr(type.size());
-        // 跳过类型后面的换行符
-        if (!value.empty() && value[0] == '\n') {
-            value = value.substr(1);
-        }
-        obj.set_string(value);
-    } else if (type == "LIST") {
-        // LIST 类型：LIST\n<size>\n<elem1>\n<elem2>\n...
-        std::string size_line;
-        if (!std::getline(ss, size_line)) {
-            return RespEncoder::encode_error("ERR invalid serialized data for LIST");
-        }
-        size_t size = 0;
-        try {
-            size = std::stoull(size_line);
-        } catch (...) {
-            return RespEncoder::encode_error("ERR invalid serialized data for LIST");
-        }
-        std::vector<std::string> elems;
-        for (size_t i = 0; i < size; i++) {
-            std::string elem;
-            if (!std::getline(ss, elem)) {
-                break;
-            }
-            elems.push_back(elem);
-        }
-        for (const auto& e : elems) {
-            obj.list_push(e);
-        }
-    } else if (type == "HASH") {
-        // HASH 类型：HASH\n<size>\n<field1>\n<value1>\n...
-        std::string size_line;
-        if (!std::getline(ss, size_line)) {
-            return RespEncoder::encode_error("ERR invalid serialized data for HASH");
-        }
-        size_t size = 0;
-        try {
-            size = std::stoull(size_line);
-        } catch (...) {
-            return RespEncoder::encode_error("ERR invalid serialized data for HASH");
-        }
-        for (size_t i = 0; i < size; i++) {
-            std::string field, value;
-            if (!std::getline(ss, field) || !std::getline(ss, value)) {
-                break;
-            }
-            obj.hash_set(field, value);
-        }
-    } else if (type == "SET") {
-        // SET 类型：SET\n<size>\n<member1>\n<member2>\n...
-        std::string size_line;
-        if (!std::getline(ss, size_line)) {
-            return RespEncoder::encode_error("ERR invalid serialized data for SET");
-        }
-        size_t size = 0;
-        try {
-            size = std::stoull(size_line);
-        } catch (...) {
-            return RespEncoder::encode_error("ERR invalid serialized data for SET");
-        }
-        for (size_t i = 0; i < size; i++) {
-            std::string member;
-            if (!std::getline(ss, member)) {
-                break;
-            }
-            obj.set_add(member);
-        }
-    } else if (type == "ZSET") {
-        // ZSET 类型：ZSET\n<size>\n<member1>\n<score1>\n...
-        std::string size_line;
-        if (!std::getline(ss, size_line)) {
-            return RespEncoder::encode_error("ERR invalid serialized data for ZSET");
-        }
-        size_t size = 0;
-        try {
-            size = std::stoull(size_line);
-        } catch (...) {
-            return RespEncoder::encode_error("ERR invalid serialized data for ZSET");
-        }
-        for (size_t i = 0; i < size; i++) {
-            std::string member, score_str;
-            if (!std::getline(ss, member) || !std::getline(ss, score_str)) {
-                break;
-            }
-            double score = 0;
-            try {
-                score = std::stod(score_str);
-            } catch (...) {
-                return RespEncoder::encode_error("ERR invalid serialized data for ZSET");
-            }
-            obj.zset_add(member, score);
-        }
-    } else {
-        return RespEncoder::encode_error("ERR unsupported serialized data type");
+    std::string decode_err;
+    if (!obj.deserialize(serialized, decode_err)) {
+        LOG_ERROR(RESTORE, "RESTORE - malformed payload for key=%s: %s", key.c_str(), decode_err.c_str());
+        return RespEncoder::encode_error("ERR Invalid or malformed serialized payload");
     }
 
     // 存储对象

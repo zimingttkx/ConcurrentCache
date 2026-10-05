@@ -1,5 +1,9 @@
 #include "datatype/object.h"
+#include <charconv>
+#include <cmath>
 #include <cstdio>
+#include <string>
+#include <vector>
 
 namespace cc_server {
 
@@ -448,66 +452,221 @@ std::vector<std::pair<std::string, double>> CacheObject::zset_all() const {
     return result;
 }
 
+namespace {
+    // 载荷框架：一行类型标签，之后是若干条"长度前缀记录" —— "<字节数>\n<原始字节>"。
+    //
+    // 早期版本每条记录以 "\n" 结尾，于是内容里带换行的元素会被提前收条：
+    //     LPUSH k "a\nb"  →  "LIST\n1\na\nb\n"  →  解码器读出 1 个元素 "a"，"b" 丢掉
+    // MIGRATE 和复制的键流都走这份载荷，所以那是静默的数据缺损，不是格式好不好看的问题。
+    void append_record(std::string& out, const std::string& payload) {
+        out += std::to_string(payload.size());
+        out += '\n';
+        out += payload;
+    }
+
+    bool read_record(const std::string& buf, size_t& pos, std::string& out) {
+        const size_t nl = buf.find('\n', pos);
+        if (nl == std::string::npos) return false;
+        const std::string head = buf.substr(pos, nl - pos);
+        unsigned long long len = 0;
+        const char* first = head.data();
+        const std::from_chars_result r = std::from_chars(first, first + head.size(), len);
+        if (r.ec != std::errc() || r.ptr != first + head.size()) return false;   // 头部不是纯十进制
+        const size_t available = buf.size() - (nl + 1);
+        if (len > static_cast<unsigned long long>(available)) return false;       // 声明长度超过剩余字节
+        out.assign(buf, nl + 1, static_cast<size_t>(len));
+        pos = nl + 1 + static_cast<size_t>(len);
+        return true;
+    }
+
+    bool read_count(const std::string& buf, size_t& pos, size_t& count) {
+        std::string head;
+        if (!read_record(buf, pos, head)) return false;
+        unsigned long long v = 0;
+        const char* first = head.data();
+        const std::from_chars_result r = std::from_chars(first, first + head.size(), v);
+        if (r.ec != std::errc() || r.ptr != first + head.size()) return false;
+        count = static_cast<size_t>(v);
+        return true;
+    }
+
+    bool read_score(const std::string& text, double& score) {
+        const char* first = text.data();
+        const std::from_chars_result r = std::from_chars(first, first + text.size(), score);
+        if (r.ec != std::errc() || r.ptr != first + text.size()) return false;
+        // 与 ZADD 的入参判断一致：NaN/Inf 不是合法的 sorted set 分数（旧载荷里也不该出现）
+        return !std::isnan(score) && !std::isinf(score);
+    }
+}  // namespace
+
 std::string CacheObject::serialize() const {
     std::string result;
     result.reserve(256);  // 预分配
 
     switch (type_) {
         case ObjectType::STRING: {
-            // 格式：STRING\n<value>
             result += "STRING\n";
-            result += string_val_;
+            append_record(result, string_val_);
             break;
         }
         case ObjectType::LIST: {
-            // 格式：LIST\n<size>\n<element1>\n<element2>\n...
             result += "LIST\n";
-            result += std::to_string(list_val_.size());
-            result += "\n";
+            append_record(result, std::to_string(list_val_.size()));
             for (const auto& elem : list_val_) {
-                result += elem + "\n";
+                append_record(result, elem);
             }
             break;
         }
         case ObjectType::HASH: {
-            // 格式：HASH\n<size>\n<field1>\n<value1>\n<field2>\n<value2>\n...
             result += "HASH\n";
-            result += std::to_string(hash_val_.size());
-            result += "\n";
+            append_record(result, std::to_string(hash_val_.size()));
             for (const auto& [k, v] : hash_val_) {
-                result += k + "\n" + v + "\n";
+                append_record(result, k);
+                append_record(result, v);
             }
             break;
         }
         case ObjectType::SET: {
-            // 格式：SET\n<size>\n<member1>\n<member2>\n...
             result += "SET\n";
-            result += std::to_string(set_val_.size());
-            result += "\n";
+            append_record(result, std::to_string(set_val_.size()));
             for (const auto& m : set_val_) {
-                result += m + "\n";
+                append_record(result, m);
             }
             break;
         }
         case ObjectType::ZSET: {
-            // 格式：ZSET\n<size>\n<member1>\n<score1>\n<member2>\n<score2>\n...
-            // 修复 P1-13：double 用 %.17g 保证与 std::stod 往返精度一致
+            // 修复 P1-13：double 用 %.17g 保证与读侧精度往返一致
             // （否则 std::to_string 只 6 位小数，0.123456789 会丢精度）
             result += "ZSET\n";
-            result += std::to_string(zset_val_.size());
-            result += "\n";
+            append_record(result, std::to_string(zset_val_.size()));
             char score_buf[32];
             for (const auto& z : zset_val_) {
-                snprintf(score_buf, sizeof(score_buf), "%.17g", z.score);
-                result += z.member + "\n" + score_buf + "\n";
+                std::snprintf(score_buf, sizeof(score_buf), "%.17g", z.score);
+                append_record(result, z.member);
+                append_record(result, std::string(score_buf));
             }
             break;
         }
         default:
-            result = "";
-            break;
+            // 未知类型给空载荷：读侧看到没有类型标签就判失败，不会当成空串键
+            return {};
     }
     return result;
+}
+
+bool CacheObject::deserialize(const std::string& payload, std::string& err) {
+    err.clear();
+
+    const size_t nl = payload.find('\n');
+    if (nl == std::string::npos) {
+        err = "payload has no type tag";
+        return false;
+    }
+    const std::string type = payload.substr(0, nl);
+    size_t pos = nl + 1;
+
+    // 记录读完必须正好落在末尾。多出来的尾巴说明发的人用的是别的框架
+    // （比如早期那种"内容里带换行就提前收条"的写法），这时必须失败，
+    // 不能"读到哪算哪" —— 旧实现遇到截断载荷会 break 出已读到的部分然后照样回 +OK。
+    auto finish = [&](const char* what) -> bool {
+        if (pos != payload.size()) {
+            err = std::string(what) + ": trailing bytes in payload";
+            return false;
+        }
+        return true;
+    };
+
+    if (type == "STRING") {
+        std::string value;
+        if (!read_record(payload, pos, value)) {
+            err = "truncated STRING payload";
+            return false;
+        }
+        set_string(value);
+        return finish("STRING");
+    }
+
+    if (type == "LIST") {
+        size_t count = 0;
+        if (!read_count(payload, pos, count)) {
+            err = "bad LIST element count";
+            return false;
+        }
+        std::vector<std::string> elems;
+        elems.reserve(count);
+        for (size_t i = 0; i < count; ++i) {
+            std::string elem;
+            if (!read_record(payload, pos, elem)) {
+                err = "truncated LIST payload: wanted " + std::to_string(count) + " elements";
+                return false;
+            }
+            elems.push_back(std::move(elem));
+        }
+        if (!finish("LIST")) return false;
+        for (const auto& e : elems) {
+            list_push(e);
+        }
+        return true;
+    }
+
+    if (type == "HASH") {
+        size_t count = 0;
+        if (!read_count(payload, pos, count)) {
+            err = "bad HASH field count";
+            return false;
+        }
+        for (size_t i = 0; i < count; ++i) {
+            std::string field, value;
+            if (!read_record(payload, pos, field) || !read_record(payload, pos, value)) {
+                err = "truncated HASH payload: wanted " + std::to_string(count) + " pairs";
+                return false;
+            }
+            hash_set(field, value);
+        }
+        return finish("HASH");
+    }
+
+    if (type == "SET") {
+        size_t count = 0;
+        if (!read_count(payload, pos, count)) {
+            err = "bad SET member count";
+            return false;
+        }
+        for (size_t i = 0; i < count; ++i) {
+            std::string member;
+            if (!read_record(payload, pos, member)) {
+                err = "truncated SET payload: wanted " + std::to_string(count) + " members";
+                return false;
+            }
+            set_add(member);
+        }
+        return finish("SET");
+    }
+
+    if (type == "ZSET") {
+        size_t count = 0;
+        if (!read_count(payload, pos, count)) {
+            err = "bad ZSET member count";
+            return false;
+        }
+        for (size_t i = 0; i < count; ++i) {
+            std::string member, score_text;
+            if (!read_record(payload, pos, member) || !read_record(payload, pos, score_text)) {
+                err = "truncated ZSET payload: wanted " + std::to_string(count) + " members";
+                return false;
+            }
+            double score = 0;
+            if (!read_score(score_text, score)) {
+                err = "ZSET score is not a finite number: '" + score_text + "'";
+                return false;
+            }
+            zset_add(member, score);
+        }
+        return finish("ZSET");
+    }
+
+    err = "unsupported payload type '" + type + "'";
+    return false;
 }
 
 }  // namespace cc_server
