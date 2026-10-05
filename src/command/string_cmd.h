@@ -224,10 +224,11 @@ namespace cc_server {
 
     private:
         static std::string to_upper(const std::string& s) {
-            std::string out;
-            out.reserve(s.size());
-            for (unsigned char c : s) {
-                out.push_back(static_cast<char>(std::toupper(c)));
+            std::string out = s;
+            // toupper 的入参必须是 unsigned char（负数 char 是 UB），这里显式转一次：
+            // -Werror=sign-conversion 不接受隐式的 char→unsigned char。
+            for (char& ch : out) {
+                ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
             }
             return out;
         }
