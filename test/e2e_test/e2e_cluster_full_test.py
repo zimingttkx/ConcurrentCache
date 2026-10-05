@@ -398,6 +398,34 @@ async def test_replication(harness: ClusterTestHarness, r: TestResults):
              get_from_a == "from_master_a", f"got: {get_from_a}")
 
 
+async def test_migrate(harness: ClusterTestHarness, r: TestResults):
+    """Test 4b: CLUSTER MIGRATE 真的把键搬走（目标收得到、源不再留副本）."""
+    print("\n── Test 4b: MIGRATE ──")
+
+    cli_a = harness.servers[16379].client
+    cli_b = harness.servers[16380].client
+
+    await cli_a.execute("SET", "mg_key", "mg_value")
+
+    # Redis 语法：MIGRATE host port key destination-db timeout [REPLACE]
+    mg = await cli_a.execute("MIGRATE", "127.0.0.1", "16380", "mg_key", "0", "3000", "REPLACE")
+    r.record("CLUSTER MIGRATE A→B 回 OK", mg == "OK", f"got: {mg}")
+
+    await asyncio.sleep(0.5)
+
+    # 这两条是这条命令的真实契约。改动前它俩都不成立：RESTORE 的参数被拆成多个
+    # 总线参数、对端只执行裸的 "RESTORE"，所以键根本没搬过去，而源节点也从不删。
+    gone_from_a = await cli_a.execute("GET", "mg_key")
+    r.record("源节点上这个键已经不在了",
+             gone_from_a is None or gone_from_a == "",
+             f"source still returns: {gone_from_a}")
+
+    arrived_on_b = await cli_b.execute("GET", "mg_key")
+    r.record("目标节点读得到搬过去的值",
+             arrived_on_b == "mg_value",
+             f"target returns: {arrived_on_b}")
+
+
 async def test_failover_detection(harness: ClusterTestHarness, r: TestResults):
     """Test 5: Node failure detection via CLUSTER FAIL."""
     print("\n── Test 5: Failover Detection ──")
@@ -467,6 +495,7 @@ async def main():
         await test_slot_assignment(harness, results)
         await test_data_operations(harness, results)
         await test_replication(harness, results)
+        await test_migrate(harness, results)
         await test_failover_detection(harness, results)
         await test_graceful_shutdown(harness, results)
     except Exception as e:

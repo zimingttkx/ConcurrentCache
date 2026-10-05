@@ -219,8 +219,18 @@ RESTORE <key> <ttl> <serialized-value>
 
 - 从 `CLUSTER MIGRATE` 流程接收已序列化的 `CacheObject`
 - `ttl` 单位为毫秒；0 表示永不过期
-- 配套序列化由 `CacheObject::serialize()` 提供
-- 错误返回：`-ERR invalid TTL`（ttl 非法）/ `-ERR invalid serialized data for <TYPE>`（反序列化失败）/ `-BUSYKEY Target key name already exists`（key 已存在且未带 REPLACE）
+- 配套序列化由 `CacheObject::serialize()` 提供：一行类型标签 + 若干条
+  `<字节数>\n<原始字节>` 记录，因此成员/字段里含 `\n`、`\r` 不会再被截断
+- 注意：总线本身用裸 `\xC0` 字节分隔参数且没有转义，所以**含 0xC0 的 value 在复制/迁移
+  时仍会在总线层被切断**（这是与载荷框架无关的另一处缺陷，登记在案待修）
+- 载荷任何一帧不完整都算失败（不再"读到哪算哪"交出半个对象）
+- 错误返回：`-ERR invalid TTL`（ttl 非法）/ `-ERR Invalid or malformed serialized payload`
+  （反序列化失败）/ `-BUSYKEY Target key name already exists`（key 已存在且未带 REPLACE）
+
+`CLUSTER MIGRATE host port key destination-db timeout [REPLACE]` 走的是"发到目标 + 等它回复"：
+只有目标回 `+OK` 之后才删源键（默认语义是移动，不是复制）。超时、连不上、或目标回了
+`-BUSYKEY` 之类的错误时，**源键保持不动**，错误转给客户端。总线的请求/回复用
+`CCREQ <id> <RESP 命令>` / `CCRESP <id> <RESP 回复>` 两种标记，帧结构本身没有变。
 
 ## 15. 错误码
 

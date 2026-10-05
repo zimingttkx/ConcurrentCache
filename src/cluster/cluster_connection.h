@@ -14,6 +14,7 @@
 #include <chrono>
 #include <thread>
 #include <atomic>
+#include <condition_variable>
 
 namespace cc_server {
 
@@ -109,6 +110,24 @@ public:
     // 向节点发送 RESP 命令（用于 MIGRATE 等场景）
     bool send_command_to_node(const std::string& node_name, const std::vector<std::string>& args);
 
+    /**
+     * @brief 给节点发一条命令，并等它的 RESP 回复（带超时）
+     *
+     * CLUSTER MIGRATE 需要这个：只有确认目标节点收下（+OK）才能删源键。总线原本
+     * 只有 kRepData 的单向推送、没有请求/回复关联，所以发送方永远不知道对端是
+     * 接受了还是回了 -BUSYKEY —— 在那个前提下"补上删源键"等于可能把数据删没，
+     * 比留下重复键更糟。
+     *
+     * 帧格式不动（header 保持原样）：请求把命令行前加一个 "CCREQ <id> "，回复用
+     * "CCRESP <id> "，两者仍是普通的 kRepData 参数，所以老的结构体长度测试不受影响。
+     *
+     * @param timeout_ms 最长等待；到点返回 false，调用方因此不会去删源键
+     * @return 拿到回复为 true（回复本身可能是错误回复，语义由调用方判断）
+     */
+    bool send_command_and_wait(const std::string& node_name,
+                               const std::vector<std::string>& args,
+                               int timeout_ms, std::string& reply);
+
     // 向节点发送原始字符串数据（用于复制命令推送）
     bool send_raw_to_node(const std::string& node_name, const std::string& data);
 
@@ -171,6 +190,19 @@ private:
     // ClusterLink fd 到 Channel 的映射（用于 EventLoop 注销）
     std::unordered_map<int, Channel*> link_channels_;
     std::mutex channel_mutex_;  // 保护 link_channels_
+
+    // 总线上的请求/回复关联。目前唯一的使用者是 CLUSTER MIGRATE。
+    struct PendingBusReply {
+        std::string reply;
+        bool done = false;
+        int64_t deadline_ms = 0;   // 回复比超时晚到时，这条会被下一个请求顺手清掉
+    };
+    // 收到 "CCRESP <id> ..." 时把回复交给等待者；id 不认识（已超时）就直接丢
+    void deliver_command_reply(uint64_t request_id, const std::string& reply);
+    std::mutex pending_replies_mutex_;
+    std::condition_variable pending_replies_cv_;
+    std::unordered_map<uint64_t, PendingBusReply> pending_replies_;
+    std::atomic<uint64_t> next_request_id_{1};
 
     NodeCallback node_connected_callback_;
     NodeCallback node_disconnected_callback_;

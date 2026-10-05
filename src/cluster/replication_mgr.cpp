@@ -297,6 +297,11 @@ bool ReplicationMgr::send_replication_args(const std::string& replica_name,
 }
 
 void ReplicationMgr::handle_replication_command(const std::string& cmd_line) {
+    // 副本端只关心"写生效了没有"，回复丢在这里
+    (void)execute_bus_command_line(cmd_line);
+}
+
+std::string ReplicationMgr::execute_bus_command_line(const std::string& cmd_line) {
     // 使用 CommandFactory 管道执行复制命令，不再手工解析
     static std::atomic<int64_t> repl_seq{0};
     int64_t seq = repl_seq.fetch_add(1);
@@ -314,7 +319,7 @@ void ReplicationMgr::handle_replication_command(const std::string& cmd_line) {
         if (!parser.error().empty()) {
             LOG_WARN(CLUSTER, "REPL-CMD[%ld] malformed RESP payload: %s",
                      seq, parser.error().c_str());
-            return;
+            return RespEncoder::encode_error("ERR malformed command payload");
         }
         if (!parsed_values.empty() && parsed_values[0].type == RespType::ARRAY) {
             for (const auto& v : parsed_values[0].as_array()) {
@@ -334,7 +339,7 @@ void ReplicationMgr::handle_replication_command(const std::string& cmd_line) {
 
     if (args.empty()) {
         LOG_WARN(CLUSTER, "REPL-CMD[%ld] empty command line", seq);
-        return;
+        return RespEncoder::encode_error("ERR empty command");
     }
 
     std::string cmd_name = args[0];
@@ -345,11 +350,11 @@ void ReplicationMgr::handle_replication_command(const std::string& cmd_line) {
              args.size() >= 2 ? args[1].c_str() : "-");
 
     auto command = CommandFactory::instance().create(cmd_name);
-    if (command) {
-        command->execute(args);
-    } else {
+    if (!command) {
         LOG_WARN(CLUSTER, "REPL-CMD[%ld] unknown command: %s", seq, cmd_name.c_str());
+        return RespEncoder::encode_error("ERR unknown command '" + cmd_name + "'");
     }
+    return command->execute(args);
 }
 
 void ReplicationMgr::set_master(const std::string& ip, int port, const std::string& master_runid) {
