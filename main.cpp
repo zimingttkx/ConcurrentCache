@@ -140,6 +140,9 @@ int main(int argc, char* argv[]) {
                   << "\"，退回默认级别 DEBUG" << std::endl;
     }
     Logger::instance().setLevel(log_level);
+    // 热加载的接线：Config 的观察者机制一直是齐的，但 addObserver 在全仓没有任何调用点，
+    // 所以 EventLoop 每 10 秒那次 reload() 遍历的是空表，"改配置不用重启"从来没成立过。
+    Logger::instance().bindToConfigHotReload();
 
     // Config 早就把 log_file 的默认值塞进配置表了，但 Logger::setFile() 从来没被
     // 调用过 —— 配置文件承诺写文件日志，实际只出控制台，setFile/rotate/cleanup

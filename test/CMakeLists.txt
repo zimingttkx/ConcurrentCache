@@ -56,6 +56,7 @@ set(TEST_INCLUDE_DIRS
 # V3 测试
 add_executable(concurrentcache-v3-tests
     test_v3_main.cpp
+    base_test/config_reload_test.cpp
     cluster_test/cluster_link_framing_test.cpp
     datatype_test/object_test.cpp
     memorypool_test/thread_cache_test.cpp
