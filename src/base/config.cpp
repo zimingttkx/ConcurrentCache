@@ -86,9 +86,18 @@ void Config::reload() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
-        // 重新加载配置
+        // 重新加载配置。
+        // 修复：旧代码先 config_data_.clear() 再丢掉 loadInternal() 的返回值，于是运行期间
+        // 只要 conf 文件被改名或读不出来，整张表就只剩下面四个 log_* 默认值 —— port、
+        // max_entries、缓冲上限对这些"后来的读取者"静默消失。读不到就原样退回，并且说出来。
+        const auto previous = config_data_;
         config_data_.clear();
-        loadInternal();
+        if (!loadInternal()) {
+            config_data_ = previous;
+            std::cerr << "[Config] reload: 重新读取 " << config_file_
+                      << " 失败，保持原有配置不变" << std::endl;
+            return;
+        }
 
         // 设置日志默认值
         if (config_data_.find("log_level") == config_data_.end()) {

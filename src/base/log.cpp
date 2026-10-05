@@ -1,4 +1,5 @@
 #include "log.h"
+#include "config.h"
 #include "format.h"
 #include <cctype>
 #include <cerrno>
@@ -359,6 +360,12 @@ Logger& Logger::instance() {
  */
 void Logger::setLevel(LogLevel level) {
     level_.store(level, std::memory_order_release);
+}
+
+void Logger::bindToConfigHotReload() {
+    // 只接 log_level：其余键目前没有任何"运行中可改"的消费者（onConfigChange 也明确
+    // 只处理这一个）。接了却没实现的热加载比不接更坏 —— 运维会以为它生效了。
+    Config::instance().addObserver("log_level", this);
 }
 
 /**

@@ -245,6 +245,26 @@ public:
      */
     void setLevel(LogLevel level);
 
+    /**
+     * @brief 当前日志级别
+     *
+     * 热加载要能被断言，就得有个读的地方 —— 没有读取口时"级别变了没"这件事
+     * 在测试里不可观测，于是那条链谁也没验证过。
+     */
+    [[nodiscard]] LogLevel level() const {
+        return level_.load(std::memory_order_acquire);
+    }
+
+    /**
+     * @brief 把自己接到 Config 的热加载上（目前只接 log_level）
+     *
+     * 这一步原来没人做：Config 的观察者机制齐全，但 addObserver 在全仓没有调用点，
+     * reload() 每 10 秒遍历的是一张空表 —— log.h 与 docs/architecture/network.md
+     * 承诺的"配置热加载、日志级别自动生效"因此从来没有生效过。
+     * 注册动作放在 Logger 里，让 main 和测试走同一条接线，避免出现"测试覆盖到了、
+     * 主程序仍然没接"。
+     */
+    void bindToConfigHotReload();
 
     void onConfigChange(const std::string& key, const std::string& value) override;
 
