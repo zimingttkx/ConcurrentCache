@@ -184,7 +184,7 @@ CLUSTER <SUBCOMMAND> [arg ...]
 | `SETSLOT` | `CLUSTER SETSLOT <slot> NODE/MIGRATING/IMPORTING` | 设置槽状态 |
 | `REPLICATE` | `CLUSTER REPLICATE <node-name>` | 将本节点设为某主节点的从节点 |
 | `FAIL` | `CLUSTER FAIL` | 强制标记主节点下线 |
-| `MIGRATE` | `CLUSTER MIGRATE ...` | 槽迁移（内部） |
+| `MIGRATE` | `CLUSTER MIGRATE host port key timeout [REPLACE]` | 键迁移（内部；Redis 顶层 `MIGRATE ... dbid ...` 未注册） |
 
 **重定向响应**：
 
@@ -227,10 +227,15 @@ RESTORE <key> <ttl> <serialized-value>
 - 错误返回：`-ERR invalid TTL`（ttl 非法）/ `-ERR Invalid or malformed serialized payload`
   （反序列化失败）/ `-BUSYKEY Target key name already exists`（key 已存在且未带 REPLACE）
 
-`CLUSTER MIGRATE host port key destination-db timeout [REPLACE]` 走的是"发到目标 + 等它回复"：
-只有目标回 `+OK` 之后才删源键（默认语义是移动，不是复制）。超时、连不上、或目标回了
-`-BUSYKEY` 之类的错误时，**源键保持不动**，错误转给客户端。总线的请求/回复用
+`CLUSTER MIGRATE host port key timeout [REPLACE]`（本项目的签名比 Redis 顶层 `MIGRATE`
+少一个 `destination-db` 字段，且 `timeout` 必须在 1..60000 毫秒内）走的是"发到目标 +
+等它回复"：只有目标回 `+OK` 之后才删源键（默认语义是移动，不是复制）。超时、连不上、
+或目标回了 `-BUSYKEY` 之类的错误时，**源键保持不动**，错误转给客户端。总线的请求/回复用
 `CCREQ <id> <RESP 命令>` / `CCRESP <id> <RESP 回复>` 两种标记，帧结构本身没有变。
+
+两条已知限制要写在这：等待发生在命令所在线程，而命令跑在 SubReactor 的事件循环上 ——
+等待期间这条 reactor 上的所有连接都停着，所以上面那个 60 秒的硬上限是必需的而不是保守；
+另外顶层 `MIGRATE host port key dbid timeout ...`（Redis 的那条）没有注册，只有 `CLUSTER MIGRATE`。
 
 ## 15. 错误码
 

@@ -407,8 +407,9 @@ async def test_migrate(harness: ClusterTestHarness, r: TestResults):
 
     await cli_a.execute("SET", "mg_key", "mg_value")
 
-    # Redis 语法：MIGRATE host port key destination-db timeout [REPLACE]
-    mg = await cli_a.execute("MIGRATE", "127.0.0.1", "16380", "mg_key", "0", "3000", "REPLACE")
+    # 本项目的语法（没有 Redis 顶层 MIGRATE 的 destination-db 字段，而且它挂在 CLUSTER 下面）：
+    #     CLUSTER MIGRATE host port key timeout [REPLACE]
+    mg = await cli_a.execute("CLUSTER", "MIGRATE", "127.0.0.1", "16380", "mg_key", "5000")
     r.record("CLUSTER MIGRATE A→B 回 OK", mg == "OK", f"got: {mg}")
 
     await asyncio.sleep(0.5)

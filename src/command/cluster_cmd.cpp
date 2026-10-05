@@ -8,6 +8,7 @@
 #include "cache/storage.h"
 #include "datatype/object.h"
 #include <cctype>
+#include <charconv>
 #include <cstdlib>
 #include <cstring>
 #include <netdb.h>
@@ -760,12 +761,41 @@ bool ClusterCommand::isValidIp(const std::string& ip) {
     return ip.find(':') != std::string::npos;
 }
 
+// 严格整数：整个串都被吃掉才算数。stoi 读前缀就返回，"5000abc" 会变成 5000 ——
+// 对一个决定阻塞事件循环多久的参数来说，这种"猜个差不多的值"不能收。
+namespace {
+    bool parse_bounded_integer(const std::string& text, long long& out) {
+        const char* first = text.data();
+        const char* last = first + text.size();
+        const std::from_chars_result r = std::from_chars(first, last, out);
+        return r.ec == std::errc() && r.ptr == last;
+    }
+}  // namespace
+
 std::string ClusterCommand::handleMigrate(const std::vector<std::string>& args) {
-    // MIGRATE host port key dbid timeout [COPY | REPLACE]
-    // 简化版本: CLUSTER MIGRATE host port key timeout [REPLACE]
+    // 本项目的语法（比 Redis 顶层 MIGRATE 少一个 destination-db 字段）：
+    //     CLUSTER MIGRATE host port key timeout [REPLACE]
+    // Redis 的 `MIGRATE host port key dbid timeout ...` 顶层命令没有注册，别照它写。
     if (args.size() < 6) {
         return RespEncoder::encode_error("ERR wrong number of arguments for 'cluster migrate' command");
     }
+
+    // 超时先校验，再管"集群开没开"：这个值现在真的决定阻塞多久（#92 起 MIGRATE 要等
+    // 目标节点的回复才删源键），所以不能收下任意整数；而放在 enabled 检查之前，
+    // 是为了让参数错误在单机模式下也能被契约用例抓到。
+    long long parsed_timeout = 0;
+    if (!parse_bounded_integer(args[5], parsed_timeout)) {
+        return RespEncoder::encode_error("ERR timeout is not an integer or out of range");
+    }
+    // 命令跑在 SubReactor 的事件循环线程上：等回复期间这条 reactor 上的**所有**连接
+    // 都停着。所以上限必须有，否则一个 999999999 就能把整条 reactor 冻十几天 ——
+    // #92 之前 timeout 被完全忽略，也就没有这个风险，是这次引入的。
+    constexpr long long kMaxMigrateTimeoutMs = 60000;
+    if (parsed_timeout <= 0 || parsed_timeout > kMaxMigrateTimeoutMs) {
+        return RespEncoder::encode_error(
+            "ERR timeout must be between 1 and 60000 milliseconds");
+    }
+    const int timeout = static_cast<int>(parsed_timeout);
 
     if (!ClusterServer::instance().isEnabled()) {
         return RespEncoder::encode_error("ERR cluster mode is not enabled");
@@ -786,14 +816,6 @@ std::string ClusterCommand::handleMigrate(const std::vector<std::string>& args) 
     }
 
     const std::string& key = args[4];
-
-    // 解析超时
-    int timeout = 0;
-    try {
-        timeout = std::stoi(args[5]);
-    } catch (...) {
-        return RespEncoder::encode_error("ERR invalid timeout");
-    }
 
     // 检查是否有 REPLACE 标志
     bool replace = false;
