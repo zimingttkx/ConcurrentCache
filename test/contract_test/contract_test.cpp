@@ -688,6 +688,56 @@ void run_set_option_contract_tests(int port) {
     });
 }
 
+// 外部副本握手（PSYNC / SYNC / REPLCONF）必须显式拒绝。
+//
+// 改前 `PSYNC ? -1` 回 "+FULLRESYNC <runid> <offset>" 然后一个键都不发：真 Redis
+// 拿 REPLICAOF 接上来会"握手成功、零数据、状态 online"，运维以为有副本了。
+// 拒绝至少不骗人。另外 REPLCONF ACK 原来会把客户端报来的数字直接写进本节点的
+// master_repl_offset，而 failover 的新鲜度判据读的就是这个值 —— 那个写入路径
+// 已整条移除（偏移量没有客户端可见的读取口，所以这里断言命令被拒，写入不可达
+// 由代码层面保证）。
+void run_replica_handshake_contract_tests(int port) {
+    TEST_SUITE("外部副本握手拒绝");
+
+    RUN_TEST(psync_is_refused_and_does_not_answer_fullresync) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client, {"PSYNC", "?", "-1"}, reply));
+        std::cout << "  PSYNC ? -1 返回: " << reply_text(reply) << "\n";
+        EXPECT_TRUE(reply.is_error());
+        // 最关键的一条：不许再出现握手成功的样子
+        EXPECT_TRUE(reply.str.find("FULLRESYNC") == std::string::npos);
+    });
+
+    RUN_TEST(psync_with_a_runid_is_also_refused) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client, {"PSYNC", "abc123", "0"}, reply));
+        EXPECT_TRUE(reply.is_error());
+        EXPECT_TRUE(reply.str.find("CONTINUE") == std::string::npos);
+    });
+
+    RUN_TEST(sync_is_refused) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client, {"SYNC"}, reply));
+        std::cout << "  SYNC 返回: " << reply_text(reply) << "\n";
+        EXPECT_TRUE(reply.is_error());
+    });
+
+    RUN_TEST(replconf_refuses_all_three_subcommands) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client, {"REPLCONF", "listening-port", "6380"}, reply));
+        EXPECT_TRUE(reply.is_error());
+        // 这一条改前会回 +OK 并把 999999999 写进主节点的复制偏移量
+        EXPECT_TRUE(do_cmd(client, {"REPLCONF", "ACK", "999999999"}, reply));
+        EXPECT_TRUE(reply.is_error());
+        EXPECT_TRUE(do_cmd(client, {"REPLCONF", "GETACK", "0"}, reply));
+        EXPECT_TRUE(reply.is_error());
+    });
+}
+
 void run_all_contract_tests() {
     const char* server_bin = std::getenv("CC_SERVER_BIN");
     // 环境变量没传来说明 CMake 接线断了，那必须是失败而不是跳过——
@@ -722,6 +772,7 @@ void run_all_contract_tests() {
     run_protocol_limit_tests(port);
     run_zadd_score_contract_tests(port);
     run_set_option_contract_tests(port);
+    run_replica_handshake_contract_tests(port);
     run_capacity_contract_tests(binary);
 
     // 红了要能就地解释。WNOHANG 先问一次：服务器是自己死了还是还活着，决定了
