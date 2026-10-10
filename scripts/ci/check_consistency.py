@@ -56,6 +56,159 @@ def read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def md_texts() -> dict[Path, str]:
+    """仓库里全部 markdown，统一折成 \n 再比对（有些 .md 是 CRLF）。"""
+    out: dict[Path, str] = {}
+    for pattern in ("*.md", "docs/**/*.md", "src/**/*.md", "test/**/*.md"):
+        for path in ROOT.glob(pattern):
+            if path.is_file() and "build" not in path.parts:
+                out[path] = read(path).replace("\r\n", "\n")
+    return out
+
+
+def api_index_commands(api_text: str) -> set[str]:
+    """docs/api.md §2 索引表里承诺的命令名。
+
+    只认第三个单元格里以大写 ASCII 开头的 token：`CLUSTER（含 10 个子命令）` 取到
+    CLUSTER，`[§ 4 字符串](#4-字符串-string)` 这种链接单元格里没有候选，表头与
+    `|---|` 分隔行也不会误收。
+    """
+    if "## 2. 命令索引" not in api_text:
+        raise SystemExit("docs/api.md 里找不到 §2 命令索引，检查章节标题是否被改")
+    seg = api_text.split("## 2. 命令索引", 1)[1].split("## 3.", 1)[0]
+    names: set[str] = set()
+    for line in seg.splitlines():
+        s = line.strip()
+        if not s.startswith("|"):
+            continue
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        if len(cells) < 3:
+            continue
+        for token in re.split(r"\s*/\s*", cells[2]):
+            m = re.match(r"([A-Z][A-Z0-9_]*)", token)
+            if m:
+                names.add(m.group(1).lower())
+    return names
+
+
+def ctest_table_names(readme: str) -> tuple[set[str], int | None]:
+    """README § 单独测试 那张表第一列的 ctest 用例名，以及正文声明的条数。
+
+    第一格必须正好是一个标识符才算数据行：表头写的是 `` `ctest` 用例名 ``，分隔行是
+    `|------|`，两样都不会被收进来。
+    """
+    if "### 单独测试" not in readme:
+        raise SystemExit("README.md 里找不到 § 单独测试，检查标题是否被改")
+    seg = readme.split("### 单独测试", 1)[1].split("\n### ", 1)[0]
+    names = set(re.findall(r"^\|\s*([A-Za-z][A-Za-z0-9_]*)\s*\|", seg, re.MULTILINE))
+    stated = re.search(r"共\s*(\d+)\s*条", seg)
+    return names, (int(stated.group(1)) if stated else None)
+
+
+def check_docs(docs: dict[Path, str], registered: set[str], registry_names: set[str],
+               conf_port: int, tracker: "Tracker") -> None:
+    """把"文档写的"和"代码/构建/配置里真的有的"当成两张表来对齐。
+
+    这一组判据存在的理由：文档一旦靠人工复查维持一致，下一次加命令、改端口、重命名
+    ctest target 就会再脱钩，而且脱钩后不会有任何东西变红。每条都只比"可数的量"
+    （名字集合、计数、端口、版本号、链接能不能解析），不比措辞。
+    """
+    api_path = ROOT / "docs" / "api.md"
+    readme_path = ROOT / "README.md"
+    if api_path not in docs or readme_path not in docs:
+        tracker.errors.append("docs/api.md 或 README.md 读不到，文档判据整体失效")
+        return
+    api_text, readme = docs[api_path], docs[readme_path]
+
+    # 7a) 命令索引 ↔ 注册表（名字集合 + 声明的总数）。
+    documented = api_index_commands(api_text)
+    missing = registered - documented
+    extra = documented - registered
+    if missing or extra:
+        tracker.errors.append(
+            f"docs/api.md §2 命令索引与注册表不一致：文档缺 {sorted(missing)}，"
+            f"文档多写了但没注册的 {sorted(extra)}"
+        )
+    declared = re.search(r"\*\*命令总数\*\*：(\d+) 个", api_text)
+    if not declared:
+        tracker.errors.append("docs/api.md 头部的『命令总数：NN 个』被改没了，判据无法核对")
+    elif int(declared.group(1)) != len(registered):
+        tracker.errors.append(
+            f"docs/api.md 声明 {declared.group(1)} 个命令，注册表实际 {len(registered)} 个"
+        )
+
+    # 7b) README 的 ctest 表 ↔ test/CMakeLists.txt 的 CC_TESTS。
+    table_names, stated_count = ctest_table_names(readme)
+    if table_names != registry_names:
+        tracker.errors.append(
+            f"README.md § 单独测试 的 ctest 名单与注册表不一致：文档缺 "
+            f"{sorted(registry_names - table_names)}，文档多写了不存在的 "
+            f"{sorted(table_names - registry_names)}"
+        )
+    if stated_count is None:
+        tracker.errors.append("README.md 的 ctest 表上方少了『共 N 条』这句可核对的计数")
+    elif stated_count != len(registry_names):
+        tracker.errors.append(
+            f"README.md 声称 ctest 用例共 {stated_count} 条，CC_TESTS 实际 {len(registry_names)} 条"
+        )
+
+    # 7c) 相对链接必须能解析（只查指向 .md 的链接，避开正文里形似链接的代码片段）。
+    for path, text in sorted(docs.items()):
+        for m in re.finditer(r"\[[^\]]*\]\(([^)\s]+)\)", text):
+            target = m.group(1).split("#", 1)[0]
+            if not target.endswith(".md"):
+                continue
+            if not (path.parent / target).resolve().exists():
+                tracker.errors.append(
+                    f"{path.relative_to(ROOT)} 里的相对链接断了：{m.group(1)}"
+                )
+
+    # 7d) 端口口径。文档里"默认端口"必须是 conf 的那个值；而总线端口
+    # （客户端端口 + 10000）不是客户端口，谁在 redis-cli 里用它，谁就是搞混了
+    # ——这正是本轮修掉的那类错误，所以拿它当判据而不是拿"端口必须等于 6379"
+    # （多节点示例里的 6380/6381 是合法的）。
+    bus_port = conf_port + 10000
+    for path, text in sorted(docs.items()):
+        for m in re.finditer(r'redis-cli[ "\',]+-p[ "\',]+"?(\d+)', text):
+            if int(m.group(1)) == bus_port:
+                tracker.errors.append(
+                    f"{path.relative_to(ROOT)} 用总线端口 {bus_port} 当客户端口发了 "
+                    f"redis-cli -p（客户端默认端口是 {conf_port}）"
+                )
+    for path, text in sorted(docs.items()):
+        for m in re.finditer(r"\*\*默认端口\*\*：`(\d+)`", text):
+            if int(m.group(1)) != conf_port:
+                tracker.errors.append(
+                    f"{path.relative_to(ROOT)} 写的默认端口 {m.group(1)} 与 conf 的 "
+                    f"{conf_port} 不一致"
+                )
+    for m in re.finditer(r"默认监听\s*\S*?:(\d+)", readme):
+        if int(m.group(1)) != conf_port:
+            tracker.errors.append(f"README.md 写的默认监听端口 {m.group(1)} 与 conf 不一致")
+
+    # 7e) INFO 报的版本号必须等于 api.md 示例里的版本号。
+    src = read(ROOT / "src" / "command" / "string_cmd.h").replace("\r\n", "\n")
+    code_ver = re.search(r'concurrentcache_version:([0-9][0-9.]*)', src)
+    doc_ver = re.search(r'concurrentcache_version:([0-9][0-9.]*)', api_text)
+    if not code_ver or not doc_ver:
+        tracker.errors.append("找不到 concurrentcache_version 的其中一处（代码或 api.md），判据失效")
+    elif code_ver.group(1) != doc_ver.group(1):
+        tracker.errors.append(
+            f"INFO 实际输出 concurrentcache_version:{code_ver.group(1)}，"
+            f"docs/api.md 示例写的是 {doc_ver.group(1)}"
+        )
+
+    # 7f) 文档里出现的镜像仓库地址，必须有工作流真的往那儿推。
+    workflow_text = load_workflow_text()
+    for path, text in sorted(docs.items()):
+        for m in re.finditer(r"(ghcr\.io|docker\.io)/([A-Za-z0-9_./-]+)", text):
+            if m.group(1) not in workflow_text:
+                tracker.errors.append(
+                    f"{path.relative_to(ROOT)} 让人拉 {m.group(0)}，但没有任何 workflow "
+                    "往这个仓库推镜像（不存在这个可拉取的镜像）"
+                )
+
+
 def load_baseline() -> dict[str, list[tuple[str, str]]]:
     """kind -> [(name, note)]；同时记录哪些条目真的被触发过。"""
     kinds: dict[str, list[tuple[str, str]]] = {}
@@ -113,8 +266,10 @@ def probe_registered(names: list[str], binary: Path) -> set[str]:
 
 
 def main() -> int:
-    probe = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "build" / "test" / "command-table-probe"
-    if not probe.exists():
+    docs_only = "--docs-only" in sys.argv[1:]
+    positional = [a for a in sys.argv[1:] if not a.startswith("--")]
+    probe = Path(positional[0]) if positional else ROOT / "build" / "test" / "command-table-probe"
+    if not docs_only and not probe.exists():
         print(f"找不到命令表探针 {probe}（先构建 command-table-probe）", file=sys.stderr)
         return 2
 
@@ -132,12 +287,19 @@ def main() -> int:
         whitelist = set(re.findall(r'cmd_name\s*==\s*"([a-z0-9_]+)"', block.group(1)))
 
     candidates = sorted(parsed_registered | whitelist | READ_COMMANDS | OPS_COMMANDS)
-    registered = probe_registered(candidates, probe)
+    if docs_only:
+        # 本地（例如没有 POSIX 构建的 Windows 机器）跑文档判据时的退路：注册表取
+        # 源码正则的解析结果。CI 不走这条路 —— 那边 1) 会先把正则与探针的运行时
+        # 答案对齐，两者不一致就直接判红。
+        registered = parsed_registered
+        print("::notice::--docs-only：不调用探针，注册表用源码正则解析结果")
+    else:
+        registered = probe_registered(candidates, probe)
 
     # 1) 正则解析与运行时必须一致，否则后面所有判断都建立在错误的名单上。
     only_in_source = parsed_registered - registered
     only_at_runtime = registered - parsed_registered
-    if only_in_source or only_at_runtime:
+    if not docs_only and (only_in_source or only_at_runtime):
         tracker.errors.append(
             f"注册表解析与运行时不一致：源码多 {sorted(only_in_source)}，运行时多 {sorted(only_at_runtime)}"
         )
@@ -255,6 +417,14 @@ def main() -> int:
     }
     if len(set(ports.values())) != 1 or None in ports.values():
         tracker.errors.append(f"监听端口不一致：{ports}")
+
+    # 7) 文档 ↔ 现实：把"文档没有任何错误"从一次性人工清扫变成每次 PR 都要过的检查。
+    registry_names = {name for name, _tgt, _labels, _timeout in registry}
+    conf_port_value = int(conf_port.group(1)) if conf_port else 0
+    if not conf_port:
+        tracker.errors.append("conf/concurrentcache.conf 里读不到 port，文档端口判据无法执行")
+    else:
+        check_docs(md_texts(), registered, registry_names, conf_port_value, tracker)
 
     tracker.stale()
 

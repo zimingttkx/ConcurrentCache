@@ -165,6 +165,12 @@ jobs:
       - name: Check tables, inventory and ports
         run: python3 scripts/ci/check_consistency.py build/test/command-table-probe
 
+      - name: Prove the doc checks can fail
+        # 只看一次"绿"证明不了 §7 那组文档判据不是恒真：它比的是名字集合、计数、
+        # 端口、版本号和链接能否解析，任何一个正则写坏都会让它永远通过。这个步骤
+        # 逐条注入错误、要求只有对应那条变红，再还原。
+        run: python3 scripts/ci/check_docs_gate_injection.py
+
   asan:
     name: asan-smoke
     runs-on: ubuntu-24.04
