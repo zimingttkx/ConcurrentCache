@@ -184,6 +184,39 @@ void run_type_contract_tests(int port) {
         EXPECT_TRUE(reply.is_error());
         EXPECT_TRUE(!reply.starts_with("WRONGTYPE"));
 
+        // TTL 改动也是写。以前 EXPIRE/PERSIST 只动 ExpireDict、不碰脏计数，
+        // 于是纯 TTL 流量下 INFO 的 rdb_dirty_count 恒为 0、基于阈值的快照永不触发，
+        // 重启后 TTL 退回上一份快照 —— Redis 的 EXPIRE/PERSIST 是 dirty++ 的。
+        auto read_dirty = [&client, &reply]() -> long long {
+            if (!do_cmd(client, {"INFO", "persistence"}, reply) || reply.is_error()) {
+                return -1;
+            }
+            const std::string& text = reply.str;
+            const std::string key = "rdb_dirty_count:";
+            const size_t p = text.find(key);
+            if (p == std::string::npos) {
+                return -1;
+            }
+            const size_t q = text.find("\r\n", p + key.size());
+            const size_t stop = (q == std::string::npos) ? text.size() : q;
+            return std::stoll(text.substr(p + key.size(), stop - (p + key.size())));
+        };
+
+        EXPECT_TRUE(do_cmd(client, {"SET", "dt_key", "v"}, reply));
+        EXPECT_TRUE(do_cmd(client, {"EXPIRE", "dt_key", "100"}, reply));
+        EXPECT_EQ(reply.integer, 1LL);
+        const long long after_expire = read_dirty();
+        EXPECT_TRUE(after_expire >= 0);
+        EXPECT_TRUE(do_cmd(client, {"PERSIST", "dt_key"}, reply));
+        EXPECT_EQ(reply.integer, 1LL);
+        EXPECT_TRUE(read_dirty() > after_expire);
+        // 对不存在的键 PERSIST 回 0，也不能把计数抬上去
+        EXPECT_TRUE(do_cmd(client, {"PERSIST", "dt_missing_key"}, reply));
+        EXPECT_EQ(reply.integer, 0LL);
+        const long long before_noop = read_dirty();
+        EXPECT_TRUE(do_cmd(client, {"PERSIST", "dt_missing_key"}, reply));
+        EXPECT_TRUE(read_dirty() == before_noop);
+
         // 哈希键 → WRONGTYPE，且哈希不能被毁掉
         EXPECT_TRUE(do_cmd(client, {"HSET", "hb_key", "f", "keepme"}, reply));
         EXPECT_TRUE(do_cmd(client, {"INCRBY", "hb_key", "1"}, reply));

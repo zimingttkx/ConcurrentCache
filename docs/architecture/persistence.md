@@ -288,7 +288,7 @@ sequenceDiagram
 | BGSAVE 不并发 | `bgsave_in_progress_` 原子标志（SAVE/BGSAVE 命令均先检查） |
 | 同步/异步保存不并发写文件 | `save_mutex_` 串行化 |
 | 磁盘上永远是完整文件 | `.tmp` 写入 + fsync + 原子 `rename`（§5.1） |
-| 写后脏计数递增 | `set/del/set_with_expire/incrby` 在 `GlobalStorage` 内部递增（注意：EXPIRE 命令直改 `expire_dict_` 的路径**不**递增脏计数） |
+| 写后脏计数递增 | `set/del/set_with_expire/incrby` 在 `GlobalStorage` 内部递增；EXPIRE/PEXPIRE/EXPIREAT/PERSIST 走的是 `expire_cmd.h` 直改 `expire_dict_` 的路径，那里显式调 `storage.increment_dirty()`（PERSIST 只在真的移除了 TTL 时记一次）。TTL 是要进 RDB 的元数据，漏记会让纯 TTL 流量的实例永远凑不到阈值、基于阈值的快照一次都不触发 |
 | 脏计数扣减时机 | BGSAVE **启动成功时**用 `consume_dirty_count(观测值)` 扣减（而非完成时清零），防 threshold==1 时每轮重复触发，也不吞掉启动期间的新写入 |
 | 启动前已恢复 | `load()` 在 `SubReactor.start()` 之后、`ExpirationChecker.start()` 之前 |
 | 优雅退出保存 | `main.cpp` 关闭流程最后 `rdb.save(path, storage)` |
