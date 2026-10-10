@@ -202,6 +202,18 @@ void ClusterBus::handle_accept() {
         // 注意：对端的真实节点名称由其 gossip 消息中的 sender_name 字段确定
         std::string node_name = "handshake:" + std::string(client_ip) + ":" + std::to_string(client_port);
 
+        // 配额：总线端口不认证，任何对端都能一直连。超限就地关掉这条，
+        // 而不是等 fd 耗尽把事件循环拖进空转。
+        if (!inbound_admitted(link_count())) {
+            const uint64_t refused = inbound_refused_.fetch_add(1) + 1;
+            LOG_WARN(CLUSTER,
+                     "ClusterBus: inbound link quota %zu reached, closing %s:%d (refused=%lu)",
+                     kMaxInboundLinks, client_ip, client_port,
+                     static_cast<unsigned long>(refused));
+            ::close(client_fd);
+            continue;
+        }
+
         // 设置为非阻塞
         int flags = fcntl(client_fd, F_GETFL, 0);
         if (flags < 0) {
@@ -264,6 +276,11 @@ ClusterLink* ClusterBus::create_link(int fd, const std::string& node_name, const
     }
 
     return raw_link;
+}
+
+size_t ClusterBus::link_count() const {
+    std::shared_lock<std::shared_mutex> lock(links_mutex_);
+    return links_.size();
 }
 
 void ClusterBus::remove_link(const std::string& node_name) {
@@ -337,9 +354,11 @@ void ClusterBus::register_link_to_loop(ClusterLink* link) {
         raw_link->handle_write();
     });
 
+    // 走 link 自己的 handle_error()（内部是 disconnect_and_notify），不要写成
+    // disconnect()：不通知的话 remove_link 不会被叫起，这条 handshake:* 条目、
+    // 它的 Channel 与 link_channels_ 里的对象就永久留着。
     channel->set_error_callback([raw_link]() {
-        LOG_ERROR(CLUSTER, "ClusterBus: link fd error: %s", raw_link->node_name().c_str());
-        raw_link->disconnect();
+        raw_link->handle_error();
     });
 
     // 监听读和写事件

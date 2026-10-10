@@ -314,6 +314,12 @@ std::string ClusterCommand::handleInfo(const std::vector<std::string>& args) {
     // 总线身份对账拒了多少条。没有这个数，"复制被静默丢掉"和"什么都没发生"在
     // 协议面上长得一模一样。
     result += "cluster_bus_identity_rejected:" + std::to_string(state->bus_identity_rejections()) + "\n";
+    // 入站链路数与因配额被关掉的连接数。没有这两个数，"对端反复连接被拒"与
+    // "集群健康"在协议面上长得一样，而前者正是资源耗尽的前兆。
+    auto* bus = ClusterServer::instance().getBus();
+    result += "cluster_bus_inbound_links:" + std::to_string(bus ? bus->link_count() : 0) + "\n";
+    result += "cluster_bus_inbound_refused:"
+              + std::to_string(bus ? bus->inbound_refused() : 0) + "\n";
     result += "cluster_slots_assigned:" + std::to_string(slot_owner_count) + "\n";
     result += "cluster_my_node:" + my_node->getName() + "\n";
     int64_t epoch = my_node->getInfo().config_epoch;

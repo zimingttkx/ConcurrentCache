@@ -41,6 +41,8 @@ public:
 
     // 获取连接管理器
     [[nodiscard]] ClusterConnection* getConnection() { return &connection_; }
+    // 链路配额与拒绝计数在 bus 上（入站链路归它管），CLUSTER INFO 要读
+    [[nodiscard]] ClusterBus* getBus() { return &cluster_bus_; }
 
     // 获取 Gossip 协议
     [[nodiscard]] ClusterGossip* getGossip() { return &gossip_; }

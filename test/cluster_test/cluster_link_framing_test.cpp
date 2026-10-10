@@ -13,6 +13,7 @@
 
 #include "../trace/test_assertions.h"
 #include "cluster/cluster_link.h"
+#include "cluster/cluster_bus.h"
 #include "cluster/cluster_connection.h"
 
 namespace cc_server {
@@ -530,6 +531,50 @@ void test_bus_send_msg_writes_a_decodable_v2_frame() {
     EXPECT_TRUE(back == msg.args);
 }
 
+// fd 错误这一条路必须把"链路没了"通知给持有者。
+//
+// 写成 disconnect()（不触发回调）时，ClusterBus::remove_link 不会被叫起：
+// links_ 里那条 handshake:* 条目、它的 Channel 注册、link_channels_ 里的对象
+// 三者永久留着。更糟的是 fd 已被 close 并可被下一条连接复用，之后清理这条死
+// 条目时用的是它的 registered_fd() —— 那正是新链路的 fd，于是把活链路的 Channel
+// 从 epoll 里摘掉：活链路从此收不到事件，表现成"节点之间偶发永久失联"。
+void test_bus_link_error_path_notifies_owner() {
+    TEST_SUITE("Cluster Bus Link Lifecycle");
+
+    BusHarness h;
+    if (!h.ok()) {
+        EXPECT_TRUE(false);
+        return;
+    }
+
+    h.link.handle_error();
+
+    EXPECT_TRUE(h.disconnected);
+    EXPECT_EQ(h.delivered, 0);
+    EXPECT_TRUE(!h.link.is_connected());
+
+    // 第二次调用不能再通知一次（remove_link 被叫两次会误摘别的 fd）
+    h.disconnected = false;
+    h.link.handle_error();
+    EXPECT_TRUE(!h.disconnected);
+}
+
+// 入站配额判断本身。总线端口不认证，反复连进来就能把链路数推高，
+// 直到 fd 耗尽让 accept 走非 EAGAIN 分支、事件循环开始空转。
+void test_bus_inbound_quota_predicate() {
+    TEST_SUITE("Cluster Bus Link Lifecycle");
+
+    using Bus = ClusterBus;
+
+    EXPECT_TRUE(Bus::inbound_admitted(0, 8));
+    EXPECT_TRUE(Bus::inbound_admitted(7, 8));
+    // 正好到配额则拒：判据是 <，写成 <= 会让配额多一条并且这条用例变红
+    EXPECT_TRUE(!Bus::inbound_admitted(8, 8));
+    EXPECT_TRUE(!Bus::inbound_admitted(9, 8));
+    EXPECT_TRUE(Bus::inbound_admitted(Bus::kMaxInboundLinks - 1));
+    EXPECT_TRUE(!Bus::inbound_admitted(Bus::kMaxInboundLinks));
+}
+
 void run_all_cluster_bus_framing_tests() {
     std::cout << "\n========================================\n";
     std::cout << "Running Cluster Bus Framing Tests\n";
@@ -546,6 +591,8 @@ void run_all_cluster_bus_framing_tests() {
     test_bus_unknown_framing_version_disconnects();
     test_bus_v1_legacy_frame_still_parses();
     test_bus_send_msg_writes_a_decodable_v2_frame();
+    test_bus_link_error_path_notifies_owner();
+    test_bus_inbound_quota_predicate();
     test_bus_partial_frame_drip_times_out();
     test_bus_partial_frame_timeout_disconnects();
     test_disconnect_still_reports_the_registered_fd();

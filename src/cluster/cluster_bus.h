@@ -5,6 +5,9 @@
 #include "cluster_link.h"
 #include "../network/event_loop.h"
 #include "../network/channel.h"
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <unordered_map>
 #include <mutex>
@@ -49,6 +52,24 @@ private:
     // Remove link
     void remove_link(const std::string& node_name);
 
+public:
+    // 当前持有的入站链路数（每条 = 一个 fd + 一个 ClusterLink + 一个 Channel +
+    // 收发缓冲）。集群规模是几十的量级，配额给到 512 已经远超需要；上限存在的
+    // 理由不是"防大集群"，而是总线端口不做认证（见 tls-cluster 那条待拍板项），
+    // 反复连进来的对端能把 fd 打到 EMFILE —— 那时 accept 返回 -1 又不是 EAGAIN，
+    // handle_accept 会 break，而 listen fd 持续可读，EventLoop 于是 100% CPU 空转。
+    static constexpr size_t kMaxInboundLinks = 512;
+
+    // 纯谓词：单元测试可以直接钉它（把配额判断写成内联 if 就只能靠起真服务器来验）。
+    static bool inbound_admitted(size_t current_links, size_t limit = kMaxInboundLinks) {
+        return current_links < limit;
+    }
+
+    [[nodiscard]] size_t link_count() const;
+    [[nodiscard]] uint64_t inbound_refused() const { return inbound_refused_.load(); }
+
+private:
+
     // Register/unregister link to EventLoop
     void register_link_to_loop(ClusterLink* link);
     void unregister_link_from_loop(ClusterLink* link);
@@ -64,6 +85,8 @@ private:
     std::atomic<bool> running_{false};          // Running state
 
     Channel* listen_channel_ = nullptr;         // Listen socket's Channel
+
+    std::atomic<uint64_t> inbound_refused_{0};  // 因超过配额而关掉的入站连接数
 
     std::unordered_map<std::string, std::unique_ptr<ClusterLink>> links_;  // All connections
     mutable std::shared_mutex links_mutex_;      // Protect links_
