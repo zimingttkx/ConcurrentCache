@@ -4,7 +4,7 @@
 
 | 版本 | 支持状态 |
 |------|----------|
-| 1.x | ✅ 接受漏洞报告 |
+| 4.x | ✅ 接受漏洞报告（与 `INFO` 的 `concurrentcache_version` 一致） |
 | 未来版本 | ✅ 接受漏洞报告 |
 
 ## 报告漏洞
@@ -50,7 +50,7 @@
 身份对账拒掉的报文数量走 `CLUSTER INFO` 的 `cluster_bus_identity_rejected:<n>`。加这个数是因为被拒的报文里有复制数据：本仓库把被复制的写命令塞在同一条总线上，早期版本要求"声称的 ip 与链路地址逐字相等"，于是 hostname / Docker service-name / NAT 之后对端自报的地址与链路地址永远不等，报文被静默丢掉、对端等不到 PONG 还会把本端标成 PFAIL。现在控制面只在两侧都是字面地址时比地址，数据面改成认"这个名字已在成员表里"（握手阶段不会发数据面报文，所以随机来客仍然被拒）。这两条都还是启发式，不是授权——真正的凭据是下面那个签名。
 先纠正一句这里先前写错的话：**Redis 并不给总线报文签名。** `cluster_legacy.c` 里没有任何 sign / hmac / authenticate 逻辑（那个 `internal_secret` 是模块间通信用的，不上总线），`redis.conf` 把话说得更直白：总线端口 "has no authentication of its own"，而认证它的办法是 `tls-cluster yes` —— 开了之后对端必须拿出能用 CA 验通过的证书，两个方向都要，跟只管客户端端口的 `tls-auth-clients` 无关。所以这一项的正解是接 TLS（`find_package(OpenSSL)` + `SSL_accept`/`SSL_connect` 包住总线链路，验证过 CA 才读写帧头），不是补一个 Redis 没有的签名。
 
-**总线链路数没有上限。** 每条链路 = 一个 fd + 最大 256MB 的接收缓冲，而建立链路只需要对端能连上 `port + 10000`。上面那四道门管的是"单条链路能不能挂太久"，没有管"能挂多少条"。缺的是 `ClusterConnection` 里一个链路数上界（按成员表规模给值），超了就拒新建，并把当前链路数与拒绝数计进 `CLUSTER INFO`。这条不依赖任何外部组件，是这两条里代价最小的。
+**总线入站链路已有配额**：`kMaxInboundLinks = 512`（`cluster_bus.h:61`），超限的连接在 accept 处直接关掉并计入 `cluster_bus_inbound_refused`。 每条链路 = 一个 fd + 最大 256MB 的接收缓冲，而建立链路只需要对端能连上 `port + 10000`。上面那四道门管的是"单条链路能不能挂太久"，没有管"能挂多少条"。缺的是 `ClusterConnection` 里一个链路数上界（按成员表规模给值），超了就拒新建，并把当前链路数与拒绝数计进 `CLUSTER INFO`。这条不依赖任何外部组件，是这两条里代价最小的。
 
 如果仍要在 TLS 之外另加一层报文签名，那是**本项目自己的方案**，不要写成"与 Redis 一致"——真 Redis 节点不会带这个签名，加了就直接断掉与 Redis 集群线的互通。形状是：所有节点相同的共享密钥对帧做 HMAC-SHA256，截断 16 字节附在帧尾，接收端在解析之前用常量时间比较验完再动状态；代价同样是引入 OpenSSL（`libssl-dev` / Dockerfile / vcpkg 清单都要改），而且必须把"没配密钥就拒绝总线"定成显式选项而不是静默放过。
 

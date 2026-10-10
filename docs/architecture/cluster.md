@@ -63,7 +63,7 @@ flowchart TB
 | 成员 | 类型 | 锁 |
 |------|------|---|
 | `nodes_` | `unordered_map<string, shared_ptr<ClusterNode>>` | `std::shared_mutex` |
-| `slots_` | `unordered_map<int, shared_ptr<ClusterNode>>`（16384 项） | `slots_mutex_` |
+| `slots_` | `unordered_map<int, shared_ptr<ClusterNode>>`，**只装已分配的槽**（构造函数不预建 16384 项，只有 `setNodeForSlot` 写入） | `slots_mutex_` |
 | `migrating_slots_` | `unordered_map<int, SlotMigrationInfo>` | `migration_mutex_` |
 | `importing_slots_` | `unordered_map<int, SlotMigrationInfo>` | `migration_mutex_` |
 | `replicas_` | `unordered_map<string, vector<shared_ptr<ClusterNode>>>` | `replicas_mutex_` |
@@ -166,9 +166,9 @@ sequenceDiagram
     end
 
     A->>B: PING
-    Note over A,B: 1000ms 内未收到 PONG<br/>failure_count++
+    Note over A,B: 5000ms 内未收到 PONG<br/>failure_count++（ping_timeout_ms_=5000，<br/>1000ms 是心跳周期不是超时）
 
-    A->>A: failure_count >= 3<br/>标记 B 为 PFAIL
+    A->>A: 首次超时即 markNodeAsPfail()<br/>（cluster_connection.cpp:839-841）
     A->>A: 多数节点报告 PFAIL<br/>升级为 FAIL
 ```
 
@@ -255,6 +255,11 @@ std::vector<ReplicationBufferEntry> repl_buffer_;
 **没有 ACK 回路**：副本执行完不回任何确认，主节点也不记已送达偏移；`REPLCONF`
 在本服务器已被显式拒绝（见 `api.md` §13），集群代码从不发它。所以复制是
 「发出即认为已复制」，断链期间的写入不会被补齐。
+>
+> 状态机图里还有一处与代码不符的旧画法：`kHandshake` / `kSync` / `kSendingRdb` 这几个
+> `ReplicationState` 值在 src 里没有任何写入方（`setReplicationState` 只被传过 `kConnect` 与
+> `kNone`，`cluster_server.cpp:590/612`），真正的同步阶段进度记在 `ReplicationMgr::SyncState`
+> （`replication_mgr.h:24-30`）。
 
 **为什么复制命令必须是 RESP 数组而不是空格拼接？** value 可能含空格或 `\n`
 （`serialize()` 的多行文本）——文本拼接会被截断/错位，RESP bulk string 自带长度前缀。
@@ -281,7 +286,7 @@ std::vector<ReplicationBufferEntry> repl_buffer_;
 ```mermaid
 flowchart TB
     A[PING 超时] --> B[failure_count++]
-    B --> C{count >= 3?}
+    B --> C{超时?}
     C -->|Yes| D[标记 PFAIL<br/>PFAIL 报告广播]
     C -->|No| A
     D --> E[checkFailQuorum<br/>收集 PFAIL 报告]
@@ -338,7 +343,7 @@ flowchart TB
 ```cpp
 struct ClusterMsgHeader {
     uint32_t magic;           // 0x43 ('C')
-    uint16_t version;         // 协议版本 = 1
+    uint16_t version;         // 协议版本 = 2（kBusFramingVersion；send_msg 强制写入）
     uint16_t type;            // ClusterMsgType
     uint32_t length;          // 帧总长度（含 header，单位字节）
     uint64_t sender_epoch;
@@ -460,7 +465,7 @@ cluster_enabled = false        # 随仓库发布的 conf 是 false，需手动�
 | 频繁 FAIL 抖动 | 调大 `max_ping_failures` |
 | 故障转移慢 | 调小 `failover_timeout_ms` |
 | 复制延迟高 | 调大 `kReplicationBufferSize` |
-| 槽分布不均 | 用 `CLUSTER REBALANCE` 重分配 |
+| 槽分布不均 | 手工搬：`CLUSTER SETSLOT` + `CLUSTER MIGRATE`（**没有 `CLUSTER REBALANCE` 这条子命令**，`cluster_cmd.cpp:88-108` 的 dispatch 里没有它，会被回 `ERR Unknown CLUSTER subcommand`） |
 | 脑裂 | 确认 `quorum > N/2` |
 
 ## 12. 关键源码位置

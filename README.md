@@ -149,7 +149,7 @@ ConcurrentCache 是纯 C++20 实现的内存对象缓存系统，兼容 Redis RE
 
 | 命令 | 说明 |
 |------|------|
-| INFO [section] | server / stats / persistence / keyspace / all |
+| INFO [section] | server / stats / persistence / memory / keyspace / all |
 | DEBUG OBJECT key | 查看 key 的类型（`DEBUG SLEEP` 已移除） |
 | CLUSTER MEET/NODES/INFO/ADDSLOTS/SLOTS/DELSLOTS/SETSLOT/REPLICATE/FAIL/MIGRATE | 10 个子命令 |
 | RESTORE key ttl payload | 装载 `CacheObject::serialize()` 的载荷 |

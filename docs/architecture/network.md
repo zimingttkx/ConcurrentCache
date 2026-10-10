@@ -8,7 +8,7 @@
 
 | 目标 | 手段 |
 |------|------|
-| 支撑 10K+ 并发长连接 | Linux epoll **纯 LT** 模式（全仓库无 `EPOLLET`）+ 启动时 `setrlimit(RLIMIT_NOFILE)` 提到 65535 |
+| 支撑 10K+ 并发长连接 | Linux epoll **纯 LT** 模式（全仓库无 `EPOLLET`）+ 启动时把 `RLIMIT_NOFILE` 的 soft 上限抬到 `min(硬上限, 65535)`（`main.cpp:103`——硬上限本身不足 65535 时不会凭空变高，要更大必须改 systemd/ulimit 的硬限） |
 | 充分利用多核 | MainSubReactor 分工：1 个 MainReactor accept + N 个 SubReactor 处理 I/O |
 | 避免单线程瓶颈 | `SubReactorPool` 轮询分发 |
 | 跨线程安全唤醒 | 每个 `EventLoop` 自带 `wakeup pipe` |
@@ -102,7 +102,7 @@ SubReactor 本身没有 `loop()`/`epoll_wait`——线程体就是 `EventLoop::l
 | `std::vector<epoll_event> events_` | `epoll_wait` 输出缓冲，初始 65536，写满自动翻倍 |
 | `std::unordered_map<int, Channel*> channels_` | fd → Channel 反向索引（事件分发用） |
 | `std::atomic<bool> quit_` | 退出标志 |
-| `std::mutex channels_mutex_` | 保护 `channels_` map（跨线程注册安全：MainReactor 线程会为 SubReactor 注册 Channel） |
+| `std::mutex channels_mutex_` | 保护 `channels_` map（保护 `channels_`：`queue_in_loop` 从别的线程往 loop 里投任务，与 `loop()` 里的分发并发。Channel 的**注册本身**发生在归属 loop 线程内——`add_connection` 只是把 `register_connection` 投进任务队列，见 §3.1） |
 | `time_t last_config_check_time_` | 配置热加载节流（每 10 秒检查一次，见下） |
 
 **事件循环伪代码**（`event_loop.cpp::loop()`）：
@@ -191,7 +191,12 @@ void Channel::handle_event() {
     triggered_events_ = 0;
 
     if (revents & EPOLLERR)                 { if (error_cb) error_cb(); return; }
-    if (revents & (EPOLLHUP | EPOLLRDHUP))  { if (close_cb) close_cb(); return; }
+    if (revents & (EPOLLHUP | EPOLLRDHUP)) {   // 没有 close_cb 时依次退回 read_cb、error_cb：
+                                              // EPOLLHUP 是持续条件，什么都不做就让 epoll_wait
+                                              // 立刻返回，loop 会 100% CPU 空转（channel.cpp:67-73）
+        if (close_cb) close_cb(); else if (read_cb) read_cb(); else if (error_cb) error_cb();
+        return;
+    }
     if (revents & EPOLLIN)                  { if (read_cb) read_cb(); }
     if (revents & EPOLLOUT)                 { if (write_cb) write_cb(); }
 }
@@ -231,7 +236,7 @@ void Channel::handle_event() {
 **读事件处理**（`connection.cpp::handle_read()`）——LT 模式，单次 recv，剩余数据由下一次 EPOLLIN 驱动：
 
 ```text
-n = recv(fd, temp_buffer, 4096)      // 4KB 栈上缓冲
+n = recv(fd, temp_buffer, sizeof(temp_buffer) - 1)   // 4095，留一个字节给 NUL      // 4KB 栈上缓冲
 if n == 0: close()  // FIN
 if n < 0 && EAGAIN: return  // 数据读完
 input_buffer_.append(temp_buffer, n)
@@ -255,7 +260,7 @@ for each command in parsed:
 **写事件处理**（`handle_write()`）：
 
 ```text
-if output_buffer_.readable == 0:          // 空 buffer 早退
+if output_buffer_.readable_bytes() == 0:   // 空 buffer 早退
     channel_->disable_all() + enable_reading()
     return
 n = write(fd, output_buffer_.peek(), readable)
@@ -272,7 +277,8 @@ if n < 0 && EAGAIN: return  // 内核缓冲区满
 2. remove_channel（从 epoll 摘除）
 3. close(fd)                       ← 必须先于回调
 4. 触发 close_callback_             → SubReactor::remove_connection 用【建连时捕获的
-                                  client_fd】从 connections_ 里 erase，销毁 Connection
+                                  client_fd】从 connections_ 里 erase；但**不在这里析构**——转成 shared_ptr 交给 loop，
+                                  在下一次迭代开头排空任务队列时才真正销毁（此刻上一轮分发的栈帧已退干净）
 5. 回调返回后不再访问任何成员        ← 此刻 this 可能已经不存在
 ```
 
@@ -317,13 +323,13 @@ sequenceDiagram
     MR->>SRP: get_next_reactor()
     SRP-->>MR: SubReactor i
     MR->>SR: add_connection(fd)
-    Note over SR,EL: 在 MainReactor 线程内执行（跨线程）：<br/>构造 Connection、设置回调
+    Note over SR,EL: MainReactor 线程只做一件事：<br/>loop->queue_in_loop(register_connection)<br/>下面四步全部在该 SubReactor 自己的 loop 线程里执行
     SR->>EL: channel->enable_reading() → update_channel()
     EL->>EL: epoll_ctl(EPOLL_CTL_ADD, fd)<br/>（channels_mutex_ 保护）
     SR->>SR: connections_[fd] = conn<br/>（shared_mutex 写锁）
 ```
 
-> 跨线程安全性：`add_connection` 由 MainReactor（accept）线程直接调用，Channel 注册由 `EventLoop::channels_mutex_` 保护，连接表写入由 `SubReactor::connections_mutex_`（`std::shared_mutex`）保护——SubReactor 线程读连接表时拿共享锁。
+> 跨线程安全性：`add_connection` 由 MainReactor（accept）线程直接调用，Channel 注册由 `EventLoop::channels_mutex_` 保护，连接表由 `SubReactor::connections_mutex_` 保护——但今天这张表**只有写者**：`register_connection` 与 `remove_connection` 都在归属 loop 线程里拿 `unique_lock`（`sub_reactor.cpp:243/270`），没有跨线程读者，所以共享锁目前只是为将来的只读遍历留的口子，不代表存在"MainReactor 读、SubReactor 写"那种并发读场景。
 
 ### 3.2 命令处理
 
@@ -449,7 +455,7 @@ sequenceDiagram
 | 组件 | OS 线程 | 访问的共享状态 | 同步方式 |
 |------|---------|---------------|---------|
 | `MainReactor` | 1 个 | `SubReactorPool::get_next_reactor()` 的 `next_index_`；向目标 loop 投递 `register_connection` 任务 | atomic；`pending_tasks_mutex_` + `channels_mutex_` |
-| `SubReactor` | N 个 | 连接表（MainReactor 线程写、SubReactor 线程读） | `std::shared_mutex` |
+| `SubReactor` | N 个 | 连接表（只有归属 loop 线程写；`add_connection` 跨线程的部分只是往 `pending_tasks_` 投递） | `std::shared_mutex`（当前全部走 `unique_lock`） |
 | `ThreadPool` | `thread_pool_size` 个 | 任务队列 | mutex + condvar |
 | `ExpirationChecker` | 1 个 | `GlobalStorage` 分片 | `std::shared_mutex` |
 | `RdbScheduler` | 1 个 | `GlobalStorage` 分片 | `std::shared_mutex` |

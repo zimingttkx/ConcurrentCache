@@ -53,7 +53,7 @@ PING [message]
 | 命令 | 语法 | 返回 | 复杂度 |
 |------|------|------|--------|
 | `GET` | `GET key` | `$N\r\nvalue\r\n` 或 `$-1\r\n` | O(1) |
-| `SET` | `SET key value [EX s \| PX ms \| EXAT unix秒 \| PXAT unix毫秒 \| KEEPTTL] [NX \| XX] [GET]` | 无选项时 `+OK\r\n`（覆盖写入并清除该 key 已有的 TTL，等同 PERSIST）；`NX`/`XX` 条件不满足回 `$-1\r\n`；带 `GET` 回写入前的旧值（旧值不是字符串类型时回 `WRONGTYPE`） | O(1) |
+| `SET` | `SET key value [EX s \| PX ms \| EXAT unix秒 \| PXAT unix毫秒 \| KEEPTTL] [NX \| XX] [GET]` | 无选项时 `+OK\r\n`（覆盖写入并清除该 key 已有的 TTL，等同 PERSIST）；`NX`/`XX` 条件不满足回 `$-1\r\n`；带 `GET` 回写入前的旧值（旧值不是字符串类型时回 `WRONGTYPE`）；`EX`/`PX` 的值 ≤ 0，或 `EX` 的秒数大到换算成毫秒会溢出时返回 `-ERR invalid expire time in 'set' command`（`EXAT`/`PXAT` 只在 < 0 时拒） | O(1) |
 | `DEL` | `DEL key [key ...]` | `:N\r\n`（删除成功的 key 数） | O(N) |
 | `EXISTS` | `EXISTS key` | `:1\r\n` 或 `:0\r\n`（已过期但尚未被删除的 key 返回 0） | O(1) |
 | `INCR` | `INCR key` | 递增后整数值（原子） | O(1) |
@@ -62,7 +62,7 @@ PING [message]
 | `DECRBY` | `DECRBY key delta` | 减 delta 后的整数值（原子） | O(1) |
 
 > **DEL** 支持批量删除多个 key，返回实际删除成功的数量。
-> **INCR/DECR/INCRBY/DECRBY** 是**原子操作**（读-改-写在分片独占锁内完成，并发调用不丢失更新）：若 key 不存在视为 0；若 delta 无法解析或结果 64 位溢出返回 `-ERR value is not an integer or out of range`；若 key 现值非整数返回 `-ERR value is not an integer`；若 key 持有非 STRING 类型返回 `-WRONGTYPE Operation against a key holding the wrong kind of value`。
+> **INCR/DECR/INCRBY/DECRBY** 是**原子操作**（读-改-写在分片独占锁内完成，并发调用不丢失更新）：若 key 不存在视为 0；若 delta 无法解析返回 `-ERR value is not an integer or out of range`；四条命令的 64 位溢出统一返回 `-ERR increment or decrement would overflow`；若 key 现值非整数返回 `-ERR value is not an integer`（现值用 `std::stoll` 读，**只要求前缀是整数**：值为 `12abc` 时 INCR 得到 13，Redis 则会报错）；若 key 持有非 STRING 类型返回 `-WRONGTYPE Operation against a key holding the wrong kind of value`。
 > **EXISTS / HSET / SPOP 只接受单个 key（或单个 field/value 对）**，多传参数返回 `-ERR wrong number of arguments for '<cmd>' command`——与 Redis 的多参数形式不同，见 §16。
 
 ## 5. 过期 TTL
@@ -87,7 +87,9 @@ PING [message]
 | `LRANGE` | `LRANGE key start stop` | 元素数组（支持负索引） |
 
 > **LPUSH/RPUSH** 支持一次推入多个值。若 key 当前为 STRING 类型，会自动转换为 LIST（空字符串不保留）。
-> **LRANGE** 的 start/stop 支持负索引（-1 表示最后一个元素）。
+> **LRANGE** 的 start/stop 支持负索引（-1 表示最后一个元素）。stop 换算后仍为负时被**夹到 0**：
+> `LRANGE k 0 -3` 在 2 个元素的表上返回下标 0 的元素。Redis 在这种情形返回空列表，本服务器的
+> ZRANGE 也返回空 —— 这是 LRANGE 与 Redis 的一处已知差异。
 > 对非 LIST 类型的 key 执行列表命令返回 `-WRONGTYPE` 错误。
 
 ## 7. 哈希 Hash
@@ -128,7 +130,9 @@ PING [message]
 | `ZRANGE` | `ZRANGE key start stop [WITHSCORES]` | 按排名索引返回成员 |
 
 > **ZADD** 支持一次添加多个 score/member 对。若 member 已存在且 score 不同，会更新分数。
-> **ZRANGE** 按排名索引（index）范围查询，start/stop 支持负索引（-1 表示最后一个）。可选 `WITHSCORES` 参数同时返回分数。**不支持 Redis 6.2+ 的 BYSCORE/BYLEX/REV/LIMIT 选项**。
+> **ZRANGE** 按排名索引（index）范围查询，start/stop 支持负索引（-1 表示最后一个）；stop 换算后仍为负
+> 直接返回空列表（与上面 LRANGE 的夹到 0 不同，与 Redis 一致）。可选 `WITHSCORES` 参数同时返回分数。
+> **不支持 Redis 6.2+ 的 BYSCORE/BYLEX/REV/LIMIT 选项**。
 > 对非 ZSET 类型的 key 执行有序集合命令返回 `-WRONGTYPE` 错误。
 
 ## 10. 持久化
@@ -148,13 +152,13 @@ PING [message]
 | 命令 | 语法 | 返回 |
 |------|------|------|
 | `INFO` | `INFO [section]` | Bulk String（server/stats/memory/persistence/keyspace/all） |
-| `DEBUG` | `DEBUG OBJECT <key>` | 类型信息（Bulk String，如 `Type: string`）；key 不存在返回 `-ERR no such key` |
+| `DEBUG` | `DEBUG OBJECT <key>`（子命令**区分大小写**，只认小写 `object`/`sleep`，大写回 `-ERR Unknown DEBUG subcommand`） | 类型信息（Bulk String，如 `Type: string`）；key 不存在返回 `-ERR no such key` |
 
 > **DEBUG SLEEP 已被移除**：`DEBUG SLEEP <sec>` 会阻塞事件循环，现返回 `-ERR DEBUG SLEEP is not supported`。
 > **`# Memory` 里没有 `used_memory`**：Redis 那一栏是分配器报告的已用字节，而本项目那三层内存池还没接进任何分配路径，没有可信值可报。字段缺失比一个抄来的数字好。这里报的是内核视角的 `used_memory_rss`（读 `/proc/self/status` 的 `VmRSS`），加一个 `used_memory_keys`（条目数，不是字节）。淘汰只看条数，所以 `maxmemory` 恒为 `0`（= 没有按字节的硬上限）、`maxmemory_policy` 说明实际按什么在淘汰。
 >
 > `total_connections_received`（成功 accept 的连接数）与 `total_commands_processed`（造出命令对象并进入执行路径的条数；`MOVED`/`ASK` 重定向与未知命令名不计入）是进程内实时累计，重启归零。`avg_ttl` 单位是**毫秒**；`expires` / `avg_ttl` 只统计还没过期的条目，而 `keys` 是底层哈希表条目数（含已过期未删除的），所以 `keys=100,expires=3` 是正常的，不是矛盾。
-> section 名区分大小写且只认 `server` / `stats` / `persistence` / `keyspace` / `all`，其它值返回 `-ERR Unknown INFO section: <name>`。
+> section 名区分大小写，只认 `server` / `stats` / `persistence` / `memory` / `keyspace` / `all`，其它值返回 `-ERR Unknown INFO section: <name>`。
 
 `INFO` 输出示例：
 
@@ -198,7 +202,7 @@ CLUSTER <SUBCOMMAND> [arg ...]
 | `ADDSLOTS` | `CLUSTER ADDSLOTS <slot> [slot ...]` | 指派槽到本节点 |
 | `SLOTS` | `CLUSTER SLOTS` | 槽-节点映射 |
 | `DELSLOTS` | `CLUSTER DELSLOTS <slot> [slot ...]` | 移除本节点槽 |
-| `SETSLOT` | `CLUSTER SETSLOT <slot> NODE/MIGRATING/IMPORTING` | 设置槽状态 |
+| `SETSLOT` | `CLUSTER SETSLOT <slot> NODE/MIGRATING/IMPORTING/STABLE` | 设置槽状态；状态词必须**逐字大写**（`cluster_cmd.cpp:546/562/578/602`），MIGRATING/IMPORTING 少写目标节点回的是 `-ERR syntax error, MIGRATING needs target node` 这类带说明的文本，不是裸 `syntax error` |
 | `REPLICATE` | `CLUSTER REPLICATE <node-name>` | 将本节点设为某主节点的从节点 |
 | `FAIL` | `CLUSTER FAIL` | 强制标记主节点下线 |
 | `MIGRATE` | `CLUSTER MIGRATE host port key timeout [REPLACE]` | 键迁移（内部；Redis 顶层 `MIGRATE ... dbid ...` 未注册） |
@@ -262,13 +266,14 @@ RESTORE <key> <ttl> <serialized-value>
 |----------|------|
 | `-ERR wrong number of arguments for '<cmd>' command` | 参数个数错误 |
 | `-ERR value is not an integer` | 现值不是整数（INCR/DECR/INCRBY/DECRBY 作用在非整数字符串上） |
-| `-ERR value is not an integer or out of range` | 整数入参（SET 的 EX/PX/EXAT/PXAT、SETEX 的 seconds、INCRBY/DECRBY 的 delta）无法解析或 64 位溢出 |
-| `-ERR increment or decrement would overflow` | INCR/DECR 64 位溢出 |
-| `-ERR invalid key` | key 为空字符串 |
-| `-ERR value is not a valid float` | ZADD 的 score 无法解析为有限浮点数（含 `nan`/`inf`/尾巴塞字符） |
-| `-ERR syntax error` | SET 的选项组合非法（如 `NX XX`、`EX` 与 `EXAT` 同时出现）、ZRANGE 的 `WITHSCORES` 拼错、CLUSTER 子命令参数形态不对 |
+| `-ERR value is not an integer or out of range` | 整数入参（SET 的 EX/PX/EXAT/PXAT、INCRBY/DECRBY 的 delta）**无法解析**时。溢出走 `increment or decrement would overflow`；SETEX/EXPIRE 的 TTL 解析失败回的是 `-ERR value is not an integer`（`expire_cmd.h:84/316`） |
+| `-ERR increment or decrement would overflow` | INCR/DECR/INCRBY/DECRBY **四条**命令的 64 位溢出（`string_cmd.h:282` 是同一处出口） |
+| `-ERR invalid key` | **只有** TTL 类命令（EXPIRE/TTL/PTTL/PERSIST/SETEX，见 `expire_cmd.h:45/114/177/244/290`）在空 key 时回这条；SET/GET/DEL/INCR 传空串不会产生它 |
+| `-ERR value is not a valid float` | ZADD 的 score 完全读不出来、超出 double 范围，或读完还有尾随字节（`1.5abc`）——`string_cmd.h:1097/1103` |
+| `-ERR value is NaN or Infinity` | ZADD 的 score 是 `nan`/`inf` 这类合法浮点字面量但不是有限值（`string_cmd.h:1109`，单独一条文本，与上一行不同） |
+| `-ERR syntax error` | SET 的选项组合非法（如 `NX XX`、`EX` 与 `EXAT` 同时出现）。ZRANGE 的第 5 个参数只有逐字等于 `WITHSCORES` 才生效，拼错会被**静默忽略**、返回不带分数的成员数组（`string_cmd.h:1234`），不报错 |
 | `-ERR invalid integer` | ZRANGE/LRANGE 的 start/stop 无法解析为整数 |
-| `-ERR invalid expire time` | SETEX 的 seconds ≤ 0 |
+| `-ERR invalid expire time` | SETEX 的 seconds ≤ 0；SET 的 `EX`/`PX` ≤ 0 回的是更长的 `invalid expire time in 'set' command`（`string_cmd.h:171/175`） |
 | `-ERR no such key` | DEBUG OBJECT 的 key 不存在 |
 | `-ERR invalid TTL` | RESTORE 的 ttl 不是整数 |
 | `-ERR Invalid or malformed serialized payload` | RESTORE 的载荷任一圈（帧）不完整、类型标签不认识、或结尾有多余字节 |
@@ -329,7 +334,7 @@ $-1\r\n                      Nil
 | `$`/`*` 头部的长度行不是数字 | `invalid number in protocol header` |
 | 负长度不是 `-1` | `invalid negative length` |
 | Bulk string 长度 > 512MB | `bulk string length exceeds limit` |
-| 数组长度 > 100 万元素 | `array length exceeds limit` |
+| 数组长度 > 1,048,576（1024×1024）个元素 | `array length exceeds limit`（`resp.cpp:92`） |
 
 > 注意：**不支持 inline 命令**——直接发送裸文本（如 `PING\r\n`）首字节为 `P`，会被按协议错误拒绝并断开。必须使用 RESP 数组格式。
 >

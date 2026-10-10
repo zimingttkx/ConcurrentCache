@@ -278,5 +278,5 @@ void* MemoryPool::allocate(size_t size) {
 
 ## 12. 另见
 
-- [存储层](./storage.md) — 主要消费者
+- [存储层](./storage.md) — 理论上最该接进来的地方（**目前尚未接入**，见开头「当前状态」）
 - [网络层](./network.md) — Buffer 也是堆对象
