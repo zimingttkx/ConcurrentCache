@@ -37,8 +37,8 @@ legacy-file|test/atomic_test/atomic_memory_order_test.cpp|历史复现脚本，�
 # 都被某个 workflow 步骤引用，没接线的登记在这里（每天真跑的只有 failover /
 # psync / cluster_stress / cluster_full / stress_find_limit 这五个，加上对照测试）。
 # 登记的代价是"这脚本从没人跑过、坏了也没人知道"，接进 daily 之后删一行。
-legacy-file|test/e2e_test/e2e_chaos_test.py|未接进任何 job：chaos 场景需要节点被反复杀，跑前要先定判据与耗时预算
-legacy-file|test/e2e_test/e2e_connection_storm.py|未接进任何 job：连接风暴正是 close/生命周期那批修复的靶子，接线价值最高，但要先确认它自己的客户端判据不会误红
-legacy-file|test/e2e_test/e2e_consistency_check.py|未接进任何 job：它的 GET+SET 客户端判据被 #42 判过松（final<=expected 合法成立），接线前先收紧判据
+# 已接线：chaos / connection_storm / consistency_check 三个进了 daily.yml 的 e2e job
+# （Protocol-plane 一步），棘轮在这里少三行。剩下的 high_concurrency_load 与
+# run_all_tests 仍未接线：前者与 cluster_stress 的阶梯高度重复，后者只是本地入口。
 legacy-file|test/e2e_test/e2e_high_concurrency_load.py|未接进任何 job：与 cluster_stress 的阶梯高度重复，先不重复占用夜间时间
 legacy-file|test/e2e_test/run_all_tests.py|未接进任何 job：只是本地一键入口，真正跑的是它调用的那几个脚本

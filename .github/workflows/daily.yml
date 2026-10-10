@@ -150,7 +150,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake build-essential zlib1g-dev python3
+          sudo apt-get install -y cmake build-essential zlib1g-dev python3 redis-tools
 
       - name: Build server
         run: |
@@ -192,6 +192,35 @@ jobs:
       # 各并发级别的 OK/WARN/FAIL 只是打印，不参与退出码，所以这一步不会因性能波动而红。
       - name: Limit probe
         run: python3 test/e2e_test/stress_find_limit.py
+
+      # 单节点协议面。这三个以前只在本地经 run_all_tests.py 手动跑，等于"写好了但
+      # 从不执行"——坏掉没人知道（check_consistency.py 的 4c) 登记的就是这类漂移）。
+      # 接进来的前提是它们各自有真判据、且不是恒过：
+      #   chaos        恶意输入后服务器必须存活（50MB payload、畸形 RESP、故意发的
+      #                不支持命令 BLPOP）；
+      #   storm        默认 2000 条并发连接，PING 成功率 > 70% 且服务器不崩 ——
+      #                正是 close/生命周期那批修复的靶子；
+      #   consistency  场景 A 有下界、C 断言读到的每个值都是写入过的完整值、
+      #                E 要求并发 INCR 精确等于总次数（INCR 在服务端分片独占锁内做
+      #                读-改-写，少一次就是丢更新，与机器快慢无关）。
+      # 它们要外部已启动的服务端，所以这里自己起一个并等它就绪。
+      - name: Protocol-plane e2e (chaos / storm / consistency)
+        run: |
+          ./build/concurrentcache-server --port 6379 &
+          server_pid=$!
+          for _ in $(seq 1 50); do
+            if redis-cli -p 6379 PING >/dev/null 2>&1; then break; fi
+            sleep 0.2
+          done
+          redis-cli -p 6379 PING
+          ulimit -n 65535
+          python3 test/e2e_test/e2e_chaos_test.py --port 6379
+          python3 test/e2e_test/e2e_connection_storm.py --port 6379
+          python3 test/e2e_test/e2e_consistency_check.py --port 6379
+          # 混沌测试打过坏连接，跑完必须还活着；顺便把服务器收掉，别漏进程
+          redis-cli -p 6379 PING
+          kill $server_pid
+          wait $server_pid 2>/dev/null || true
 
       - name: Upload e2e reports
         if: always()

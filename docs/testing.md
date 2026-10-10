@@ -292,7 +292,7 @@ TEST_SUITE("GlobalStorage Basic Operations") {
 | `comparison_test.py` | **ConcurrentCache vs Redis 深度对比**（功能/性能/鲁棒性/内存） | ~5 分钟 |
 | `e2e_connection_storm.py` | 并发连接洪峰（默认 2000 条，`--connections` 可调到万级） | ~1 分钟 |
 | `e2e_high_concurrency_load.py` | 并发读写压测（默认 5 用户 × 20 命令，可调高） | 数十秒 |
-| `e2e_consistency_check.py` | 多协程竞态一致性 | 数十秒 |
+| `e2e_consistency_check.py` | 多协程竞态一致性（A 有下界、C 断言读到的值都是写入过的完整值、E 并发 INCR 精确等于总次数） | 数十秒 |
 | `e2e_chaos_test.py` | 异常 / 混沌 / 恶意输入 | ~1 分钟 |
 | `e2e_failover_test.py` | 主从故障转移 | ~2 分钟 |
 | `e2e_cluster_full_test.py` | 集群全功能 | 数十秒 |
@@ -365,6 +365,9 @@ cmake .. -DCMAKE_BUILD_TYPE=Debug -DENABLE_UBSAN=ON && cmake --build build
 - **required checks**：分支规则集 `main-gate` 里锁了 6 条（build-release / build-assert / gate-tests / consistency / asan-smoke / docker-build）；`contract-tests` 可见但不拦合并
 
 > 重档（TSan/UBSan、长压测、e2e、与真 Redis 的对比、多架构编译）在 `daily.yml`，每天定时 + `workflow_dispatch` 触发，不拦 PR。
+> `daily.yml` 的 `e2e` job 里有一步 **Protocol-plane e2e**：自己起一个 6379 单节点，依次跑
+> `e2e_chaos_test.py`、`e2e_connection_storm.py`、`e2e_consistency_check.py`，跑完再 `PING` 一次
+> 确认服务器扛住了混沌输入。这三个之前只在本地经 `run_all_tests.py` 手动跑，等于写好了但从不执行。
 
 ## 10. 故障排查
 
