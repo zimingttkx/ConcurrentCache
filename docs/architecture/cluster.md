@@ -450,7 +450,7 @@ cluster_enabled = false        # 随仓库发布的 conf 是 false，需手动�
 
 `CLUSTER MEET <ip> <port>` 动态加入集群（`cluster_cmd.cpp`），`<ip>` 允许是主机名（会先解析）。总线端口固定为客户端端口 + 10000，无需单独配置。
 
-**总线对端身份**分两个平面：控制面（gossip 消息）按报文里的 `sender_name` 与字面 IP 比对，数据面（复制写）要求发送方是成员表里已知的节点，非成员的数据消息被丢弃并计入 `CLUSTER INFO` 的 `cluster_bus_identity_rejected`。入站链路以 `handshake:<ip>:<临时端口>` 登记，握手完成后**不会改名也不会回收**——`CLUSTER INFO` 用 `cluster_handshake_nodes` 把这个堆积量报出来，但链路数本身没有上限。另：`cluster_stats_messages_received` 目前是硬编码 `0`，不是真实计数。
+**总线对端身份**分两个平面：控制面（gossip 消息）按报文里的 `sender_name` 与字面 IP 比对，数据面（复制写）要求发送方是成员表里已知的节点，非成员的数据消息被丢弃并计入 `CLUSTER INFO` 的 `cluster_bus_identity_rejected`。入站链路以 `handshake:<ip>:<临时端口>` 登记，握手完成后**不会改名也不会回收**——`CLUSTER INFO` 用 `cluster_handshake_nodes` 与 `cluster_bus_inbound_links` 把堆积量报出来，并且入站链路有 `kMaxInboundLinks = 512` 的配额（超限连接被关掉并计入 `cluster_bus_inbound_refused`）。`cluster_stats_messages_sent` / `cluster_stats_messages_received` 由 `ClusterLink` 在每帧成功发出、每解出一条完整消息时递增（口径是经过总线的消息条数，gossip 与复制数据都算，不是 Redis 那种只算 ping/pong 的口径）；两者长期不对称通常意味着单向连通。
 
 ## 11. 性能与调优
 

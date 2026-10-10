@@ -284,6 +284,9 @@ bool ClusterLink::send_msg(const ClusterMsg& msg) {
                  msg.args.empty() ? "-" : msg.args[0].c_str());
     }
 
+    // 帧已经确定要发出去了（长度合法、未超上限）才计数；被拒绝的帧不算发过。
+    ClusterServer::instance().getState()->note_bus_message_sent();
+
     // 添加到发送缓冲区（加锁保护，不在此线程调用 handle_write，
     // 由 EventLoop 统一负责发送，避免多线程竞争 send_buffer_ 导致数据重复发送）
     {
@@ -643,6 +646,10 @@ bool ClusterLink::decode_msg() {
     // 诊断：记录每个解码消息的来源 fd 和链接名
     LOG_INFO(CLUSTER, "DECODE-MSG fd=%d node=%s type=%u args=%zu",
              fd_, node_name_.c_str(), msg.header.type, msg.args.size());
+
+    // 解出一条完整消息就算"收到"，与它后续是否被采纳无关：运维要看的是对端
+    // 真的发来了多少条，而不是"我接受了多少"。被拒的身份对账另有计数。
+    ClusterServer::instance().getState()->note_bus_message_received();
 
     // 调用消息回调
     if (msg_callback_) {

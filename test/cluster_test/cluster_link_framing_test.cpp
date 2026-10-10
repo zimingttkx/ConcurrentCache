@@ -8,12 +8,14 @@
 #include <sys/socket.h>
 
 #include <cstring>
+#include <cstdint>
 #include <iostream>
 #include <string>
 
 #include "../trace/test_assertions.h"
 #include "cluster/cluster_link.h"
 #include "cluster/cluster_bus.h"
+#include "cluster/cluster_server.h"
 #include "cluster/cluster_connection.h"
 
 namespace cc_server {
@@ -575,6 +577,64 @@ void test_bus_inbound_quota_predicate() {
     EXPECT_TRUE(!Bus::inbound_admitted(Bus::kMaxInboundLinks));
 }
 
+// 总线收发计数必须是活的。
+//
+// CLUSTER INFO 的 cluster_stats_messages_received 以前写死为 0。写死的观测值长得
+// 像数据：两个节点之间单向不通时，运维看这个字段是"收不到任何东西"，而真实原因
+// 可能是根本没发、也可能是不计 —— 分不出来。断言用**增量**，所以进程里别的用例
+// 先跑过也不影响判据。
+void test_bus_message_counters_are_live() {
+    TEST_SUITE("Cluster Bus Message Counters");
+
+    auto* state = ClusterServer::instance().getState();
+    if (state == nullptr) {
+        EXPECT_TRUE(false);  // 拿不到 state 就说明这个判据没在测任何东西
+        return;
+    }
+    const uint64_t sent0 = state->bus_messages_sent();
+    const uint64_t recv0 = state->bus_messages_received();
+
+    BusHarness h;
+    if (!h.ok()) {
+        EXPECT_TRUE(false);
+        return;
+    }
+
+    // 发一条
+    ClusterMsg msg;
+    msg.header.type = static_cast<uint16_t>(ClusterMsgType::kPing);
+    msg.args.emplace_back("ctr_probe");
+    EXPECT_TRUE(h.link.send_msg(msg));
+
+    // 收一条：一个只有 header 的合法 v2 帧（参数区 "0\n" = 零个参数）
+    ClusterMsgHeader header;
+    std::memset(&header, 0, sizeof(header));
+    header.magic = 0x43;
+    header.version = kBusFramingVersion;
+    header.type = static_cast<uint16_t>(ClusterMsgType::kPing);
+    std::snprintf(header.sender_name, sizeof(header.sender_name), "%s", "127.0.0.1:19000");
+    const std::string payload = "0\n";
+    header.length = static_cast<uint32_t>(sizeof(header) + payload.size());
+    std::string bytes;
+    bytes.append(reinterpret_cast<const char*>(&header), sizeof(header));
+    bytes += payload;
+    const ssize_t written = ::write(h.peer_fd, bytes.data(), bytes.size());
+    EXPECT_EQ(written, static_cast<ssize_t>(bytes.size()));
+    h.link.handle_read();
+
+    const uint64_t sent1 = state->bus_messages_sent();
+    const uint64_t recv1 = state->bus_messages_received();
+    std::cout << "  sent " << sent0 << " -> " << sent1
+              << ", recv " << recv0 << " -> " << recv1 << std::endl;
+    EXPECT_TRUE(sent1 >= sent0 + 1);
+    EXPECT_TRUE(recv1 >= recv0 + 1);
+
+    if (!h.link.is_connected()) {
+        return;  // 已经断链就不用再关一次
+    }
+    h.link.disconnect_and_notify();
+}
+
 void run_all_cluster_bus_framing_tests() {
     std::cout << "\n========================================\n";
     std::cout << "Running Cluster Bus Framing Tests\n";
@@ -593,6 +653,7 @@ void run_all_cluster_bus_framing_tests() {
     test_bus_send_msg_writes_a_decodable_v2_frame();
     test_bus_link_error_path_notifies_owner();
     test_bus_inbound_quota_predicate();
+    test_bus_message_counters_are_live();
     test_bus_partial_frame_drip_times_out();
     test_bus_partial_frame_timeout_disconnects();
     test_disconnect_still_reports_the_registered_fd();
