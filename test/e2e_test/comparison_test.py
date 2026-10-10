@@ -88,6 +88,24 @@ class RESP:
         return None, data
 
 
+def settle_rss(samples, tolerance=0.02, settled_runs=2):
+    """RSS 采样序列里第一处「连续 settled_runs 个样本相对窗口最早那个的变化都在 tolerance 内」的末尾值。
+
+    基准取窗口里**最早**的样本，所以持续下降不会被误判成稳定；序列没收敛时返回 None。
+    宁可不报数字，也不要报一个比后续真实负载还高的「空载」值 —— 那正是这段测量以前做的事。
+    """
+    if samples is None or len(samples) < settled_runs:
+        return None
+    for i in range(len(samples) - settled_runs + 1):
+        window = samples[i:i + settled_runs]
+        base = window[0]
+        if base <= 0:
+            continue
+        if all(abs(v - base) <= tolerance * base for v in window[1:]):
+            return window[-1]
+    return None
+
+
 class RespClient:
     """异步 RESP 客户端 — 支持短连接和长连接两种模式"""
 
@@ -376,6 +394,23 @@ appendonly no
             return r.stdout.strip().split("v=")[1].split()[0] if "v=" in r.stdout else "unknown"
         except Exception:
             return "unknown"
+
+    def get_memory_rss_settled(self, port, rounds=6, interval=0.4, tolerance=0.02):
+        """反复采样直到 RSS 收敛，返回 (值, 是否收敛)。
+
+        这一段跑在性能测试之后：FLUSHDB 只删逻辑条目，glibc 把大块（>128KB 的那些走 mmap）
+        还给内核是延迟的。只采一次会得到「空载 728MB、满载 256MB」—— 写进 5 万个键反而少了
+        四百多 MB，再由它算出的「每 key 开销」是个负数。所以采到稳定为止，稳不下来就明说不稳。
+        """
+        samples = []
+        for i in range(rounds):
+            samples.append(self.get_memory_rss(port))
+            settled = settle_rss(samples, tolerance=tolerance)
+            if settled is not None:
+                return settled, True
+            if i < rounds - 1:
+                time.sleep(interval)
+        return (samples[-1] if samples else 0), False
 
     def get_memory_rss(self, port: int) -> int:
         """通过 redis-cli INFO memory 获取 used_memory_rss"""
@@ -1409,9 +1444,14 @@ class MemoryTester:
         await asyncio.sleep(0.5)
 
         # 测量空载内存
-        mem_empty_cc = self.server_mgr.get_memory_rss(self.cc_port)
-        mem_empty_redis = self.server_mgr.get_memory_rss(self.redis_port)
-        print(f"\n  空载内存: CC={mem_empty_cc/1024/1024:.1f}MB, Redis={mem_empty_redis/1024/1024:.1f}MB")
+        mem_empty_cc, stable_cc = self.server_mgr.get_memory_rss_settled(self.cc_port)
+        mem_empty_redis, stable_redis = self.server_mgr.get_memory_rss_settled(self.redis_port)
+        print('')
+        print('  空载内存: CC=%.1fMB%s, Redis=%.1fMB%s' % (
+            mem_empty_cc / 1024 / 1024,
+            '' if stable_cc else '（采样未收敛，数字不可信）',
+            mem_empty_redis / 1024 / 1024,
+            '' if stable_redis else '（采样未收敛，数字不可信）'))
 
         # 写入 50000 个 key (每个 value 256 字节)
         N = 50000
@@ -1441,7 +1481,11 @@ class MemoryTester:
         print(f"  {'空载 RSS':<20} {mem_empty_cc/1024/1024:>15.1f} MB {mem_empty_redis/1024/1024:>15.1f} MB")
         print(f"  {'满载 RSS':<20} {mem_full_cc/1024/1024:>15.1f} MB {mem_full_redis/1024/1024:>15.1f} MB")
         print(f"  {'增量':<20} {delta_cc/1024/1024:>15.1f} MB {delta_redis/1024/1024:>15.1f} MB")
-        print(f"  {'每 key 开销':<20} {per_key_cc:>15.0f} B {per_key_redis:>15.0f} B")
+        # 空载采样没收敛时增量可以是负的，「每 key 开销」就没有意义 ——
+        # 明说不给，而不是往 stdout 和报告里打一个负数。
+        pk_cc = '不可用（空载未收敛）' if delta_cc <= 0 else '%.0f B' % per_key_cc
+        pk_redis = '不可用（空载未收敛）' if delta_redis <= 0 else '%.0f B' % per_key_redis
+        print('  %-20s %18s %18s' % ('每 key 开销', pk_cc, pk_redis))
 
         return {
             "cc_empty_rss_mb": round(mem_empty_cc / 1024 / 1024, 2),

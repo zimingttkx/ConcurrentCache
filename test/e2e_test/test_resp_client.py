@@ -76,6 +76,22 @@ async def main():
           await collect([b'+OK\r\n'], 2),
           ['OK', None])
 
+    # settle_rss：空载 RSS 采样必须等到页面真的还回内核。持续下降的序列不能判"稳定"，
+    # 否则会报出一个比后续真实负载还高的"空载"值，再由它算出负的每 key 开销。
+    check('settle-accepts-flattening-series',
+          [module.settle_rss([728, 400, 260, 256, 256]),
+           module.settle_rss([100, 100, 100])],
+          [256, 100])
+    check('settle-rejects-descending-series',
+          module.settle_rss([728, 700, 650, 600, 520]),
+          None)
+    check('settle-rejects-too-short', module.settle_rss([256]), None)
+    # 容忍度是按相对最早样本算的：3% 的抖动在 2% 阈值下不该收敛，放宽到 5% 才该收敛
+    check('settle-tolerance-anchored-at-window-start',
+          [module.settle_rss([100, 103], tolerance=0.02),
+           module.settle_rss([100, 103], tolerance=0.05)],
+          [None, 103])
+
     # 错误回复也要按条取回，不能被当成 OK
     check('error-reply',
           await collect([b'-ERR wrong number of arguments\r\n+OK\r\n'], 2),
