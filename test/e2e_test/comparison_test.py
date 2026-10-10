@@ -143,7 +143,12 @@ class RespClient:
         deadline = time.monotonic() + timeout
         while True:
             result, rest = RESP.parse_line(self.buf)
-            if result is not None:
+            # 注意 nil：$-1 是**完整**回复，parse_line 用 Python None 表示它，
+            # 但 rest 已经吃掉那 5 个字节。只按 `result is not None` 推进缓冲区的话,
+            # 一条 nil 之后的所有回复都会卡在同一起点读不出来 —— 于是"读到一个不存在的
+            # 字段"之后这条连接永久失灵（对照测试里 HGET f1 拿到 nil，紧接着的
+            # HGET f2 也变成 None，两边一起红，CC 和 Redis 都逃不掉）。
+            if result is not None or len(rest) < len(self.buf):
                 self.buf = rest
                 return result
             remaining = deadline - time.monotonic()
