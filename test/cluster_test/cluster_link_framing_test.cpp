@@ -500,7 +500,11 @@ void test_bus_send_msg_writes_a_decodable_v2_frame() {
         std::string got;
         char buf[4096];
         while (got.size() < want) {
-            const ssize_t n = ::read(h.peer_fd, buf, sizeof(buf));
+            // 一次最多只读"还缺多少"：否则会把正文一起吸进来，下一个 read_exact
+            // 就读到了不属于它的数据（CI 上第一次跑就是这样红的：读了 2143 而不是 2120）
+            const size_t need = want - got.size();
+            const size_t room = need < sizeof(buf) ? need : sizeof(buf);
+            const ssize_t n = ::read(h.peer_fd, buf, room);
             if (n <= 0) break;
             got.append(buf, static_cast<size_t>(n));
         }
