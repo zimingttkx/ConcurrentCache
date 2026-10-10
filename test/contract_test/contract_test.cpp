@@ -217,6 +217,17 @@ void run_type_contract_tests(int port) {
         EXPECT_TRUE(do_cmd(client, {"PERSIST", "dt_missing_key"}, reply));
         EXPECT_TRUE(read_dirty() == before_noop);
 
+        // 手动 SAVE / BGSAVE 也要扣脏计数。以前只有调度器自己触发时才 consume，
+        // 于是手动保存后 rdb_dirty_count 仍挂着旧值：INFO 报"有未保存的写"而数据
+        // 其实已经落盘，而且调度器的阈值规则会立刻再触发一次全量快照。
+        EXPECT_TRUE(do_cmd(client, {"SET", "sv_a", "1"}, reply));
+        EXPECT_TRUE(do_cmd(client, {"SET", "sv_b", "2"}, reply));
+        const long long before_save = read_dirty();
+        EXPECT_TRUE(before_save > 0);
+        EXPECT_TRUE(do_cmd(client, {"SAVE"}, reply));
+        EXPECT_TRUE(!reply.is_error());
+        EXPECT_TRUE(read_dirty() < before_save);
+
         // 哈希键 → WRONGTYPE，且哈希不能被毁掉
         EXPECT_TRUE(do_cmd(client, {"HSET", "hb_key", "f", "keepme"}, reply));
         EXPECT_TRUE(do_cmd(client, {"INCRBY", "hb_key", "1"}, reply));
