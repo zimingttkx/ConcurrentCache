@@ -87,9 +87,12 @@ public:
     // 旧接口 —— 仅用于 backlog 回放等内部场景）
     bool send_replication_msg(const std::string& replica_name, const std::string& cmd_line);
 
-    // 通过 cluster bus 发送复制命令（RESP 数组编码，二进制安全）。
-    // 修复 P1-2a：value 含空格/\xC0/\n 时文本拼接会被截断错位；
-    // 这里把参数编码为 RESP 数组（$len\r\n...\r\n），副本端用 RespParser 解析。
+    // 通过 cluster bus 发送复制命令（RESP 数组编码）。
+    // 修复 P1-2a：value 含空格或 '\n' 时，文本拼接出来的命令行会被切错位置；
+    // 这里把参数编码为 RESP 数组（$len\r\n...\r\n），副本端用 RespParser 解析，
+    // 长度前缀使命令行**内部**完全二进制安全。
+    // 注意这一层管不到总线自己的参数帧：参数帧以前用裸 0xC0 拼接（含 0xC0 的 value
+    // 会被总线切断），现在换成 cluster_link.h 里的 v2 长度前缀帧。
     bool send_replication_args(const std::string& replica_name,
                                const std::vector<std::string>& args);
 

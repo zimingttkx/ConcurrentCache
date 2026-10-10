@@ -51,7 +51,7 @@ struct ClusterMsgHeader {
     uint8_t slot_map[16384 / 8]; // 槽位图 (2048 bytes)
 };
 
-// 集群消息
+// 集群总线消息
 struct ClusterMsg {
     ClusterMsgHeader header;
     std::vector<std::string> args;  // 消息参数
@@ -59,9 +59,37 @@ struct ClusterMsg {
     ClusterMsg() {
         memset(&header, 0, sizeof(header));
         header.magic = 0x43;  // 'C'
-        header.version = 1;
+        header.version = kBusFramingVersion;
     }
 };
+
+// 参数区帧格式的协议版本。
+//
+// v1 把多个参数用裸 0xC0 字节拼起来且没有任何转义 —— 而复制/迁移的参数里
+// 本来就允许出现任意字节（value、RESTORE 载荷都是二进制）。一个含 0xC0 的
+// value 会被拆成两个参数，副本端于是执行一条错位命令或直接丢掉，主从静默发散。
+// v2 换成"参数条数 + 每条 <字节数>\n<原始字节>"，与 CacheObject 的序列化框架同构。
+//
+// 版本写在头里，接收端按版本分支：v1 帧仍按老规则解（老节点的 gossip 参数是
+// ASCII，不含 0xC0，所以升级窗口内控制面照常工作），v2 帧按新规则解，其它版本
+// 一律判畸形并断链 —— 宁可断链也不要在解出一堆错位参数之后"看起来正常"。
+// 反方向没有无损方案：老节点看不懂转义，任何带内转义都必须同时转义转义符本身。
+// 因此混版本期间**数据面**（复制/迁移）不受支持，需要整集群一起升级。
+constexpr uint16_t kBusFramingVersion = 2;
+constexpr uint16_t kBusFramingLegacyVersion = 1;
+
+// 参数区编码后的字节数（先算长度再一次性写，避免 send_msg 与接收端各算一套）。
+size_t bus_args_frame_bytes(const std::vector<std::string>& args);
+
+// v2：count + 每条 <字节数>\n<原始字节>。追加到 out 末尾。
+void bus_args_encode(const std::vector<std::string>& args, std::string& out);
+
+// v2 解码。任何一圈不完整、条数对不上、或参数区有余字节 → false 并填 err。
+bool bus_args_decode(const char* data, size_t len, std::vector<std::string>& out,
+                     std::string& err);
+
+// v1 解码：按裸 0xC0 切分（不认转义，仅用于兼容尚未升级的对端）。
+void bus_args_decode_legacy(const char* data, size_t len, std::vector<std::string>& out);
 
 // ClusterLink 类：封装与另一个集群节点的 TCP 连接
 class ClusterLink {
