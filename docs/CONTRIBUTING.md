@@ -18,7 +18,7 @@ gh pr merge --auto --squash              # 绿了自己合，红了自己看
 
 | check 名 | 内容 | 红了一般是什么原因 |
 |---|---|---|
-| `build-release` | Release + `-Werror` 构建全部 target | 编译错误、gcc-14 新警告 |
+| `build-release` | Release 构建，服务端 target 带 `-Werror`（测试 target 只有 `-W` 集合） | 编译错误、gcc-14 新警告 |
 | `build-assert` | Debug 构建（`assert` 真的生效） | Debug 独有的编译问题 |
 | `gate-tests` | `ctest -L gate -j1` | 真实回归——这一层的用例必须永远绿 |
 | `consistency` | `scripts/ci/check_consistency.py` | 三张表脱钩、新增孤儿测试文件、配置项没人读、端口不一致 |

@@ -42,7 +42,7 @@
 > | 文件 | 不接入的原因 |
 > |------|--------------|
 > | `command_test/command_test.cpp` | 调用已不存在的 `CommandFactory(GlobalStorage&)` 与 `create_command()`；且框架 `expect_eq` 是单模板参数，`EXPECT_EQ(std::string, "字面量")` 推导不出来 |
-> | `cluster_test/cluster_replication_test.cpp` | 调用 `ReplicationMgr::add_to_replication_buffer()`，而它在 `replication_mgr.h:128` 之后是 private |
+> | `cluster_test/cluster_replication_test.cpp` | 调用 `ReplicationMgr::add_to_replication_buffer()`，而它在 `replication_mgr.h:141` 之后是 private |
 > | `cluster_test/cluster_strict_test.cpp` | 同上；另有 `getNodeByIpPort("", 6379)` 会在 Debug 触发 `cluster_state.cpp:94` 的 assert |
 > | `atomic_test/atomic_{first,minimal,multi,progressive,memory_order}_test.cpp` | 各自带 `main()` 的历史复现脚本，与已接入的 `atomic_correctness_test.cpp` 互斥 |
 >
@@ -53,7 +53,7 @@
 | LABEL | 跑在哪 | 拦不拦合并 |
 |-------|--------|------------|
 | `gate` | `ci.yml` 的 `gate-tests`、`asan-smoke` | 拦（required status check） |
-| `contract` | `ci.yml` 的 `contract-tests`（不在 required 列表里） | 不拦，但必须可见 |
+| `contract` | `ci.yml` 的 `contract-tests`（这个 job 自身不在 required 列表里）**以及 `asan-smoke`**（`ctest -L "gate|contract"`，required） | **拦**：contract 层的用例挂了会让 asan-smoke 变红、挡住合并；`contract-tests` job 只是再给一份不拦的可见明细 |
 | `slow` | `daily.yml` | 不拦 |
 
 收紧只有一个动作：某项在 `contract` 里连续绿，就把 `test/CMakeLists.txt` 注册表里它的标签改成 `gate`。反向不成立——把一个会红的用例放进 `gate` 会立刻拦停 PR。
@@ -189,6 +189,11 @@ TEST_SUITE("GlobalStorage Basic Operations") {
 ### 5.1 存储层（`concurrentcache-v3-tests --storage`）
 
 **源文件**：`test/storage_test/storage_v3_test.cpp`
+
+下面列的是 `test/storage_test/storage_v3_test.cpp` 里 16 个 `TEST_SUITE` 中的 11 个（其余 5 个是
+> `GlobalStorage Huge TTL`、`GlobalStorage Atomic Mutate`、`GlobalStorage Dirty Snapshot`、
+> `FileSink Path Is Not A Shell Command`、
+> `log_level 词法`，随用例增长还会加，所以这里只保证"本表列出的都在源码里存在"）。
 
 | 套件 | 覆盖点 |
 |------|--------|

@@ -24,6 +24,11 @@
 -Wconversion -Wshadow -Wsign-conversion -Wdouble-promotion
 ```
 
+> 上面那组是**服务端 target** 的标志（`CMakeLists.txt:120-122`）。测试 target 用同一组 `-W`，
+> 但**不带 `-Werror`**（`test/CMakeLists.txt:212-216`）——那些文件里留着历史警告，把它们一起
+> 变成致命错误会把"清理测试"混进日常门禁。所以"Release 构建全部 target 都过 -Werror"这个说法
+> 不成立，`docs/CONTRIBUTING.md` 的门禁表里也按"服务端 target"来写。
+
 ## 2. 源码编译
 
 ### 2.1 系统要求
@@ -66,15 +71,15 @@ cmake --build . --parallel
 
 ```bash
 # ASan（推荐先跑一遍）
-cmake .. -DCMAKE_BUILD_TYPE=Debug -DENABLE_ASAN=ON
+cmake -B build -DCMAKE_BUILD_TYPE=Debug -DENABLE_ASAN=ON
 cmake --build build
 
 # TSan（重点查数据竞争）
-cmake .. -DCMAKE_BUILD_TYPE=Debug -DENABLE_TSAN=ON
+cmake -B build -DCMAKE_BUILD_TYPE=Debug -DENABLE_TSAN=ON
 cmake --build build
 
 # UBSan
-cmake .. -DCMAKE_BUILD_TYPE=Debug -DENABLE_UBSAN=ON
+cmake -B build -DCMAKE_BUILD_TYPE=Debug -DENABLE_UBSAN=ON
 cmake --build build
 ```
 
@@ -128,7 +133,7 @@ sudo systemctl start concurrentcache
 | Key | 默认 | 说明 |
 |-----|------|------|
 | `port` | `6379` | 客户端监听端口（程序内置默认与仓库 conf 一致） |
-| `log_level` | `1`（DEBUG） | `0`=TRACE … `5`=FATAL，**数值越大越不详细**；conf 中的 `4` 表示只输出 ERROR/FATAL |
+| `log_level` | conf 缺这个键时按 `info` 起（`config.cpp:64-65` 会注入字符串 `info`） | `0`=TRACE … `5`=FATAL，**数值越大越不详细**；conf 中的 `4` 表示只输出 ERROR/FATAL |
 | `reactor_count` | CPU 核数 | SubReactor 数量 |
 | `thread_pool_size` | CPU 核数 | 通用 ThreadPool 数量 |
 | `rdb_path` | `./dump.rdb` | RDB 文件路径 |
