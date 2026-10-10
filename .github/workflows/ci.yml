@@ -171,6 +171,12 @@ jobs:
         # 逐条注入错误、要求只有对应那条变红，再还原。
         run: python3 scripts/ci/check_docs_gate_injection.py
 
+      - name: Check the comparison harness itself
+        # 测试工具自己也会坏。comparison_test.py 的"大量 key 写入"两栏曾经恒红,
+        # 根因是客户端在同一条流上把回复配对搞错了 —— 真 Redis 也一样红,说明坏的
+        # 是量具。这几条断言不连服务器,只喂字节,钉住 RESP 回复的配对逻辑。
+        run: python3 test/e2e_test/test_resp_client.py
+
   asan:
     name: asan-smoke
     runs-on: ubuntu-24.04
