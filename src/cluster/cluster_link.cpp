@@ -74,6 +74,14 @@ bool ClusterLink::connect() {
     return true;
 }
 
+void ClusterLink::handle_error() {
+    LOG_ERROR(CLUSTER, "ClusterLink fd error on %s (fd=%d), closing link",
+              node_name_.c_str(), fd_);
+    // 必须是 disconnect_and_notify() 而不是 disconnect()：只有回调才会叫
+    // ClusterBus::remove_link 回收 links_ 条目与 Channel。
+    disconnect_and_notify();
+}
+
 void ClusterLink::disconnect() {
     // 保证只执行一次：先 CAS 把 connected_ 置 false，
     // 避免 handle_read/handle_write 与断开回调中对同一对象重复调用

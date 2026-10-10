@@ -328,6 +328,8 @@ flowchart TB
 | 监听端口 | `server_port + 10000`（客户端默认端口 6379 → 总线默认 16379） |
 | 协议 | TCP + 自定义二进制帧 |
 | 用途 | 节点间消息转发（PING/PONG/FAIL/复制命令） |
+| 入站链路配额 | `ClusterBus::kMaxInboundLinks = 512`；超限连接有界拒绝（`close` + 计数），避免 fd 耗尽后 `accept` 走非 `EAGAIN` 分支把事件循环拖进空转 |
+| 配额可观测 | `CLUSTER INFO` 的 `cluster_bus_inbound_links` / `cluster_bus_inbound_refused` |
 
 **为什么 +10000？** 与 Redis Cluster 约定一致，方便客户端识别集群端口。
 
@@ -394,7 +396,9 @@ header 之后是参数区。`header.version` 决定它怎么解：
 4. 回调返回后绝不访问任何成员
 ```
 
-读错误 / 对端关闭 / 写错误 / 协议错误 / 主动 stop 这些路径走的是这个顺序；**唯一的例外**是 `ClusterBus` 给每条链路挂的 fd 错误回调，它只调 `raw_link->disconnect()`（不触发通知），所以纯 fd 错误而下一次读写事件没发生的链路会滞留在 `links_` 表里、Channel 也不注销——这是登记在案的缺陷，别把它当成已保证的不变量；`handle_write` 在持有 `send_mutex_` 时只置断开标志，解锁后再触发回调（回调里的析构会再拿这把锁）。bus 侧（`ClusterBus`）在断开回调中销毁 link 并**注销其 Channel**；下游回调收到的 link 参数为 `nullptr`（bus 自管的 Channel 由 bus 注销，自连链路由 `ClusterConnection` 注销）。
+读错误 / 对端关闭 / 写错误 / 协议错误 / 主动 stop / **fd 错误（`EPOLLERR`）** 这些路径走的是同一个顺序：`EPOLLERR` 由 `ClusterLink::handle_error()` 收尾，它同样调用 `disconnect_and_notify()`。这里历史上写成过裸 `raw_link->disconnect()`（不触发通知），后果不是"多留一条记录"这么简单：`remove_link` 不会被叫起，`links_` 条目、Channel 注册、`link_channels_` 里的对象三者一起泄漏；而 `disconnect()` 已经把 `fd_` 关掉，这个编号会被下一条连接复用，于是日后清理这条死条目时用的 `registered_fd()` 正是**新链路**的 fd —— 它把活链路的 Channel 从 epoll 里摘掉，活链路从此收不到任何事件，表现成节点之间偶发永久失联。现在收口成一个方法，`test_bus_link_error_path_notifies_owner` 钉住"错误路径必须通知持有者、且只通知一次"；两个持有者（`ClusterBus` 的入站链路与 `ClusterConnection` 的出站链路）的错误回调都改成 `handle_error()`，断开回调分别落到 `remove_link` / `on_node_disconnected`，两处注销都用 `registered_fd()`（`disconnect_and_notify` 已把 `fd_` 置 -1）；`handle_write` 在持有 `send_mutex_` 时只置断开标志，解锁后再触发回调（回调里的析构会再拿这把锁）。bus 侧（`ClusterBus`）在断开回调中销毁 link 并**注销其 Channel**；下游回调收到的 link 参数为 `nullptr`（bus 自管的 Channel 由 bus 注销，自连链路由 `ClusterConnection` 注销）。
+
+**入站链路配额**：`ClusterBus::kMaxInboundLinks = 512`。超过配额的新连接直接 `close` 并计入 `cluster_bus_inbound_refused`。要配额的理由不是"防大集群"（集群规模是几十的量级），而是总线端口目前不做认证（认证的正解是 tls-cluster，仍是待拍板项）：反复连进来就能把链路数一路推高，直到进程 fd 耗尽让 `accept` 返回非 `EAGAIN` 错误，而 `handle_accept` 遇到这种错误是 `break` —— listen fd 持续可读，EventLoop 于是每轮立刻返回，100% CPU 空转。有界拒绝把这条变成可观测的计数（`cluster_bus_inbound_links` / `cluster_bus_inbound_refused`）。
 
 ## 8. 客户端重定向
 

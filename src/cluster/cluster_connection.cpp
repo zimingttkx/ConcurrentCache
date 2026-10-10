@@ -499,9 +499,12 @@ void ClusterConnection::register_link_to_loop(ClusterLink* link) {
     });
 
     // 设置错误回调
+    // 走 link 自己的 handle_error()（内部 disconnect_and_notify），不要写成裸
+    // disconnect()：不通知的话 on_node_disconnected 不会被叫起，links_ 条目与它的
+    // Channel 都不回收，而那个 fd 会被下一条连接复用。ClusterBus 侧同一处理由
+    // test_bus_link_error_path_notifies_owner 钉住。
     channel->set_error_callback([link]() {
-        LOG_ERROR(CLUSTER, "ClusterLink fd error: %s", link->node_name().c_str());
-        link->disconnect();
+        link->handle_error();
     });
 
     // 监听读和写事件

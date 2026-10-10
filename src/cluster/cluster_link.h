@@ -132,6 +132,18 @@ public:
     void handle_read();
     void handle_write();
 
+    /**
+     * @brief fd 错误时的收尾：记录 + disconnect_and_notify()
+     *
+     * 这个方法的唯一存在理由是历史上这里写成过 `disconnect()`（不触发回调），
+     * 于是 ClusterBus 的 links_ 条目、它的 Channel 注册、link_channels_ 里的
+     * Channel 对象三者都不回收：每来一次 EPOLLERR 就永久泄漏一条链路，而
+     * registered_fd() 已被复用的话，之后清理这条死条目还会把**新链路**的
+     * Channel 摘掉。收口成一个方法，判据就能被单元测试钉住（见
+     * test/cluster_test/cluster_link_framing_test.cpp）。
+     */
+    void handle_error();
+
     // 属性访问
     [[nodiscard]] const std::string& node_name() const { return node_name_; }
     [[nodiscard]] const std::string& ip() const { return ip_; }
