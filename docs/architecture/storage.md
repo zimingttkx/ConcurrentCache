@@ -186,17 +186,17 @@ flowchart TB
 
 ```text
 while (running_):
-    sleep(100ms)
-    start = now()
-    do:
+    start = now()                  // 注意顺序：先干活、后睡觉。
+    do:                            // 启动后的第一轮是立刻扫的，不用等一个周期
         candidates = ExpireDict::get_candidates(20)
         if candidates.empty(): break
         for each candidate:
             if is_expired:
                 storage->del(key)          // 内部已 remove expire
         elapsed = now() - start
-    while (elapsed < 25ms)                 // 预算内循环多批
-    if elapsed >= 25ms: budget_exhausted   // 记录，下周期继续
+        if elapsed >= 25ms: budget_exhausted = true   // 预算用尽就带着标记退出内层
+    while (!budget_exhausted)              // 预算内循环多批（Redis 的 activeExpireCycle）
+    // 内层结束（候选耗尽或预算用尽）后才睡满 kCheckIntervalMs = 100ms
 ```
 
 **为什么双删除？** 单一策略都有问题：

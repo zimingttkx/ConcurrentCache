@@ -590,13 +590,16 @@ CPU缓存行（64字节）：
 线程1修改变量A → 线程2修改变量B → 整个缓存行失效，需要重新加载
 ```
 
-**解决：使用 `alignas(64)` 对齐到缓存行。**
+**解决：使用 `alignas(64)` 对齐到缓存行。** 下面是这个技巧的通用写法（示意，代码库里没有 '
+  '`Counter` 这个类型）：
 
 ```cpp
 struct alignas(64) Counter {
     std::atomic<uint64_t> counter{0};
 };
 ```
+
+> 本仓库里真实用到它的是 `SpinLock`：`lock.h:635` 的 `alignas(64) std::atomic_flag flag_;`，配套说明在 `lock.h:576`。要找实现看那里，不要去找 `Counter`。
 
 ### 4.9 常见问题
 
