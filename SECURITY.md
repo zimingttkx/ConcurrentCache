@@ -37,7 +37,7 @@
 
 ## CI 能挡住什么、挡不住什么
 
-`ci.yml` 的必过门禁覆盖：Release 与 Debug（`assert` 生效）构建、`gate` 层测试、ASan 构建、Docker 构建，以及 `scripts/ci/check_consistency.py` 的四项一致性（命令注册表 vs 复制写白名单、`test/` 文件是否真的进入构建、配置项是否真的被读取、端口三处是否一致）。
+`ci.yml` 的必过门禁覆盖：Release 与 Debug（`assert` 生效）构建、`gate` 层测试、ASan 构建、Docker 构建，以及 `scripts/ci/check_consistency.py` 的八组一致性：命令注册表 vs 复制写白名单、`test/` 文件是否真的进入构建、配置项是否真的被读取、端口三处是否一致，加上 README/api 命令表与 ctest 表、`.md` 相对链接可解析、`INFO` 版本号、镜像仓库地址是否真被推送、配置表双向核对、e2e 脚本清单，以及"只声明未定义且零调用的成员函数"。
 
 覆盖不到的：`daily.yml` 的 sanitizer / 长压测 / e2e / 与真 Redis 的对照只报告不拦合并（它们不在 required check 里，红了要人去看，但不会挡住合并）。已知尚未修复的缺陷逐条登记在 [`ci/known-failures.txt`](ci/known-failures.txt)——名单规则是每项都必须当前真的失败，所以它只能变短，少一行就是修好一个。
 
