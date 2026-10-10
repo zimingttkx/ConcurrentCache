@@ -102,7 +102,7 @@ SubReactor 本身没有 `loop()`/`epoll_wait`——线程体就是 `EventLoop::l
 | `std::vector<epoll_event> events_` | `epoll_wait` 输出缓冲，初始 65536，写满自动翻倍 |
 | `std::unordered_map<int, Channel*> channels_` | fd → Channel 反向索引（事件分发用） |
 | `std::atomic<bool> quit_` | 退出标志 |
-| `std::mutex channels_mutex_` | 保护 `channels_` map（保护 `channels_`：`queue_in_loop` 从别的线程往 loop 里投任务，与 `loop()` 里的分发并发。Channel 的**注册本身**发生在归属 loop 线程内——`add_connection` 只是把 `register_connection` 投进任务队列，见 §3.1） |
+| `std::mutex channels_mutex_` | 保护 `channels_`。两类并发都要它：一是 `queue_in_loop` 从别的线程往 `pending_tasks_` 里投任务与 `loop()` 的分发并发；二是 **`update_channel()` 自身就允许在非归属线程上调用** —— 它的实现是拿 `channels_mutex_` 后直接 `epoll_ctl`（`event_loop.cpp`），里面没有"必须在 loop 线程"的断言。集群侧的调用点正分布在启动与心跳路径上：`cluster_bus.cpp:116/369`、`cluster_connection.cpp:515`。普通客户端连接的注册走另一条路：`add_connection` 只把 `register_connection` 投进任务队列，注册动作在归属 loop 线程内完成，见 §3.1 |
 | `time_t last_config_check_time_` | 配置热加载节流（每 10 秒检查一次，见下） |
 
 **事件循环伪代码**（`event_loop.cpp::loop()`）：
