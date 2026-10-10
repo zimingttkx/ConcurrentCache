@@ -215,10 +215,12 @@ void Buffer::ensure_writable(size_t len) {
 ```cpp
 void Buffer::compact() {
     if (reader_idx_ == 0) return;
-    std::copy(
-        buffer_.begin() + reader_idx_,    // 从有效数据开始
-        buffer_.begin() + writer_idx_,    // 到有效数据结束
-        buffer_.begin()                   // 拷贝到起始位置
+    // 源区间 [reader_idx_, writer_idx_) 与目的区间 [0, writer-reader) 重叠，
+    // 必须用 std::copy_backward（或 memmove）；std::copy 在这种情况下是 UB。
+    std::copy_backward(
+        buffer_.begin() + reader_idx_,              // 从有效数据开始
+        buffer_.begin() + writer_idx_,              // 到有效数据结束
+        buffer_.begin() + (writer_idx_ - reader_idx_)  // 目的区间末尾
     );
     writer_idx_ -= reader_idx_;  // 调整写指针
     reader_idx_ = 0;             // 读指针归零
@@ -518,7 +520,15 @@ Connection::Connection(int client_fd, EventLoop* loop)
     // 设置回调
     channel_->set_read_callback([this]() { this->handle_read(); });
     channel_->set_write_callback([this]() { this->handle_write(); });
-    channel_->set_error_callback([this]() { this->close(); });
+    // 错误回调不直接调 close()：那会让 Connection 从 SubReactor 的 connections_
+    // 表里残留。统一转交 close_callback_，由 SubReactor 摘走 unique_ptr 完成销毁。
+    channel_->set_error_callback([this]() {
+        if (close_callback_) { close_callback_(); }
+    });
+    // EPOLLHUP / EPOLLRDHUP 走同一套收尾，否则 HUP 会被静默吞掉、epoll 每轮空转
+    channel_->set_close_callback([this]() {
+        if (close_callback_) { close_callback_(); }
+    });
 
     // 开始监听读事件
     channel_->enable_reading();
@@ -600,11 +610,11 @@ void Connection::send_response(const char* data, size_t len) {
 
 ```cpp
 Connection::~Connection() {
-    if (channel_ != nullptr) {
-        loop_->remove_channel(channel_);  // 先从 epoll 移除
-        delete channel_;                  // 再删除 Channel
+    if (channel_ && !closed_) {
+        loop_->remove_channel(channel_.get());  // 先从 epoll 移除
+        // channel_ 是 std::unique_ptr<Channel>，随成员析构自动释放，不手写 delete
     }
-    // Socket 析构会自动 close()
+    // client_socket_ 在这里析构，自动 close(fd)
 }
 ```
 
@@ -1037,9 +1047,10 @@ MainSubReactor 解决方案：
    - 不会造成数据竞争
 
 4. MainReactor 和 SubReactor 之间的通信：
-   - add_connection() 是直接调用
-   - 当前实现：在 MainReactor 线程中调用
-   - 更好的做法：用 pending queue + wakeup（未来优化）
+   - add_connection() 不就地登记，而是 loop_->queue_in_loop(register_connection)
+   - 任务排在 pending_tasks_ 里，由目标 SubReactor 自己在 epoll_wait 返回后
+     drain_pending_tasks() 执行，并通过 wakeup pipe 及时唤醒
+   - 所以 connections_ / Channel 注册只被本 loop 线程改动（这条已经落地，不是待办）
 ```
 
 ---

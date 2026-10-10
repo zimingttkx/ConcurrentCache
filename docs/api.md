@@ -1,21 +1,21 @@
 # ConcurrentCache API 参考
 
 > **协议**：Redis RESP 2.0（兼容任意 Redis 客户端：`redis-cli`、`jedis`、`redis-py`、`go-redis`）
-> **默认端口**：`16379`（`conf/concurrentcache.conf` 中 `port` 项可改）
-> **命令总数**：44 个（注册于 `src/command/command_factory.cpp`）
+> **默认端口**：`6379`（`conf/concurrentcache.conf` 中 `port` 项可改；集群总线端口 = 客户端端口 + 10000，默认即 `16379`）
+> **命令总数**：46 个（注册于 `src/command/command_factory.cpp`）
 > **文档维护**：与命令注册表严格同步，修改注册表必须同步本文档
 
 ## 1. 快速开始
 
 ```bash
-$ redis-cli -p 16379 PING
+$ redis-cli -p 6379 PING
 PONG
 ```
 
 ```python
 # Python (redis-py)
 import redis
-r = redis.Redis(host='127.0.0.1', port=16379, decode_responses=True)
+r = redis.Redis(host='127.0.0.1', port=6379, decode_responses=True)
 r.set('greeting', 'Hello, ConcurrentCache')
 print(r.get('greeting'))   # Hello, ConcurrentCache
 ```
@@ -25,7 +25,7 @@ print(r.get('greeting'))   # Hello, ConcurrentCache
 | 分类 | 命令数 | 命令 |
 |------|--------|------|
 | [§ 3 连接](#3-连接) | 1 | PING |
-| [§ 4 字符串](#4-字符串-string) | 6 | GET / SET / DEL / EXISTS / INCR / DECR |
+| [§ 4 字符串](#4-字符串-string) | 8 | GET / SET / DEL / EXISTS / INCR / DECR / INCRBY / DECRBY |
 | [§ 5 过期](#5-过期-ttl) | 5 | EXPIRE / TTL / PTTL / PERSIST / SETEX |
 | [§ 6 列表](#6-列表-list) | 6 | LPUSH / RPUSH / LPOP / RPOP / LLEN / LRANGE |
 | [§ 7 哈希](#7-哈希-hash) | 5 | HSET / HGET / HDEL / HLEN / HGETALL |
@@ -58,9 +58,12 @@ PING [message]
 | `EXISTS` | `EXISTS key` | `:1\r\n` 或 `:0\r\n`（已过期但尚未被删除的 key 返回 0） | O(1) |
 | `INCR` | `INCR key` | 递增后整数值（原子） | O(1) |
 | `DECR` | `DECR key` | 递减后整数值（原子） | O(1) |
+| `INCRBY` | `INCRBY key delta` | 加 delta 后的整数值（原子） | O(1) |
+| `DECRBY` | `DECRBY key delta` | 减 delta 后的整数值（原子） | O(1) |
 
 > **DEL** 支持批量删除多个 key，返回实际删除成功的数量。
-> **INCR/DECR** 是**原子操作**（读-改-写在分片独占锁内完成，并发调用不丢失更新）：若 key 不存在视为 0；若值非整数返回 `-ERR value is not an integer`；若 64 位递增/递减溢出返回 `-ERR increment or decrement would overflow`；若 key 持有非 STRING 类型返回 `-WRONGTYPE Operation against a key holding the wrong kind of value`。
+> **INCR/DECR/INCRBY/DECRBY** 是**原子操作**（读-改-写在分片独占锁内完成，并发调用不丢失更新）：若 key 不存在视为 0；若 delta 无法解析或结果 64 位溢出返回 `-ERR value is not an integer or out of range`；若 key 现值非整数返回 `-ERR value is not an integer`；若 key 持有非 STRING 类型返回 `-WRONGTYPE Operation against a key holding the wrong kind of value`。
+> **EXISTS / HSET / SPOP 只接受单个 key（或单个 field/value 对）**，多传参数返回 `-ERR wrong number of arguments for '<cmd>' command`——与 Redis 的多参数形式不同，见 §16。
 
 ## 5. 过期 TTL
 
@@ -135,7 +138,7 @@ PING [message]
 | `SAVE` | `SAVE` | `+OK\r\n` / `-ERR failed to save RDB`（保存路径取 `rdb_path` 配置） |
 | `BGSAVE` | `BGSAVE` | `+Background saving started\r\n` / `-ERR bgsave failed` |
 | `LASTSAVE` | `LASTSAVE` | 上次成功保存的 Unix 时间戳（秒，整数） |
-| `DBSIZE` | `DBSIZE` | 当前 key 数量（整数；已过期但尚未被删除的 key 不计入语义，见 EXISTS） |
+| `DBSIZE` | `DBSIZE` | 底层哈希表的条目数（整数）。**已过期但尚未被删除的 key 会计入** —— `GlobalStorage::size()` 只累加分片 map 的 size，不做过期过滤；惰性删除只让 GET/EXISTS 看不到它们 |
 | `FLUSHDB` | `FLUSHDB` | `+OK\r\n`（清空全部数据） |
 
 > **BGSAVE** 进行中再次触发（含 SAVE）→ `-ERR BGSAVE already in progress`。RDB 保存为进程内后台线程快照，先写 `.tmp` 临时文件再原子 rename（详见[持久化架构](architecture/persistence.md)）。
@@ -148,12 +151,14 @@ PING [message]
 | `DEBUG` | `DEBUG OBJECT <key>` | 类型信息（Bulk String，如 `Type: string`）；key 不存在返回 `-ERR no such key` |
 
 > **DEBUG SLEEP 已被移除**：`DEBUG SLEEP <sec>` 会阻塞事件循环，现返回 `-ERR DEBUG SLEEP is not supported`。
+> **INFO 的两处已知不真实**：`total_connections_received` / `total_commands_processed` 恒为 `0`，`db0:...expires=0,avg_ttl=0` 的两个字段也是硬编码占位——它们是 Redis 的字段名，本项目尚未接线，不要用于容量判断。
+> section 名区分大小写且只认 `server` / `stats` / `persistence` / `keyspace` / `all`，其它值返回 `-ERR Unknown INFO section: <name>`。
 
 `INFO` 输出示例：
 
 ```text
 # Server
-concurrentcache_version:3.0.0
+concurrentcache_version:4.0.0
 os:Linux
 arch_bits:64
 # Stats
@@ -163,6 +168,7 @@ total_rdb_saved_keys:12345
 rdb_last_bgsave_status:ok
 rdb_last_bgsave_time_sec:1718700000
 rdb_dirty_count:0
+rdb_last_bgsave_keys:12345
 # Keyspace
 db0:keys=12345,expires=0,avg_ttl=0
 ```
@@ -203,7 +209,8 @@ CLUSTER <SUBCOMMAND> [arg ...]
 
 这三条是外部 Redis 副本握手用的。本项目的内部复制**不走客户端口**：`CLUSTER REPLICATE`
 通过集群总线向主节点发 `REPLSYNC:<node>`，主节点侧由 `ReplicationMgr::send_rdb_to_replica()`
-推 RDB 快照，之后的写命令也走总线复制。所以 `REPLICAOF <host> <port>` /
+逐 key 发 `RESTORE key ttl_ms <serialize() 结果> REPLACE`（函数名里的 "rdb" 指的是内存快照，
+不是 RDB 文件），之后的写命令也走总线复制。所以 `REPLICAOF <host> <port>` /
 `redis-cli --replica` 接一个本项目节点不会被支持。
 
 在支持外部副本之前必须先把 RDB 换成 Redis 的方言（版本字节、类型操作码、EOF + CRC64），
@@ -242,16 +249,20 @@ RESTORE <key> <ttl> <serialized-value>
 | RESP 响应 | 含义 |
 |----------|------|
 | `-ERR wrong number of arguments for '<cmd>' command` | 参数个数错误 |
-| `-ERR value is not an integer` | 需整数参数但传入非数字 |
+| `-ERR value is not an integer` | 现值不是整数（INCR/DECR/INCRBY/DECRBY 作用在非整数字符串上） |
+| `-ERR value is not an integer or out of range` | 整数入参（SET 的 EX/PX/EXAT/PXAT、SETEX 的 seconds、INCRBY/DECRBY 的 delta）无法解析或 64 位溢出 |
 | `-ERR increment or decrement would overflow` | INCR/DECR 64 位溢出 |
 | `-ERR invalid key` | key 为空字符串 |
-| `-ERR invalid score` | ZADD/ZRANGE 的 score 无法解析 |
+| `-ERR value is not a valid float` | ZADD 的 score 无法解析为有限浮点数（含 `nan`/`inf`/尾巴塞字符） |
+| `-ERR syntax error` | SET 的选项组合非法（如 `NX XX`、`EX` 与 `EXAT` 同时出现）、ZRANGE 的 `WITHSCORES` 拼错、CLUSTER 子命令参数形态不对 |
 | `-ERR invalid integer` | ZRANGE/LRANGE 的 start/stop 无法解析为整数 |
 | `-ERR invalid expire time` | SETEX 的 seconds ≤ 0 |
 | `-ERR no such key` | DEBUG OBJECT 的 key 不存在 |
-| `-ERR invalid serialized data for <TYPE>` | RESTORE 的序列化数据非法（含 LIST/HASH/SET/ZSET size、score 解析失败） |
+| `-ERR invalid TTL` | RESTORE 的 ttl 不是整数 |
+| `-ERR Invalid or malformed serialized payload` | RESTORE 的载荷任一圈（帧）不完整、类型标签不认识、或结尾有多余字节 |
 | `-BUSYKEY Target key name already exists` | RESTORE 目标 key 已存在且未带 REPLACE |
 | `-ERR BGSAVE already in progress` | BGSAVE 重入（SAVE 亦受此限制） |
+| `-ERR this server does not accept external replicas; internal replication uses the cluster bus` | PSYNC / SYNC / REPLCONF（见 §13） |
 | `-ERR DEBUG SLEEP is not supported` | DEBUG SLEEP 已移除 |
 | `-WRONGTYPE Operation against a key holding the wrong kind of value` | 对非预期类型的 key 执行类型敏感命令 |
 | `-ERR Protocol error: <原因>`（随后断开连接） | RESP 结构非法，见 §17 |
@@ -271,8 +282,16 @@ RESTORE <key> <ttl> <serialized-value>
 - 慢日志（`SLOWLOG`）
 - 客户端列表（`CLIENT LIST`）
 - 键扫描（`SCAN` / `KEYS`）
-- HSET 多 field/value 对（仅支持单对）
+- HSET 多 field/value 对（`HSET key field value`，仅单对）
+- EXISTS 多 key（`EXISTS key`，仅单键）
+- SPOP 的 count 参数（`SPOP key`）
 - ZRANGE 的 BYSCORE/BYLEX/REV/LIMIT 选项
+- `HELLO`（因此会话恒为 RESP2；服务端只识别 `+ - : $ *` 五种类型字节，RESP3 的 `% ~ > , ( # =` 会被按 `unknown type byte` 拒绝并断开）
+- `SELECT`（只有一个逻辑库，数据全在 db0，切换库无意义）
+- `DUMP`（只有 RESTORE，没有反向导出）
+- `MSET` / `MGET` / `GETSET` / `GETDEL`
+- 顶层 `MIGRATE host port key dbid timeout`（只有 `CLUSTER MIGRATE host port key timeout [REPLACE]`）
+- `REPLICAOF` / `SLAVEOF` / `CONFIG` / `SHUTDOWN` / `MONITOR`
 
 ## 17. 协议格式（RESP 2.0）
 
@@ -309,7 +328,7 @@ $-1\r\n                      Nil
 ### redis-cli
 
 ```bash
-redis-cli -p 16379
+redis-cli -p 6379
 
 > SET user:1 "Alice"
 OK
@@ -335,7 +354,7 @@ OK
 
 ```python
 import redis
-r = redis.Redis(host='127.0.0.1', port=16379, decode_responses=True)
+r = redis.Redis(host='127.0.0.1', port=6379, decode_responses=True)
 
 # 字符串
 r.set('counter', 0)
@@ -362,4 +381,4 @@ r.setex('session:abc', 60, 'token-xyz')
 - [架构总览 § 1.1 核心特性](architecture/overview.md)
 - [架构总览 § 5 请求处理时序](architecture/overview.md)
 - [集群架构 § 8 客户端重定向](architecture/cluster.md)
-- [部署文档 § 端口与连接](../deployment.md)
+- [部署文档 § 端口与连接](deployment.md)

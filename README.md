@@ -5,7 +5,6 @@
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Build](https://img.shields.io/github/actions/workflow/status/zimingttkx/ConcurrentCache/ci.yml?style=flat-square)](https://github.com/zimingttkx/ConcurrentCache/actions)
-[![Docker](https://img.shields.io/badge/Docker-ghcr.io-blue.svg)](https://github.com/zimingttkx/ConcurrentCache/pkgs/container/concurrentcache)
 
 ## 简介
 
@@ -19,10 +18,11 @@ ConcurrentCache 是纯 C++20 实现的内存对象缓存系统，兼容 Redis RE
 |------|------|
 | 高性能网络模型 | MainReactor + SubReactorPool 多线程 Reactor 架构，epoll 多路复用 |
 | 线程安全存储 | 64 分片分段锁哈希表，降低锁竞争 |
-| 高效内存管理 | ThreadCache（无锁）→ CentralCache（细粒度锁）→ PageCache 三层架构 |
-| 协议兼容 | 支持 STRING/LIST/HASH/SET/ZSET 五种数据类型 |
+| 高效内存管理 | ThreadCache（无锁）→ CentralCache（细粒度锁）→ PageCache 三层架构（已实现，当前未接入分配路径） |
+| 协议兼容 | RESP 2.0 命令解析与回复编码，支持 STRING/LIST/HASH/SET/ZSET 五种数据类型 |
 | 持久化 | RDB 快照（进程内后台线程，非 fork/COW），原子落盘 tmp→fsync→rename，服务重启自动恢复 |
 | 集群支持 | V4.0 支持哈希槽分片、Gossip 协议、主从复制 |
+| 内存池现状 | `ThreadCache`/`CentralCache`/`PageCache` 三层池已实现并有单元测试，但**尚未接入任何分配路径**：`new`/容器仍走 glibc malloc，读它的设计文档请当作待接线模块 |
 
 ## 技术规格
 
@@ -33,7 +33,7 @@ ConcurrentCache 是纯 C++20 实现的内存对象缓存系统，兼容 Redis RE
 | 构建系统 | CMake 3.20+ |
 | 网络模型 | MainReactor + SubReactorPool (epoll LT) |
 | 依赖库 | ZLIB |
-| 协议 | Redis RESP 2.0 / 3.0 |
+| 协议 | Redis RESP 2.0（服务端只解析 `+ - : $ *` 五种类型字节；未实现 RESP3，也不支持 inline 命令） |
 
 ## 架构设计
 
@@ -69,9 +69,9 @@ ConcurrentCache 是纯 C++20 实现的内存对象缓存系统，兼容 Redis RE
 | 缓存层 | GlobalStorage | 64 分片哈希表，线程安全 |
 | | ExpireDict | 过期键管理 |
 | | ExpirationChecker | 后台过期键清理 |
-| 内存池 | ThreadCache | 线程本地缓存，无锁分配 |
-| | CentralCache | 中心缓存，细粒度锁 |
-| | PageCache | 页缓存，与系统交互 |
+| 内存池 | ThreadCache | 线程本地缓存，无锁分配（**当前未接入分配路径**） |
+| | CentralCache | 中心缓存，细粒度锁（同上） |
+| | PageCache | 页缓存，与系统交互（同上） |
 | 命令层 | CommandFactory | 命令统一管理 |
 | 持久化层 | RDB | 快照持久化 |
 | | RDBScheduler | 后台线程快照调度（间隔 + 脏键阈值触发） |
@@ -83,10 +83,12 @@ ConcurrentCache 是纯 C++20 实现的内存对象缓存系统，兼容 Redis RE
 | 命令 | 说明 |
 |------|------|
 | GET key | 获取值 |
-| SET key value | 设置值 |
-| DEL key [key ...] | 删除键 |
-| EXISTS key [key ...] | 检查键是否存在 |
-| PING | 心跳检测 |
+| SET key value [EX s \| PX ms \| EXAT 秒 \| PXAT 毫秒 \| KEEPTTL] [NX \| XX] [GET] | 设置值，可带过期与条件；裸 `SET` 会清掉旧 TTL |
+| DEL key [key ...] | 删除键（支持多键） |
+| EXISTS key | 检查键是否存在（仅单键） |
+| INCR key / DECR key | 原子增减 1 |
+| INCRBY key delta / DECRBY key delta | 原子增减 delta |
+| PING [message] | 心跳检测 |
 | EXPIRE key seconds | 设置过期时间（秒） |
 | TTL key | 获取剩余生存时间（秒） |
 | PTTL key | 获取剩余生存时间（毫秒） |
@@ -108,7 +110,7 @@ ConcurrentCache 是纯 C++20 实现的内存对象缓存系统，兼容 Redis RE
 
 | 命令 | 说明 |
 |------|------|
-| HSET key field value [field value ...] | 设置字段 |
+| HSET key field value | 设置字段（仅单对） |
 | HGET key field | 获取字段值 |
 | HDEL key field [field ...] | 删除字段 |
 | HLEN key | 获取字段数量 |
@@ -119,7 +121,7 @@ ConcurrentCache 是纯 C++20 实现的内存对象缓存系统，兼容 Redis RE
 | 命令 | 说明 |
 |------|------|
 | SADD key member [member ...] | 添加成员 |
-| SPOP key [count] | 随机弹出 |
+| SPOP key | 随机弹出（无 count 参数） |
 | SCARD key | 获取成员数量 |
 | SISMEMBER key member | 检查成员是否在集合中 |
 | SMEMBERS key | 获取所有成员 |
@@ -137,9 +139,21 @@ ConcurrentCache 是纯 C++20 实现的内存对象缓存系统，兼容 Redis RE
 
 | 命令 | 说明 |
 |------|------|
-| 保存 | 同步保存快照 |
+| SAVE | 同步保存快照 |
 | BGSAVE | 后台异步保存快照 |
 | LASTSAVE | 获取上次保存时间戳 |
+| DBSIZE | 底层条目数（含已过期未删除的 key） |
+| FLUSHDB | 清空全部数据 |
+
+### 服务器 / 集群 / 复制 / 迁移
+
+| 命令 | 说明 |
+|------|------|
+| INFO [section] | server / stats / persistence / keyspace / all |
+| DEBUG OBJECT key | 查看 key 的类型（`DEBUG SLEEP` 已移除） |
+| CLUSTER MEET/NODES/INFO/ADDSLOTS/SLOTS/DELSLOTS/SETSLOT/REPLICATE/FAIL/MIGRATE | 10 个子命令 |
+| RESTORE key ttl payload | 装载 `CacheObject::serialize()` 的载荷 |
+| PSYNC / SYNC / REPLCONF | 显式拒绝：本服务器不接受外部副本，内部复制走集群总线 |
 
 ## 快速开始
 
@@ -181,8 +195,11 @@ OK
 127.0.0.1:6379> GET name
 "concurrentcache"
 
-127.0.0.1:6379> HSET user:1 name Alice age 25
-(integer) 2
+127.0.0.1:6379> HSET user:1 name Alice
+(integer) 1
+
+127.0.0.1:6379> HSET user:1 age 25
+(integer) 1
 
 127.0.0.1:6379> HGETALL user:1
 1) "name"
@@ -217,28 +234,21 @@ OK
 
 ## Docker
 
-### 使用预构建镜像
-
-```bash
-docker pull ghcr.io/dingziming/concurrentcache:latest
-docker run -d -p 6379:6379 --name concurrentcache ghcr.io/dingziming/concurrentcache:latest
-redis-cli -p 6379 PING
-```
-
-### 本地构建
+本仓库的 CI 只做 `docker build` 冒烟验证（`ci.yml` 的 `docker-build`），**没有发布镜像的工作流**，因此不存在可拉取的预构建镜像；请本地构建。
 
 ```bash
 docker build -t concurrentcache:latest .
-docker run -d -p 6379:6379 concurrentcache:latest
+docker run -d -p 6379:6379 -v "$PWD/data:/app/data" --name concurrentcache concurrentcache:latest
+redis-cli -p 6379 PING
 ```
 
 ### Docker Compose
 
 ```yaml
-version: '3.8'
 services:
   concurrentcache:
-    image: ghcr.io/dingziming/concurrentcache:latest
+    build: .
+    image: concurrentcache:local
     ports:
       - "6379:6379"
     volumes:
@@ -269,6 +279,7 @@ cluster_enabled = false
 ## 项目结构
 
 ```
+main.cpp                       # 启动入口（读 conf、起 reactor、载 RDB、优雅退出）
 src/
 ├── base/                      # 基础组件
 │   ├── log.cpp/h             # 日志系统
@@ -305,11 +316,8 @@ src/
 ├── command/                   # 命令层
 │   ├── command.h             # 命令基类
 │   ├── command_factory.cpp/h  # 命令工厂
-│   ├── string_cmd.h         # String 命令
-│   ├── list_cmd.h            # List 命令
-│   ├── hash_cmd.h            # Hash 命令
-│   ├── set_cmd.h             # Set 命令
-│   ├── zset_cmd.h            # ZSet 命令
+│   ├── string_cmd.h          # 连接/字符串/列表/哈希/集合/有序集合/持久化/服务器命令
+│   ├── expire_cmd.h          # EXPIRE / TTL / PTTL / PERSIST / SETEX
 │   ├── cluster_cmd.cpp/h     # 集群命令
 │   ├── psync_cmd.cpp/h       # 主从同步
 │   └── restore_cmd.cpp/h     # 恢复命令
@@ -350,18 +358,26 @@ ctest --test-dir build -L gate -j1                # 只跑必过门禁那一层
 
 ### 单独测试
 
-| 测试 | 说明 |
-|------|------|
-| atomic-tests | 原子操作正确性 |
-| lock-correctness-tests | Mutex/RWLock/SpinLock 正确性 |
-| lock-deadlock-tests | 死锁检测 |
-| lock-race-tests | 数据竞争检测 |
-| sync-primitives-tests | CountDownLatch/CyclicBarrier |
-| storage-test | GlobalStorage 增删改查 |
-| datatype-test | 五种数据类型 |
-| persistence-test | RDB 读写与恢复 |
-| cluster-test | 集群功能 |
-| stress-test | 高并发压力测试 |
+ctest 用例名注册在 `test/CMakeLists.txt` 的 `CC_TESTS` 表里（名称 | target | LABELS | TIMEOUT），共 16 条：
+
+| `ctest` 用例名 | 说明 | 标签 |
+|------|------|------|
+| AtomicTests | 原子操作正确性 | gate |
+| SyncPrimitivesTests | CountDownLatch/CyclicBarrier | gate |
+| ClusterTests | 集群功能 | gate |
+| LockCorrectnessTests | Mutex/RWLock/SpinLock 正确性 | gate |
+| LockDeadlockTests | 死锁检测 | gate |
+| LockRaceTests | 数据竞争检测 | gate |
+| LockBoundaryTests | 锁边界条件 | gate |
+| V3Tests | 存储/数据类型/持久化/配置等全套单测 | gate |
+| ContractTests | 对外行为契约（命令语义） | gate |
+| LockRaceDemoTests | 故意制造的竞争演示 | slow |
+| ConcurrencyTests | 并发语义（部分断言尚未达标） | contract |
+| LockStressTests | 锁压力 | slow |
+| StressTest | 高并发压力测试 | slow |
+| LoadLimitTest | 容量上限探测 | slow |
+| LongRunningStressTest | 长时间稳定性 | slow |
+| NetworkStressTest | 连接风暴（独占服务器端口） | slow |
 
 ### Sanitizers
 
@@ -428,7 +444,7 @@ GlobalStorage 将哈希表分为 64 个分片，每个分片独立加锁。高�
 
 ### ARU 淘汰算法
 
-近似 LRU，通过 `last_access_time_ms` 实现。每 100ms 抽样检查过期键时，顺带淘汰最久未访问的键。
+近似 LRU，通过 `last_access_time_ms` 实现，**由写入路径同步触发**：`set`/`mutate` 在拿分片锁之前先查 `size()`，一旦占用率 ≥ `max_entries × 0.9` 就淘汰到 `max_entries × 0.6`。单轮淘汰最多 1024 个 key 并每 64 个复查一次 `size()`；每次淘汰随机采样一个分片（最多试 8 个分片），在片内优先删已过期的 key，否则删该片最久未访问的 key。后台 `ExpirationChecker` 每 100ms 只负责按 TTL 删除过期键，不参与淘汰。
 
 ## 参考资料
 
