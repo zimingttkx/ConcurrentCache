@@ -1476,8 +1476,8 @@ class MemoryTester:
 
         # 满载也用同一个口径采到收敛：以前空载多轮、满载单次，两个数不在同一基准上，
         # 差值本身就是错的（nightly 实测给出过 空载1119.4 / 满载1119.4 这种一模一样的值）
-        mem_full_cc, _ = self.server_mgr.get_memory_rss_settled(self.cc_port)
-        mem_full_redis, _ = self.server_mgr.get_memory_rss_settled(self.redis_port)
+        mem_full_cc, stable_full_cc = self.server_mgr.get_memory_rss_settled(self.cc_port)
+        mem_full_redis, stable_full_redis = self.server_mgr.get_memory_rss_settled(self.redis_port)
 
         delta_cc = mem_full_cc - mem_empty_cc
         delta_redis = mem_full_redis - mem_empty_redis
@@ -1490,8 +1490,14 @@ class MemoryTester:
         print(f"  {'增量':<20} {delta_cc/1024/1024:>15.1f} MB {delta_redis/1024/1024:>15.1f} MB")
         # 空载采样没收敛时增量可以是负的，「每 key 开销」就没有意义 ——
         # 明说不给，而不是往 stdout 和报告里打一个负数。
-        pk_cc = '不可用（空载未收敛）' if delta_cc <= 0 else '%.0f B' % per_key_cc
-        pk_redis = '不可用（空载未收敛）' if delta_redis <= 0 else '%.0f B' % per_key_redis
+        def why_unusable(stable_empty, stable_full, delta):
+            if not stable_empty or not stable_full:
+                return '不可用（采样未收敛）'
+            if delta == 0:
+                return '不可用（采样已稳但 RSS 没动：堆里还有 FLUSHDB 后未归还的空闲）'
+            return '不可用（空载已高于满载，基准不可信）'
+        pk_cc = why_unusable(stable_cc, stable_full_cc, delta_cc) if delta_cc <= 0 else '%.0f B' % per_key_cc
+        pk_redis = why_unusable(stable_redis, stable_full_redis, delta_redis) if delta_redis <= 0 else '%.0f B' % per_key_redis
         print('  %-20s %18s %18s' % ('每 key 开销', pk_cc, pk_redis))
 
         return {
