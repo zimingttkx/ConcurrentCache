@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -900,6 +901,110 @@ void run_info_memory_contract_tests(int port) {
     });
 }
 
+// 从 "name:123" 这种 INFO 行里取 123。
+static bool info_field_is_number(const std::string& text, const char* key,
+                                 unsigned long long& out) {
+    const std::size_t at = text.find(key);
+    if (at == std::string::npos) {
+        return false;
+    }
+    const char* first = text.c_str() + at + std::strlen(key);
+    char* last = nullptr;
+    out = std::strtoull(first, &last, 10);
+    return last != first;
+}
+
+// INFO 的累计计数器与 keyspace 的 expires/avg_ttl 必须是"活的"。
+//
+// 这些字段曾经是写死的 0。写死的观测值比缺失更危险：它长得像数据，运维拿它判断
+// 连接泄漏或流量异常，而它永远不变化 —— 基于它的告警会恒真或恒假。所以这里断言的是
+// **增量**：做了一批可数的事之后，计数必须跟着动。
+void run_server_counters_contract_tests(int port) {
+    TEST_SUITE("INFO 累计计数器");
+
+    auto read_stats = [port](std::string& out) -> bool {
+        RespClient client = connected_client(port);
+        Reply reply;
+        if (!do_cmd(client, {"INFO", "stats"}, reply)) {
+            return false;
+        }
+        out = reply_text(reply);
+        return true;
+    };
+
+    RUN_TEST(counters_move_when_connections_and_commands_happen) {
+        std::string before;
+        EXPECT_TRUE(read_stats(before));
+        unsigned long long conns0 = 0;
+        unsigned long long cmds0 = 0;
+        EXPECT_TRUE(info_field_is_number(before, "total_connections_received:", conns0));
+        EXPECT_TRUE(info_field_is_number(before, "total_commands_processed:", cmds0));
+
+        {
+            RespClient writer = connected_client(port);
+            for (int i = 0; i < 5; ++i) {
+                Reply r;
+                do_cmd(writer, {"SET", "ctr_key_" + std::to_string(i), "v"}, r);
+            }
+        }
+
+        std::string after;
+        EXPECT_TRUE(read_stats(after));
+        unsigned long long conns1 = 0;
+        unsigned long long cmds1 = 0;
+        EXPECT_TRUE(info_field_is_number(after, "total_connections_received:", conns1));
+        EXPECT_TRUE(info_field_is_number(after, "total_commands_processed:", cmds1));
+
+        std::cout << "  connections: " << conns0 << " -> " << conns1
+                  << ", commands: " << cmds0 << " -> " << cmds1 << std::endl;
+        // 至少 +1：上面新开的 writer
+        EXPECT_TRUE(conns1 >= conns0 + 1);
+        // 5 条 SET + 这一次 INFO 自己，至少 6 条
+        EXPECT_TRUE(cmds1 >= cmds0 + 6);
+    });
+
+    RUN_TEST(keyspace_reports_live_expires_and_avg_ttl) {
+        RespClient client = connected_client(port);
+
+        Reply ok1;
+        Reply ok2;
+        EXPECT_TRUE(do_cmd(client, {"SETEX", "ctr_ttl_a", "600", "1"}, ok1));
+        EXPECT_TRUE(do_cmd(client, {"SETEX", "ctr_ttl_b", "1200", "2"}, ok2));
+        EXPECT_TRUE(!ok1.is_error());
+        EXPECT_TRUE(!ok2.is_error());
+
+        Reply ks;
+        EXPECT_TRUE(do_cmd(client, {"INFO", "keyspace"}, ks));
+        const std::string text = reply_text(ks);
+        const std::size_t at = text.find("db0:keys=");
+        EXPECT_TRUE(at != std::string::npos);
+        if (at == std::string::npos) {
+            return;
+        }
+        const std::size_t epos = text.find(",expires=", at);
+        const std::size_t apos = text.find(",avg_ttl=", at);
+        EXPECT_TRUE(epos != std::string::npos);
+        EXPECT_TRUE(apos != std::string::npos);
+        if (epos == std::string::npos || apos == std::string::npos) {
+            return;
+        }
+        const unsigned long long expires =
+            std::strtoull(text.c_str() + epos + std::strlen(",expires="), nullptr, 10);
+        const unsigned long long avg_ttl =
+            std::strtoull(text.c_str() + apos + std::strlen(",avg_ttl="), nullptr, 10);
+        std::cout << "  keyspace: expires=" << expires << ", avg_ttl=" << avg_ttl
+                  << std::endl;
+        EXPECT_TRUE(expires >= 2);
+        // 别的用例可能留下不同 TTL 的键，所以不锁平均值的大小，
+        // 只要求它被真的算出来（写死 0 的版本在这里必红）。
+        EXPECT_TRUE(avg_ttl > 0);
+
+        Reply bad;
+        EXPECT_TRUE(do_cmd(client, {"INFO", "nosuchsection"}, bad));
+        EXPECT_TRUE(bad.is_error());
+    });
+}
+
 void run_all_contract_tests() {
     const char* server_bin = std::getenv("CC_SERVER_BIN");
     // 环境变量没传来说明 CMake 接线断了，那必须是失败而不是跳过——
@@ -938,6 +1043,7 @@ void run_all_contract_tests() {
     run_restore_payload_contract_tests(port);
     run_migrate_timeout_contract_tests(port);
     run_info_memory_contract_tests(port);
+    run_server_counters_contract_tests(port);
     run_capacity_contract_tests(binary);
 
     // 红了要能就地解释。WNOHANG 先问一次：服务器是自己死了还是还活着，决定了

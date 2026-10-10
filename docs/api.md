@@ -153,7 +153,7 @@ PING [message]
 > **DEBUG SLEEP 已被移除**：`DEBUG SLEEP <sec>` 会阻塞事件循环，现返回 `-ERR DEBUG SLEEP is not supported`。
 > **`# Memory` 里没有 `used_memory`**：Redis 那一栏是分配器报告的已用字节，而本项目那三层内存池还没接进任何分配路径，没有可信值可报。字段缺失比一个抄来的数字好。这里报的是内核视角的 `used_memory_rss`（读 `/proc/self/status` 的 `VmRSS`），加一个 `used_memory_keys`（条目数，不是字节）。淘汰只看条数，所以 `maxmemory` 恒为 `0`（= 没有按字节的硬上限）、`maxmemory_policy` 说明实际按什么在淘汰。
 >
-> **INFO 的两处已知不真实**：`total_connections_received` / `total_commands_processed` 恒为 `0`，`db0:...expires=0,avg_ttl=0` 的两个字段也是硬编码占位——它们是 Redis 的字段名，本项目尚未接线，不要用于容量判断。
+> `total_connections_received`（成功 accept 的连接数）与 `total_commands_processed`（造出命令对象并进入执行路径的条数；`MOVED`/`ASK` 重定向与未知命令名不计入）是进程内实时累计，重启归零。`avg_ttl` 单位是**毫秒**；`expires` / `avg_ttl` 只统计还没过期的条目，而 `keys` 是底层哈希表条目数（含已过期未删除的），所以 `keys=100,expires=3` 是正常的，不是矛盾。
 > section 名区分大小写且只认 `server` / `stats` / `persistence` / `keyspace` / `all`，其它值返回 `-ERR Unknown INFO section: <name>`。
 
 `INFO` 输出示例：
@@ -164,6 +164,8 @@ concurrentcache_version:4.0.0
 os:Linux
 arch_bits:64
 # Stats
+total_connections_received:17
+total_commands_processed:4821
 total_bgsave_calls:5
 total_rdb_saved_keys:12345
 # Memory
@@ -179,7 +181,7 @@ rdb_last_bgsave_time_sec:1718700000
 rdb_dirty_count:0
 rdb_last_bgsave_keys:12345
 # Keyspace
-db0:keys=12345,expires=0,avg_ttl=0
+db0:keys=12345,expires=312,avg_ttl=8412000
 ```
 
 ## 12. 集群

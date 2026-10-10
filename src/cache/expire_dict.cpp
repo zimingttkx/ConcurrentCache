@@ -204,6 +204,26 @@ namespace cc_server {
         return expire_map_.size();
     }
 
+    void ExpireDict::stats(size_t& live_count, int64_t& avg_ttl_ms) const {
+        // INFO keyspace 的 expires / avg_ttl。两个都要**排除已过期的条目**：
+        // 过期但还没被删的键在 expire_map_ 里仍然留着，把它们算进去会让
+        // "有多少键会自己消失"这个运维数字虚高。
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+        live_count = 0;
+        avg_ttl_ms = 0;
+        int64_t sum = 0;
+        const int64_t now = current_time_ms();
+        for (const auto& kv : expire_map_) {
+            if (kv.second > now) {
+                ++live_count;
+                sum += (kv.second - now);
+            }
+        }
+        if (live_count > 0) {
+            avg_ttl_ms = sum / static_cast<int64_t>(live_count);
+        }
+    }
+
     void ExpireDict::clear_all() {
         std::unique_lock<std::shared_mutex> lock(mutex_);
         const size_t cleared = expire_map_.size();

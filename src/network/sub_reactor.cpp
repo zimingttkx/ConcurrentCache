@@ -4,6 +4,7 @@
 //
 
 #include "sub_reactor.h"
+#include "base/server_stats.h"
 #include "command/command_factory.h"
 #include "protocol/resp.h"
 #include "cluster/cluster_server.h"
@@ -200,6 +201,10 @@ void SubReactor::register_connection(int client_fd) {
 
         auto command = CommandFactory::instance().create(cmd_name);
         if (command) {
+            // 计的是"造出了命令对象并要走执行路径"的条数。重定向（MOVED/ASK）与
+            // 未知命令名不计入：那两条路径没有执行任何命令，把它们算进去会让
+            // "处理过的命令数"和实际做事的数量脱钩。
+            ServerStats::instance().record_command_processed();
             std::string response;
             try {
                 response = command->execute(args);

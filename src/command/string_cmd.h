@@ -16,6 +16,7 @@
 #include <random>
 
 #include "persistence/rdb.h"
+#include "base/server_stats.h"
 
 namespace cc_server {
 
@@ -1416,8 +1417,11 @@ namespace cc_server {
             if (section == "stats" || section == "all") {
                 result += "# Stats\r\n";
                 auto& stats = rdb.get_stats();
-                result += "total_connections_received:0\r\n";
-                result += "total_commands_processed:0\r\n";
+                auto& counters = ServerStats::instance();
+                result += "total_connections_received:"
+                          + std::to_string(counters.connections_accepted()) + "\r\n";
+                result += "total_commands_processed:"
+                          + std::to_string(counters.commands_processed()) + "\r\n";
                 result += "total_bgsave_calls:" + std::to_string(stats.total_bgsave_calls.load()) + "\r\n";
                 result += "total_rdb_saved_keys:" + std::to_string(stats.total_rdb_saved_keys.load()) + "\r\n";
             }
@@ -1451,8 +1455,16 @@ namespace cc_server {
 
             if (section == "keyspace" || section == "all") {
                 result += "# Keyspace\r\n";
+                // keys 是底层哈希表的条目数，**含**已过期但还没被删的键（size() 不做
+                // 过期过滤）。expires / avg_ttl 只数还没过期的那些，所以完全可能出现
+                // keys=100 / expires=3 这种组合 —— 两个字段量的不是同一批键。
                 size_t db_size = GlobalStorage::instance().size();
-                result += "db0:keys=" + std::to_string(db_size) + ",expires=0,avg_ttl=0\r\n";
+                size_t live_expires = 0;
+                int64_t avg_ttl_ms = 0;
+                GlobalStorage::instance().expire_dict().stats(live_expires, avg_ttl_ms);
+                result += "db0:keys=" + std::to_string(db_size)
+                          + ",expires=" + std::to_string(live_expires)
+                          + ",avg_ttl=" + std::to_string(avg_ttl_ms) + "\r\n";
             }
 
             if (result.empty()) {
