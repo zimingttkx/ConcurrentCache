@@ -21,10 +21,15 @@
 | `comparison_test.py` | 与真 Redis 的逐项对比，产出 `comparison_report.json` | 自己拉起两边；**需要本机安装 `redis-server`** |
 | `test_resp_client.py` | 测试工具自身的配对断言（喂字节，不连服务器）；由 `ci.yml` 的 `consistency` job 执行 | 不需要 |
 
-> 哪些脚本真的被 CI 跑：`daily.yml` 跑 failover / psync / cluster_stress / cluster_full /
-> stress_find_limit / comparison；connection storm、high concurrency、consistency、chaos 四个
-> 目前只在本地经 `run_all_tests.py` 跑（未接进任何 job，登记在 `ci/known-failures.txt` 的
-> `legacy-file` 里）。`test_resp_client.py` 接的是 `ci.yml` 的 `consistency`。
+> 哪些脚本真的被 CI 跑：
+> - `daily.yml` 的 `e2e` job：failover / psync / cluster_stress / cluster_full / stress_find_limit，
+>   外加「Protocol-plane e2e」一步 —— 它自己拉起 `build/concurrentcache-server --port 6379`，
+>   然后依次跑 chaos / connection_storm / consistency_check（这三个脚本本身不起服务器，靠这一步起）。
+> - `daily.yml` 的 `redis-compat` job：comparison_test.py。
+> - `ci.yml` 的 `consistency` job（required check 之一）：test_resp_client.py。
+>
+> 仍未接进任何 job 的只有 `run_all_tests.py`（本地一键入口）和 `e2e_high_concurrency_load.py`
+> （与 cluster_stress 的阶梯高度重复），两条都登记在 `ci/known-failures.txt` 的 `legacy-file` 里。
 
 ## 快速开始
 
@@ -97,15 +102,23 @@ python3 run_all_tests.py
 
 **目标**：验证并发修改同一 Key 的一致性
 
-**测试场景**：
-- 场景 A：10 协程 x 100 次读-增-写 = 预期结果 1000（服务端约 60 连接/秒，测试需约 30 秒）
+**测试场景**（`run_all_scenarios` 依次跑 A → B → C → E → D，五项全过才算 PASS）：
+- 场景 A：10 协程 × 100 次 GET+SET 读-改-写（服务端约 60 连接/秒，测试需约 30 秒）
 - 场景 B：100 协程并发覆盖写同一 Key
-- 场景 C：读写并发，一边写一边读
+- 场景 C：一个协程写 `"0".."499"`、另一个协程同时读，共 500 次各边
+- 场景 E：10 协程 × 50 次 `INCR`，最终值必须精确等于 500
+- 场景 D：100 个独立 key 各自 SET 再 GET 回来比对
 
 **通过标准**：
-- 场景 A：10 协程 × 100 次读-改-写，理论上限 1000；最终值 ≤ 1000 即通过（小于 1000 表示竞态丢更新，属预期），超过 1000 才判失败
+- 场景 A：读-改-写不是原子的，丢更新属预期，所以最终值落在 `1..1000` 即通过；超过 1000（凭空多出
+  写入）才判失败
 - 场景 B：最终值是某个有效写入值
-- 场景 C：无异常值读取
+- 场景 C：读到的每个值都必须是 `"0".."499"` 里的完整值，且收尾读到的值合法。出现拼不上的数字、
+  越界的数、或一次都没读到，就是真实的读脏/回复错位，不是竞态能解释的
+  （这里以前是无条件 `passed=True` —— 一个不可能失败的测试，#105 改成真判据）
+- 场景 E：`INCR` 在服务端分片独占锁内完成读-改-写，没有"竞态可解释"的余地，少一次就是一次丢更新，
+  所以判据是严格相等；它不测吞吐也不测延迟，与机器快慢无关，适合长期挂在 CI 上
+- 场景 D：100 组 key/value 全部原样读回
 
 ### 4. Chaos Test (`e2e_chaos_test.py`)
 
