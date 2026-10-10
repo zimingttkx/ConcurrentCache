@@ -8,6 +8,9 @@
 #include <chrono>
 #include <cmath>
 #include <cctype>
+#include <cstdlib>
+#include <cstdint>
+#include <fstream>
 #include <charconv>
 #include <limits>
 #include <random>
@@ -1349,6 +1352,47 @@ namespace cc_server {
     };
 
     // INFO 命令 - 返回服务器信息和统计
+    // 进程当前常驻内存（字节）。
+    //
+    // 只报内核知道的量：/proc/self/status 的 VmRSS。项目里那三层内存池还
+    // 没接进任何分配路径，所以**没有**可信的"分配器已用字节数"可报 ——
+    // Redis 的 used_memory 那一栏故意不出，宁可让工具看到字段缺失，也不要
+    // 一个抄来的数字看着像真的。读不到（非 Linux / proc 不可用）时返回 0，
+    // 由调用方如实报 0，不做任何猜测。
+    // 从一行 /proc/self/status 里取 VmRSS 的 kB 并换成字节。
+    // 单独拆出来是为了能被单元测试直接钉住（"VmRSS:\t1024 kB" 必须是 1048576，
+    // 没有数字的那行必须是 0，而不是一个没定义的返回值）。
+    // inline：这个头文件会被多个 TU 包含，static 会让每个 TU 各留一份。
+    inline uint64_t rss_bytes_from_status_line(const std::string& line) {
+        if (line.compare(0, 6, "VmRSS:") != 0) {
+            return 0;
+        }
+        const std::size_t begin = line.find_first_of("0123456789");
+        if (begin == std::string::npos || begin == line.size()) {
+            return 0;
+        }
+        const char* first = line.c_str() + begin;
+        char* last = nullptr;
+        const unsigned long long kb = std::strtoull(first, &last, 10);
+        if (last == first) {
+            return 0;
+        }
+        return static_cast<uint64_t>(kb) * 1024ull;
+    }
+
+    inline uint64_t process_rss_bytes() {
+#ifdef __linux__
+        std::ifstream status("/proc/self/status");
+        std::string line;
+        while (std::getline(status, line)) {
+            if (line.compare(0, 6, "VmRSS:") == 0) {
+                return rss_bytes_from_status_line(line);
+            }
+        }
+#endif
+        return 0;
+    }
+
     class InfoCommand : public Command {
     public:
         std::string execute(const std::vector<std::string>& args) override {
@@ -1359,8 +1403,14 @@ namespace cc_server {
             if (section == "server" || section == "all") {
                 result += "# Server\r\n";
                 result += "concurrentcache_version:4.0.0\r\n";
+#if defined(__linux__)
                 result += "os:Linux\r\n";
-                result += "arch_bits:64\r\n";
+#elif defined(_WIN32)
+                result += "os:Windows\r\n";
+#else
+                result += "os:Unknown\r\n";
+#endif
+                result += "arch_bits:" + std::to_string(sizeof(void*) * 8) + "\r\n";
             }
 
             if (section == "stats" || section == "all") {
@@ -1370,6 +1420,21 @@ namespace cc_server {
                 result += "total_commands_processed:0\r\n";
                 result += "total_bgsave_calls:" + std::to_string(stats.total_bgsave_calls.load()) + "\r\n";
                 result += "total_rdb_saved_keys:" + std::to_string(stats.total_rdb_saved_keys.load()) + "\r\n";
+            }
+
+            if (section == "memory" || section == "all") {
+                result += "# Memory\r\n";
+                const uint64_t rss = process_rss_bytes();
+                result += "used_memory_rss:" + std::to_string(rss) + "\r\n";
+                result += "used_memory_rss_human:"
+                          + std::to_string(rss / (1024ull * 1024ull)) + "MB\r\n";
+                // 淘汰只看条数不看字节（没有 Redis 那种按字节的 maxmemory 口径），
+                // 所以这里给的是"按什么在淘汰"，不是一个假装存在的字节上限。
+                result += "maxmemory:0\r\n";
+                result += "maxmemory_human:0B\r\n";
+                result += "maxmemory_policy:aru-random-shard-sampling\r\n";
+                result += "used_memory_keys:"
+                          + std::to_string(GlobalStorage::instance().size()) + "\r\n";
             }
 
             if (section == "persistence" || section == "all") {

@@ -341,7 +341,9 @@ redis-cli -p 6379 INFO all
 | `rdb_last_bgsave_status` | `INFO persistence` | 上次 BGSAVE 状态（ok/err） |
 | `rdb_last_bgsave_time_sec` | `INFO persistence` | 上次 BGSAVE 时间戳 |
 | `rdb_dirty_count` | `INFO persistence` | 自上次保存起的写操作数 |
-| `db0:keys=N` | `INFO keyspace` | 当前 key 总数 |
+| `db0:keys=N` | `INFO keyspace` | 当前 key 总数（含已过期未删除的条目） |
+| `used_memory_rss` | `INFO memory` | 进程常驻内存（内核视角，来自 `/proc/self/status` 的 VmRSS）。**没有** `used_memory`：内存池未接入分配路径，没有可信的分配器字节数可报 |
+| `maxmemory_policy` | `INFO memory` | 淘汰口径：按条数做随机分片采样近似 LRU，不是按字节 |
 
 ### 8.3 调试命令
 

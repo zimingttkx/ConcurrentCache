@@ -6,8 +6,11 @@
 // ci/known-failures.txt 与标签上收紧一格。
 #include "contract_test/resp_client.h"
 #include "trace/test_assertions.h"
+#include "command/string_cmd.h"
 
 #include <atomic>
+#include <cctype>
+#include <cstdint>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -839,6 +842,64 @@ void run_migrate_timeout_contract_tests(int port) {
     });
 }
 
+// INFO memory：真实存在的常驻内存，而不是抄来的字段。
+//
+// 为什么单独有这一段：项目的三层内存池还没接进分配路径，所以没有可信的
+// "分配器已用字节"可报。宁可让字段缺失（对比脚本会看到 Redis 有、本服务器没有），
+// 也不要一个看着像真的的假数字。这里断言的是"报出来的必须是真的那一套"。
+void run_info_memory_contract_tests(int port) {
+    TEST_SUITE("INFO memory 段");
+
+    RUN_TEST(info_memory_reports_real_rss_fields) {
+        RespClient client = connected_client(port);
+        Reply reply;
+        EXPECT_TRUE(do_cmd(client, {"INFO", "memory"}, reply));
+        EXPECT_TRUE(!reply.is_error());
+        const std::string text = reply_text(reply);
+        std::cout << "  INFO memory 前 120 字节: " << text.substr(0, 120) << std::endl;
+        EXPECT_TRUE(text.find("# Memory") != std::string::npos);
+        EXPECT_TRUE(text.find("used_memory_rss:") != std::string::npos);
+        EXPECT_TRUE(text.find("maxmemory_policy:aru-random-shard-sampling") != std::string::npos);
+        EXPECT_TRUE(text.find("used_memory:") == std::string::npos);  // 故意不报
+
+        // VmRSS 必须是十进制数字，且非负；Linux 上一个活进程不可能为 0
+        const std::size_t at = text.find("used_memory_rss:");
+        EXPECT_TRUE(at != std::string::npos);
+        if (at != std::string::npos) {
+            std::size_t i = at + sizeof("used_memory_rss:") - 1;
+            std::size_t digits = 0;
+            while (i < text.size() && std::isdigit(static_cast<unsigned char>(text[i]))) { ++i; ++digits; }
+            EXPECT_TRUE(digits > 0);
+#ifdef __linux__
+            const unsigned long long rss = std::strtoull(text.c_str() + at + sizeof("used_memory_rss:") - 1, nullptr, 10);
+            EXPECT_TRUE(rss > 0);
+#endif
+        }
+    });
+
+    RUN_TEST(rss_status_line_parser) {
+        // 纯函数判据：换单位、没有数字、不是 VmRSS 行的三种形状
+        EXPECT_EQ(cc_server::rss_bytes_from_status_line("VmRSS:	1024 kB"),
+                  static_cast<uint64_t>(1024ull * 1024ull));
+        EXPECT_EQ(cc_server::rss_bytes_from_status_line("VmRSS:	   0 kB"),
+                  static_cast<uint64_t>(0));
+        EXPECT_EQ(cc_server::rss_bytes_from_status_line("VmRSS:	kb"),
+                  static_cast<uint64_t>(0));
+        EXPECT_EQ(cc_server::rss_bytes_from_status_line("VmSize:	9999 kB"),
+                  static_cast<uint64_t>(0));
+    });
+
+    RUN_TEST(info_all_contains_memory_section_and_unknown_section_still_errors) {
+        RespClient client = connected_client(port);
+        Reply all;
+        EXPECT_TRUE(do_cmd(client, {"INFO", "all"}, all));
+        EXPECT_TRUE(reply_text(all).find("# Memory") != std::string::npos);
+        Reply bad;
+        EXPECT_TRUE(do_cmd(client, {"INFO", "Memory"}, bad));   // 段名区分大小写
+        EXPECT_TRUE(bad.is_error());
+    });
+}
+
 void run_all_contract_tests() {
     const char* server_bin = std::getenv("CC_SERVER_BIN");
     // 环境变量没传来说明 CMake 接线断了，那必须是失败而不是跳过——
@@ -876,6 +937,7 @@ void run_all_contract_tests() {
     run_replica_handshake_contract_tests(port);
     run_restore_payload_contract_tests(port);
     run_migrate_timeout_contract_tests(port);
+    run_info_memory_contract_tests(port);
     run_capacity_contract_tests(binary);
 
     // 红了要能就地解释。WNOHANG 先问一次：服务器是自己死了还是还活着，决定了

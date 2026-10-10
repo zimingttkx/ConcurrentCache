@@ -147,10 +147,12 @@ PING [message]
 
 | 命令 | 语法 | 返回 |
 |------|------|------|
-| `INFO` | `INFO [section]` | Bulk String（server/stats/persistence/keyspace/all） |
+| `INFO` | `INFO [section]` | Bulk String（server/stats/memory/persistence/keyspace/all） |
 | `DEBUG` | `DEBUG OBJECT <key>` | 类型信息（Bulk String，如 `Type: string`）；key 不存在返回 `-ERR no such key` |
 
 > **DEBUG SLEEP 已被移除**：`DEBUG SLEEP <sec>` 会阻塞事件循环，现返回 `-ERR DEBUG SLEEP is not supported`。
+> **`# Memory` 里没有 `used_memory`**：Redis 那一栏是分配器报告的已用字节，而本项目那三层内存池还没接进任何分配路径，没有可信值可报。字段缺失比一个抄来的数字好。这里报的是内核视角的 `used_memory_rss`（读 `/proc/self/status` 的 `VmRSS`），加一个 `used_memory_keys`（条目数，不是字节）。淘汰只看条数，所以 `maxmemory` 恒为 `0`（= 没有按字节的硬上限）、`maxmemory_policy` 说明实际按什么在淘汰。
+>
 > **INFO 的两处已知不真实**：`total_connections_received` / `total_commands_processed` 恒为 `0`，`db0:...expires=0,avg_ttl=0` 的两个字段也是硬编码占位——它们是 Redis 的字段名，本项目尚未接线，不要用于容量判断。
 > section 名区分大小写且只认 `server` / `stats` / `persistence` / `keyspace` / `all`，其它值返回 `-ERR Unknown INFO section: <name>`。
 
@@ -164,6 +166,13 @@ arch_bits:64
 # Stats
 total_bgsave_calls:5
 total_rdb_saved_keys:12345
+# Memory
+used_memory_rss:52428800
+used_memory_rss_human:50MB
+maxmemory:0
+maxmemory_human:0B
+maxmemory_policy:aru-random-shard-sampling
+used_memory_keys:12345
 # Persistence
 rdb_last_bgsave_status:ok
 rdb_last_bgsave_time_sec:1718700000
