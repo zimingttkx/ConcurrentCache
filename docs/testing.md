@@ -63,6 +63,7 @@
 `scripts/ci/check_consistency.py` 检查这几件事：命令注册表与复制写白名单是否互相自洽（注册表由 `command-table-probe` 在运行时回答，不信正则）、`test/` 下每个 `.cpp` 是否属于某个 target 或在名单里、每个 ctest target 有没有真的被某个标签选到、`conf` 里的键是否真被代码读取、端口在 conf / Dockerfile `EXPOSE` / Dockerfile `HEALTHCHECK` 三处是否一致（README 不参与这一条）。
 
 第 7 组是**文档 ↔ 现实**：`docs/api.md` 的命令索引与总数必须等于注册表、README 的 ctest 表必须等于 `CC_TESTS`、指向 `.md` 的相对链接必须能解析、文档里`redis-cli -p <总线端口>` 这种把总线端口当客户端口的写法要判红、默认端口与 `concurrentcache_version` 必须与代码/conf 一致、文档让人拉的镜像仓库地址必须有工作流真的往那儿推；README 的命令表必须是注册表的子集（只做单向：README 一行里可以并排两个命令、CLUSTER 那一格写的是子命令，双向等值会假红，覆盖率由 api.md 那条精确等值负责）；deployment.md § 4 的表两向核对 —— 列出的键要么代码真的读（`getInt/getString/getBool`），要么行里写明「当前未被读取」，而 conf 里出现的每个键都必须在这张表里。
+第 7i 组管 e2e 清单本身：`test/e2e_test/` 下的每个 `.py` 都要被 `test/e2e_test/README.md` 的清单提到、清单里点名的脚本都要真存在，文档里写的「N 个 Python 脚本 / N 个 C++ 可执行 target / N 个 ctest 用例」必须等于实际数量 —— 起因是 #99 加了一个脚本、清单却漏了 7 个，而这类数字靠手抄一定会漂。
 
 这组判据自己也可能坏（写坏的正则会永远绿），所以 `scripts/ci/check_docs_gate_injection.py` 会往文档里逐条注入错误、要求**只有对应那一条**报 `::error::`、然后还原；它作为 `consistency` job 的一个步骤每天跟着跑。
 

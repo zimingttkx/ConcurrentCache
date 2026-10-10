@@ -572,6 +572,40 @@ def main() -> int:
             f"conf/concurrentcache.conf 里有 {key}，但 docs/deployment.md § 4 配置项没写它"
         )
 
+    # 7i) e2e 脚本清单与"写了几个"的计数。
+    #
+    # 起因很实在：#99 往 test/e2e_test/ 里加了 test_resp_client.py，脚本数从 11 变 12，
+    # 而 test/e2e_test/README.md 的清单本来只有 5 行。手工维护的数字与清单一定会漂，
+    # 所以三样一起钉：目录里的 .py 都要在 README 里出现、README 里点名的 .py 都要真
+    # 存在、文档里 N 个 Python 脚本 / N 个 C++ target / N 个 ctest 用例必须等于实际值。
+    e2e_dir = ROOT / "test" / "e2e_test"
+    actual_scripts = {p2.name for p2 in e2e_dir.glob("*.py")}
+    inv_path = e2e_dir / "README.md"
+    if inv_path.exists():
+        inv_text = read(inv_path).replace("\r\n", "\n")
+        mentioned = set(re.findall(r"`([A-Za-z0-9_]+\.py)`", inv_text))
+        for name in sorted(actual_scripts - mentioned):
+            tracker.errors.append(
+                f"test/e2e_test/{name} 没有被 test/e2e_test/README.md 的脚本清单提到"
+            )
+        for name in sorted(mentioned - actual_scripts):
+            tracker.errors.append(
+                f"test/e2e_test/README.md 列了 {name}，但该文件不存在"
+            )
+    expected_counts = {
+        r"(\d+) 个 Python": len(actual_scripts),
+        r"(\d+) 个 C\+\+ 可执行 target": len(built_targets),
+        r"(\d+) 个 ctest 用例": len(registry_names),
+        r"(\d+) 个登记进 CTest": len(registry_names),
+    }
+    for path, text in sorted(docs_now.items()):
+        for pattern, want in expected_counts.items():
+            for m in re.finditer(pattern, text):
+                if int(m.group(1)) != want:
+                    tracker.errors.append(
+                        f"{path.relative_to(ROOT)} 写着「{m.group(0)}」，实际是 {want} 个"
+                    )
+
     tracker.stale()
 
     for message in tracker.warns:
