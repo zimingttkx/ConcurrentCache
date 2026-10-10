@@ -23,7 +23,7 @@ docs/
 │   └── cluster.md              16384 槽 + Gossip + 主从复制
 │
 ├── api.md                      ← API 命令手册（46 个命令）
-├── testing.md                  ← 测试体系（16 个 ctest 用例 + 11 个 Python 脚本）
+├── testing.md                  ← 测试体系（16 个 ctest 用例 + 12 个 Python 脚本）
 └── deployment.md               ← 部署与运维（含性能基准数据）
 ```
 
@@ -60,7 +60,7 @@ docs/
 
 | 文档 | 内容 | 何时看 |
 |------|------|-------|
-| [`testing.md`](testing.md) | 16 个 ctest 用例（17 个 C++ target，含 1 个探针）、11 个 Python E2E 脚本（含 Redis 对比测试）、Sanitizer 用法、CI 流程 | 加新功能写测试、跑回归 |
+| [`testing.md`](testing.md) | 16 个 ctest 用例（17 个 C++ target，含 1 个探针）、12 个 Python E2E 脚本（含 Redis 对比测试）、Sanitizer 用法、CI 流程 | 加新功能写测试、跑回归 |
 
 ### 3.4 部署与运维
 

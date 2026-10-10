@@ -2,7 +2,7 @@
 
 > **测试体系**：C++ 单元/集成测试 + Python E2E 测试（含对比测试）
 > **入口**：`test/CMakeLists.txt`（C++ 测试目标） + `test/e2e_test/run_all_tests.py`（E2E 驱动）
-> **测试统计**：17 个 C++ 可执行 target（其中 16 个登记进 CTest，另有 1 个是给一致性脚本用的 `command-table-probe` 探针）+ 11 个 Python 脚本
+> **测试统计**：17 个 C++ 可执行 target（其中 16 个登记进 CTest，另有 1 个是给一致性脚本用的 `command-table-probe` 探针）+ 12 个 Python 脚本
 
 ## 1. 概览
 
@@ -290,8 +290,8 @@ TEST_SUITE("GlobalStorage Basic Operations") {
 | 脚本 | 目的 | 时长 |
 |------|------|------|
 | `comparison_test.py` | **ConcurrentCache vs Redis 深度对比**（功能/性能/鲁棒性/内存） | ~5 分钟 |
-| `e2e_connection_storm.py` | 10000+ 并发连接洪峰 | ~1 分钟 |
-| `e2e_high_concurrency_load.py` | 1000 虚拟用户压测 | 数十秒 |
+| `e2e_connection_storm.py` | 并发连接洪峰（默认 2000 条，`--connections` 可调到万级） | ~1 分钟 |
+| `e2e_high_concurrency_load.py` | 并发读写压测（默认 5 用户 × 20 命令，可调高） | 数十秒 |
 | `e2e_consistency_check.py` | 多协程竞态一致性 | 数十秒 |
 | `e2e_chaos_test.py` | 异常 / 混沌 / 恶意输入 | ~1 分钟 |
 | `e2e_failover_test.py` | 主从故障转移 | ~2 分钟 |
@@ -300,6 +300,7 @@ TEST_SUITE("GlobalStorage Basic Operations") {
 | `cluster_stress_test.py` | 集群压力 | 数分钟 |
 | `stress_find_limit.py` | 寻找性能极限 | 数分钟 |
 | `run_all_tests.py` | 总入口，仅含连接风暴 / 高并发 / 一致性 / 混沌 4 项 | 取决于组合 |
+| `test_resp_client.py` | 测试工具自身的配对断言（不连服务器，喂字节）；由 `ci.yml` 的 `consistency` job 跑 | 秒级 |
 
 > `comparison_test.py` 需要**本机安装 redis-server 7.0.15**（测试时以 subprocess 启动），全部脚本基于原生 Python socket/asyncio 实现 RESP 客户端，无第三方 Python 依赖。failover / cluster_full / psync / cluster_stress / stress_find_limit 不在 `run_all_tests.py` 中，需单独运行。
 

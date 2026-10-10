@@ -96,6 +96,9 @@ class RespClient:
         self.port = port
         self.reader: Optional[asyncio.StreamReader] = None
         self.writer: Optional[asyncio.StreamWriter] = None
+        # 未消费的响应字节。TCP 是字节流：一次 read 可能带回半条、一条或几条回复，
+        # 所以必须自己留着余下的字节，绝不能像以前那样 parse 完就把尾巴丢掉。
+        self.buf: bytes = b""
 
     async def connect(self) -> bool:
         try:
@@ -116,16 +119,52 @@ class RespClient:
         self.reader = None
         self.writer = None
 
+    async def write_cmd(self, *args: str) -> bool:
+        """只写不读：pipeline 的写侧。返回 False 表示连接已不可用。"""
+        try:
+            self.writer.write(RESP.encode_cmd(*args))
+            return True
+        except Exception:
+            return False
+
+    async def drain(self) -> None:
+        try:
+            await self.writer.drain()
+        except Exception:
+            pass
+
+    async def read_reply(self, timeout: float = 5.0) -> Optional[str]:
+        """从自有序缓冲里取**一条**完整回复；不够就继续读。
+
+        这个函数是配对正确的关键：以前每条命令各 read(65536) 一次并丢弃多余字节,
+        服务器把两条回复合并送达时第二条就永久丢了,后续每条命令读到的都是上一条的
+        回复——量具自己先错位,被测对象再怎么正确也测不出对。
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            result, rest = RESP.parse_line(self.buf)
+            if result is not None:
+                self.buf = rest
+                return result
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            try:
+                chunk = await asyncio.wait_for(self.reader.read(65536), timeout=remaining)
+            except Exception:
+                return None
+            if not chunk:            # 对端关闭
+                return None
+            self.buf += chunk
+
     async def execute(self, *args: str, timeout: float = 5.0) -> Optional[str]:
-        """执行命令，返回解析后的字符串结果"""
+        """执行命令，返回解析后的字符串结果（串行使用同一条连接）"""
         try:
             self.writer.write(RESP.encode_cmd(*args))
             await self.writer.drain()
-            raw = await asyncio.wait_for(self.reader.read(65536), timeout=timeout)
-            result, _ = RESP.parse_line(raw)
-            return result
         except Exception:
             return None
+        return await self.read_reply(timeout=timeout)
 
     async def execute_raw(self, *args: str, timeout: float = 5.0) -> Optional[bytes]:
         """执行命令，返回原始字节"""
@@ -1245,22 +1284,29 @@ class StressTester:
     async def _test_many_keys(self):
         """大量 key 写入"""
         async def write_many(port: int, tag: str, count: int) -> Tuple[int, float]:
+            """分批 pipeline：每批一次性写出、再按发送顺序读回同样数量的回复。
+
+            单条连接上并发 gather 同一批 execute() 是错的（读写会在同一条流上互相
+            抢回复），顺序 await 又慢到测不出吞吐。pipeline 才是这条用例本来想量的
+            东西：写进去 N 条、按序拿回 N 条。
+            """
             success = 0
             start = time.monotonic()
             c = RespClient(port=port)
-            if await c.connect():
-                # 分批写入
-                batch_size = 200
-                for batch_start in range(0, count, batch_size):
-                    batch_end = min(batch_start + batch_size, count)
-                    tasks = []
-                    for i in range(batch_start, batch_end):
-                        tasks.append(c.execute("SET", f"mk:{i}", f"v{i}", timeout=10.0))
-                    results = await asyncio.gather(*tasks, return_exceptions=True)
-                    for r in results:
-                        if r is not None and "OK" in str(r):
-                            success += 1
-                await c.close()
+            if not await c.connect():
+                return (0, time.monotonic() - start)
+            batch_size = 200
+            for batch_start in range(0, count, batch_size):
+                batch_end = min(batch_start + batch_size, count)
+                n = batch_end - batch_start
+                for i in range(batch_start, batch_end):
+                    await c.write_cmd("SET", f"mk:{i}", f"v{i}")
+                await c.drain()
+                for _ in range(n):
+                    r = await c.read_reply(timeout=10.0)
+                    if r is not None and "OK" in str(r):
+                        success += 1
+            await c.close()
             elapsed = time.monotonic() - start
             return (success, elapsed)
 
