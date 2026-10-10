@@ -415,4 +415,20 @@ uint64_t ClusterState::note_bus_identity_rejection() {
 uint64_t ClusterState::bus_identity_rejections() const {
     return bus_identity_rejections_.load(std::memory_order_relaxed);
 }
+
+uint64_t ClusterState::note_bus_message_sent() {
+    return bus_messages_sent_.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+
+uint64_t ClusterState::note_bus_message_received() {
+    return bus_messages_received_.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+
+uint64_t ClusterState::bus_messages_sent() const {
+    return bus_messages_sent_.load(std::memory_order_relaxed);
+}
+
+uint64_t ClusterState::bus_messages_received() const {
+    return bus_messages_received_.load(std::memory_order_relaxed);
+}
 } // namespace cc_server

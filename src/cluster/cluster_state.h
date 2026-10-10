@@ -34,6 +34,14 @@ public:
     uint64_t note_bus_identity_rejection();
     [[nodiscard]] uint64_t bus_identity_rejections() const;
 
+    // 总线消息收发计数。CLUSTER INFO 的 cluster_stats_messages_sent/received
+    // 用它，口径是"经过 ClusterLink 的总线消息条数"（gossip 与复制数据都算），
+    // 不是 Redis 那种只算 ping/pong 的口径 —— 定义写清楚比借用一个同名指标重要。
+    uint64_t note_bus_message_sent();
+    uint64_t note_bus_message_received();
+    [[nodiscard]] uint64_t bus_messages_sent() const;
+    [[nodiscard]] uint64_t bus_messages_received() const;
+
     // 槽管理（存储 shared_ptr 避免二次查找）
     void setNodeForSlot(int slot, std::shared_ptr<ClusterNode> node);
     void delSlot(int slot);
@@ -75,6 +83,8 @@ public:
 
 private:
     std::atomic<uint64_t> bus_identity_rejections_{0};  // 总线身份对账拒绝数
+    std::atomic<uint64_t> bus_messages_sent_{0};        // 发出的总线消息条数
+    std::atomic<uint64_t> bus_messages_received_{0};    // 收到的总线消息条数
     std::string my_node_name_;                                               // 本节点名称
     std::unordered_map<std::string, std::shared_ptr<ClusterNode>> nodes_;    // 节点列表
     std::unordered_map<int, std::shared_ptr<ClusterNode>> slots_;            // 槽映射表（存指针避免二次查找）

@@ -324,7 +324,14 @@ std::string ClusterCommand::handleInfo(const std::vector<std::string>& args) {
     result += "cluster_my_node:" + my_node->getName() + "\n";
     int64_t epoch = my_node->getInfo().config_epoch;
     result += "cluster_current_epoch:" + std::to_string(epoch) + "\n";
-    result += "cluster_stats_messages_received:" + std::to_string(0) + "\n";
+    // 收发计数由 ClusterLink 在每一帧成功发出 / 每解出一条完整消息时递增，
+    // 口径是"经过总线的消息条数"（gossip 与复制数据都算）。两个数长期不对称，
+    // 通常意味着单向连通：我能发给某节点，但它发不到我。
+    auto* st = ClusterServer::instance().getState();
+    result += "cluster_stats_messages_sent:"
+              + std::to_string(st ? st->bus_messages_sent() : 0) + "\n";
+    result += "cluster_stats_messages_received:"
+              + std::to_string(st ? st->bus_messages_received() : 0) + "\n";
 
     return RespEncoder::encode_bulk_string(result);
 }
