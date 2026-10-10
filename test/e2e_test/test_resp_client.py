@@ -76,6 +76,18 @@ async def main():
           await collect([b'+OK\r\n'], 2),
           ['OK', None])
 
+    # nil 回复（$-1）之后必须还能继续读后面的回复：曾经因为 nil 也映射成 Python
+    # None 就不推进缓冲区，一条 nil 把整条连接永久卡死 —— 这正是对照测试里
+    # "HDEL 删除字段"两栏一起红、而真 Redis 也红的根因（量具坏了，不是被测对象坏了）。
+    check('nil-then-more-replies',
+          await collect([b':1\r\n$-1\r\n$2\r\nv2\r\n+PONG\r\n'], 4),
+          ['1', None, 'v2', 'PONG'])
+
+    # nil 单独到达后再也没有字节：仍然只能返回 None，且不能把 EOF 当成 nil 的替身
+    check('nil-at-eof',
+          await collect([b'$-1\r\n'], 2),
+          [None, None])
+
     # 错误回复也要按条取回，不能被当成 OK
     check('error-reply',
           await collect([b'-ERR wrong number of arguments\r\n+OK\r\n'], 2),

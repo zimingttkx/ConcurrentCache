@@ -29,3 +29,7 @@ logs/
 
 # Run tests executable
 run_tests
+
+# Python 测试脚本运行时生成的字节码（跑 e2e/test_resp_client.py 会落在 test/e2e_test/ 下）
+__pycache__/
+*.pyc
