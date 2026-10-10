@@ -54,7 +54,7 @@ flowchart TB
 | `stores_` | `std::vector<unordered_map<string, CacheEntry>>` | 每个分片一个 map |
 | `mutexes_` | `std::unique_ptr<shared_mutex[]>` | 每个分片一把 `std::shared_mutex` |
 | `expire_dict_` | `ExpireDict` | 键 → 过期时间戳（毫秒） |
-| `dirty_counter_` | `std::atomic<size_t>` | 自上次 BGSAVE **启动成功**起的写操作数；`set`/`set_conditional`/`del`/`set_with_expire`/`incrby` 及各容器写路径（统一走 `mutate`）递增，过期键被动清理不递增 |
+| `dirty_counter_` | `std::atomic<size_t>` | 自上次 BGSAVE **启动成功**起的写操作数；`set`/`set_conditional`/`del`/`set_with_expire`/`incrby` 及各容器写路径（统一走 `mutate`）递增；惰性删除调的就是 `del()`（`storage.cpp:52-56` → `:189`），所以过期键被被动清理时**同样**递增脏计数 |
 | `max_entries_` | `size_t` | 淘汰触发线；默认 `EvictionConfig::kMaxEntries = 2,000,000`，`main.cpp` 启动时读 conf 的 `max_entries`（缺省 0 表示不改）并调 `set_max_entries()` 覆盖 |
 
 **分片定位**：
@@ -71,7 +71,11 @@ size_t get_shard_index(const std::string& key) const {
 struct CacheEntry {
     CacheObject value;                        // 实际数据
     std::atomic<int64_t> last_access_time_ms; // ARU 用的访问时间（原子：GET 共享锁下更新）
-    int64_t expire_at_ms = -1;                // 绝对过期时间戳；-1 = 永不过期
+    // 成员只剩 value 与 last_access_time_ms 两个。这里曾经另存过一个
+    // int64_t expire_at_ms（绝对过期时间戳，-1 = 永不过期），读路径于是双判
+    // （expire_dict_.is_expired(key) || entry.expire_at_ms）：PERSIST 只清得掉字典、
+    // 清不掉条目那一份，SETEX+PERSIST 组合下 GET 仍把键当过期删掉。冗余副本确认无读者
+    // 之后整个删了，过期时间的唯一真相源是 ExpireDict（storage.h:17-22）。
 };
 ```
 
@@ -261,13 +265,17 @@ struct KVWithTTL {
 **写入路径**（RDB 加载时）：
 
 ```cpp
-// 原子路径：在分片独占锁内同时写 CacheEntry.expire_at_ms = now + ttl
-// 与 expire_dict_.set_expire_time（单真相源，两处一致）
+// 原子路径：在分片独占锁内只写 expire_dict_（唯一真相源）
+// 条目里不再另存 TTL 副本
 storage.set_with_expire(key, obj, 剩余ttl_ms);
 // 已过期的 key 加载时直接跳过，不写入
 ```
 
-> **已知旁路**：`EXPIRE` 命令只改 `expire_dict_`，不更新 `CacheEntry::expire_at_ms`。GET 的双判仍能兜底过期删除，但 `evict_one` 的「已过期优先」对 EXPIRE 设置的 key 不生效（只能按 LRU 淘汰）。另 `GlobalStorage::set_expire()` 为无调用方的死 API。
+> **过期只有一份真相**：`EXPIRE` 命令走 `storage.expire_dict().set()`（`expire_cmd.h:77`），
+> 条目里没有第二个 TTL 副本，所以 `evict_one` 的「已过期优先」看的就是 `expire_dict_.get_expire_time()`
+> （`storage.cpp:287-291`）——EXPIRE 设置的 key 一样会被优先淘汰，不存在只能按 LRU 兜底的旁路。
+> 另外：`GlobalStorage::set_expire()`（`storage.cpp:400`）在 **src 里没有任何调用方**，
+> 只有 `test/storage_test/storage_v3_test.cpp:74` 还在用它；命令路径全都直接改 `expire_dict_`。
 
 ## 7. 关键不变量
 
@@ -275,7 +283,7 @@ storage.set_with_expire(key, obj, 剩余ttl_ms);
 |--------|---------|
 | 单实例 | `static GlobalStorage& instance()`（Magic Static） + `delete` 拷贝 |
 | 分片数与锁数一致 | `mutexes_ = std::make_unique<shared_mutex[]>(num_shards_)` |
-| 过期键不会返回 | GET 时检查 `expire_dict_.is_expired()` 与 `CacheEntry::expire_at_ms` → 删除后再读 |
+| 过期键不会返回 | GET 时只查 `expire_dict_.is_expired()`（条目里已无 TTL 副本）→ 删除后再读 |
 | `dirty_counter` 递增，BGSAVE 启动成功时按观测值 CAS 扣减（`consume_dirty_count()`） | `fetch_add(1, memory_order_relaxed)` |
 | 写操作后 `dirty_counter++` | `set`/`del`/`set_with_expire`/`incrby` 内部递增（含 INCR 原子路径） |
 | WRONGTYPE 类型保护 | 所有类型敏感命令执行前检查 `CacheObject::type()` |
@@ -308,4 +316,4 @@ storage.set_with_expire(key, obj, 剩余ttl_ms);
 
 - [网络层](./network.md) — 上游调用方
 - [持久化](./persistence.md) — 下游消费者
-- [API 文档 § 3 数据类型](../api.md)
+- [API 文档 § 4 起的各类型命令](../api.md)

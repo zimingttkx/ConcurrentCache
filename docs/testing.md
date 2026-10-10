@@ -234,7 +234,7 @@ TEST_SUITE("GlobalStorage Basic Operations") {
 **额外文件**：`lock_test/lock_stress_test.cpp`（长期重负载稳定性）。
 
 **通过标准**：
-- `lock-race`：100 万次并发操作后数据完全一致
+- `lock-race`：1000 次并发操作（`lock_race_test.cpp:150/170`）后数据完全一致
 - `lock-deadlock`：死锁场景正确报错或回退，无进程挂起
 - `lock-boundary`：无死锁、无 panic
 

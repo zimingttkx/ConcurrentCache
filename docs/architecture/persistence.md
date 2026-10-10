@@ -70,7 +70,7 @@ flowchart LR
 | `stats_` | `RdbStats` | 统计信息（原子字段） |
 | `save_mutex_` | `std::mutex` | 串行化同步 save 与后台 save，防止并发写同一文件 |
 | `save(filepath, storage)` | `bool` | 同步保存（阻塞；原子写：.tmp + fsync + rename，见 §5.1） |
-| `save_in_background(filepath, storage)` | `bool` | 异步保存（进程内 detached 线程） |
+| `save_in_background(filepath, storage)` | `bool` | 异步保存；快照线程句柄是成员 `snapshot_thread_`，析构里 join（`rdb.cpp:116-125`）——早期版本是 `detach()`，会在主线程开始析构后继续碰成员；现在只有 Windows 的 `wait_thread` 仍 detach（`rdb.cpp:333`） |
 | `load(filepath, storage)` | `bool` | 启动时加载 |
 | `wait_for_bgsave(timeout_ms)` | `bool` | 等待 BGSAVE 完成 |
 
@@ -128,7 +128,8 @@ flowchart TB
 **do_save 流程**（`rdb_scheduler.cpp::do_save()`）：
 
 ```text
-1. if rdb.is_bgsave_in_progress(): return   // 防并发
+1. 抢占式去重靠 RdbPersistence::save_in_background 内部的 CAS（rdb.cpp:235-239），
+   调度器这一步并不查 is_bgsave_in_progress()
 2. rdb.save_in_background(rdb_path, storage)  // 启动后台线程
 3. 启动成功 → 立即 storage.consume_dirty_count(dirty_snapshot)
    （CAS 扣掉【保存启动时刻】已观测到的那部分，而非完成时刻整体清零——
@@ -144,7 +145,7 @@ flowchart TB
 | 阻塞主线程 | **是** | 否（后台 detached 线程） |
 | 内存峰值 | 高（`get_all_objects_with_ttl()` 一次性深拷贝全库，持各分片 shared_lock） | 同左（后台线程内同样深拷贝） |
 | 失败处理 | 返回错误给客户端 | 更新 `last_bgsave_status` |
-| 实现 | `RdbPersistence::save` | 内部调用 `save`，在 detached 线程执行 |
+| 实现 | `RdbPersistence::save` | 内部调用 `save`，在 `snapshot_thread_` 里执行，析构时 join |
 
 > **为什么不用 fork？** 多线程进程下 `fork()` 有死锁/UB 风险（子进程可能复制到持锁状态的堆）（子进程可能复制到持锁状态的堆），因此**刻意**改为进程内后台线程快照，仅 Windows 分支保留子进程方案。代价是后台线程与写请求竞争分片锁（大库保存期间写延迟可能上升）。
 
@@ -172,9 +173,9 @@ void RdbPersistence::write_kv_pair(key, CacheObject obj, expire_time_ms) {
         write_uint8(KV_WITH_TTL);            // 0xFE，前置 marker
         write_uint64(expire_time_ms);        // 绝对过期时间戳 epoch ms
     }
-    write_uint32(key.size()); write_string(key);
+    write_string(key);              // write_string 自带 4 字节长度前缀（rdb.cpp:581）
     write_uint8(RdbValueType::STRING);       // 0x00
-    write_uint32(obj.get_string()->size());
+    serialize_string(...)           // 同样只经 write_string 写一次长度
     write_string(obj.get_string().value());
 }
 ```
@@ -184,7 +185,7 @@ void RdbPersistence::write_kv_pair(key, CacheObject obj, expire_time_ms) {
 ```cpp
 void serialize_list(const CacheObject& obj) {
     write_uint8(LIST);                    // 0x01
-    auto& list = obj.list_val_;
+    auto& list = obj.list_range(0, -1);   // 容器成员是 private（object.h:143 起），只能走公开访问器
     write_uint32(list.size());
     for (auto& item : list) {
         write_uint32(item.size());
@@ -198,7 +199,8 @@ void serialize_list(const CacheObject& obj) {
 ```cpp
 void serialize_hash(const CacheObject& obj) {
     write_uint8(HASH);                    // 0x02
-    write_uint32(obj.hash_val_.size());
+    auto& items = obj.hash_items();        // 同上
+    write_uint32(items.size());
     for (auto& [k, v] : obj.hash_val_) {
         write_uint32(k.size()); write_string(k);
         write_uint32(v.size()); write_string(v);
@@ -211,7 +213,8 @@ void serialize_hash(const CacheObject& obj) {
 ```cpp
 void serialize_set(const CacheObject& obj) {
     write_uint8(SET);                     // 0x03
-    write_uint32(obj.set_val_.size());
+    auto& members = obj.set_members();     // 同上
+    write_uint32(members.size());
     for (auto& m : obj.set_val_) {
         write_uint32(m.size()); write_string(m);
     }
@@ -223,11 +226,12 @@ void serialize_set(const CacheObject& obj) {
 ```cpp
 void serialize_zset(const CacheObject& obj) {
     write_uint8(ZSET);                    // 0x04
-    write_uint32(obj.zset_val_.size());
-    for (auto& m : obj.zset_val_) {       // 已有序
-        write_uint32(m.member.size()); write_string(m.member);
+    auto& zall = obj.zset_all();             // 返回 pair<string,double>，不是 ZSetMember
+    write_uint32(zall.size());
+    for (auto& m : zall) {                 // 已按分数有序
+        write_string(m.first);               // 成员名（自带长度前缀）
         uint64_t score_bits;
-        std::memcpy(&score_bits, &m.score, sizeof(score_bits));
+        std::memcpy(&score_bits, &m.second, sizeof(score_bits));
         write_uint64(score_bits);         // IEEE-754 bits，大端网络字节序
     }
 }
@@ -274,7 +278,7 @@ sequenceDiagram
 - 加载顺序与持久化时一致（保证 ZSet 等有序结构正确）
 - **版本不匹配直接拒绝加载**（返回 false），不部分加载
 - **已过期的 key 加载时跳过**（按剩余 TTL 原子写回，`set_with_expire` 同时维护 `expire_dict_` 与 `CacheEntry::expire_at_ms`）
-- 加载失败不致命（打印警告，从空存储启动）
+- **加载失败是致命的**：文件存在却读不出来时打印「拒绝启动以免对外提供残缺数据」并 `return 1`（`main.cpp:232-240`）——从空存储起来会让一个坏 RDB 静默变成"数据没了但服务正常"
 
 ## 8. 关键不变量
 
