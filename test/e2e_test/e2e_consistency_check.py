@@ -189,11 +189,10 @@ class ConsistencyChecker:
         print(f"[Scenario A] 耗时: {elapsed:.2f}s")
 
         # 通过标准：
-        # 1. 最终值必须 > 0（说明服务端正常工作）
-        # 2. 最终值必须 <= expected（不可能超过预期）
-        # 3. 最终值必须 >= 0（不能是负数）
+        # 1. 最终值必须 >= 1：一条 RMW 都没落地的话是故障，不是竞态
+        # 2. 最终值必须 <= expected：读-改-写丢更新可以是少的，不能是多的
         # 注：由于存在竞态，final_value 通常 < expected，这是预期行为
-        passed = 0 <= final_value <= expected
+        passed = 1 <= final_value <= expected
         print(f"[Scenario A] 结果: {'PASS' if passed else 'FAIL'} (注: 读-修改-写非原子, 数据丢失正常)")
 
         return {
@@ -281,11 +280,6 @@ class ConsistencyChecker:
                 value = await self.get_value(test_key)
                 if value:
                     read_values.add(value)
-                    try:
-                        int(value)
-                    except ValueError:
-                        if value not in ("+OK", "-ERR", ""):
-                            print(f"[Scenario C] 异常值读取: {value}")
                 read_count[0] += 1
                 await asyncio.sleep(0.001)
 
@@ -298,15 +292,73 @@ class ConsistencyChecker:
         print(f"[Scenario C] 读取到的不同值数量: {len(read_values)}")
         print(f"[Scenario C] 读取值样例: {list(read_values)[:10]}")
         print(f"[Scenario C] 耗时: {elapsed:.2f}s")
-        print(f"[Scenario C] 结果: PASS")
+
+        # 判据（以前这里是无条件 passed=True，只把异常值打印出来 —— 一个不可能
+        # 失败的测试）。写进去的值只有 "0".."499"，那么读到的每个值都必须是这个
+        # 集合里的某个完整值：出现拼不上的数字、越界的数、或者干脆没读到东西，
+        # 都是真实的读脏/回复错位，不是竞态能解释的。
+        torn = sorted(v for v in read_values if not v.isdigit() or int(v) > 499)
+        final_after = await self.get_value(test_key)
+        final_ok = final_after is not None and final_after.isdigit() and int(final_after) <= 499
+        if torn:
+            print(f"[Scenario C] 读到非写入值: {torn[:5]}")
+        if not final_ok:
+            print(f"[Scenario C] 收尾读到的值不合法: {final_after!r}")
+        passed = bool(read_count[0]) and not torn and final_ok
+        print(f"[Scenario C] 结果: {'PASS' if passed else 'FAIL'}")
 
         return {
             "scenario": "C_read_during_write",
             "write_count": write_count[0],
             "read_count": read_count[0],
             "unique_values_read": len(read_values),
-            "passed": True,
+            "torn_values": torn[:10],
+            "final_value": final_after,
+            "passed": passed,
             "elapsed_seconds": round(elapsed, 3),
+        }
+
+    async def scenario_e_incr_exactness(self) -> Dict:
+        """场景 E：并发 INCR 的最终值必须精确等于总次数。
+
+        场景 A 用的是客户端 GET+SET，丢更新是允许的；INCR 是服务端在分片独占锁内
+        做的读-改-写，所以这里没有"竞态可解释"的余地：少一次就是一次丢更新。
+        判据与机器快慢无关（不测吞吐、不测延迟），适合长期挂在 CI 上。
+        """
+        print("\n[Scenario E] 并发 INCR 精确性测试")
+
+        key = "consistency_incr_exact"
+        await self.del_key(key)
+
+        num_workers = 10
+        per_worker = 50
+        expected = num_workers * per_worker
+        start = time.time()
+
+        async def worker():
+            for _ in range(per_worker):
+                await self.incr_value(key)
+
+        await asyncio.gather(*(worker() for _ in range(num_workers)))
+        elapsed = time.time() - start
+
+        final_value = await self.get_value(key)
+        try:
+            actual = int(final_value)
+        except (TypeError, ValueError):
+            actual = -1
+
+        passed = actual == expected
+        print(f"[Scenario E] 期望 {expected}，实际 {final_value}，耗时 {elapsed:.2f}s")
+        print(f"[Scenario E] 结果: {'PASS' if passed else 'FAIL'}")
+
+        return {
+            "scenario": "E_incr_exactness",
+            "expected": expected,
+            "actual": actual,
+            "passed": passed,
+            "elapsed_seconds": round(elapsed, 3),
+            "note": "INCR is atomic server-side, so any shortfall is a lost update, not a race",
         }
 
     async def scenario_d_set_get_consistency(self) -> Dict:
@@ -369,6 +421,10 @@ class ConsistencyChecker:
         # 场景 C: 读写并发测试
         result_c = await self.scenario_c_read_during_write()
         results.append(result_c)
+
+        # 场景 E: 并发 INCR 精确性（判据与机器快慢无关）
+        result_e = await self.scenario_e_incr_exactness()
+        results.append(result_e)
 
         # 场景 D: SET-GET 一致性测试
         result_d = await self.scenario_d_set_get_consistency()
