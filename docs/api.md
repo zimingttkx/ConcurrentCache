@@ -161,7 +161,10 @@ PING [message]
 > **`# Memory` 里没有 `used_memory`**：Redis 那一栏是分配器报告的已用字节，而本项目那三层内存池还没接进任何分配路径，没有可信值可报。字段缺失比一个抄来的数字好。这里报的是内核视角的 `used_memory_rss`（读 `/proc/self/status` 的 `VmRSS`），加一个 `used_memory_keys`（条目数，不是字节）。淘汰只看条数，所以 `maxmemory` 恒为 `0`（= 没有按字节的硬上限）、`maxmemory_policy` 说明实际按什么在淘汰。
 >
 > `total_connections_received`（成功 accept 的连接数）与 `total_commands_processed`（造出命令对象并进入执行路径的条数；`MOVED`/`ASK` 重定向与未知命令名不计入）是进程内实时累计，重启归零。`avg_ttl` 单位是**毫秒**；`expires` / `avg_ttl` 只统计还没过期的条目，而 `keys` 是底层哈希表条目数（含已过期未删除的），所以 `keys=100,expires=3` 是正常的，不是矛盾。
-> section 名区分大小写，只认 `server` / `stats` / `persistence` / `memory` / `keyspace` / `all`，其它值返回 `-ERR Unknown INFO section: <name>`。
+> section 名区分大小写，只认 `server` / `stats` / `persistence` / `memory` / `keyspace` / `all`。
+> **不带参数的 `INFO` 等于 `INFO all`**（与 Redis 一致）。早期实现默认只回 `# Server` 段，
+> 裸 INFO 只有 65 字节，按 Redis 习惯调 `INFO` 再抓 `used_memory_rss` / `rdb_dirty_count` 的
+> 监控脚本会一个字段都读不到，其它值返回 `-ERR Unknown INFO section: <name>`。
 
 `INFO` 输出示例：
 
