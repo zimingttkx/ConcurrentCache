@@ -265,6 +265,81 @@ def probe_registered(names: list[str], binary: Path) -> set[str]:
     return registered
 
 
+# 8) "只有声明、没有定义也没有调用点"的成员函数。
+#
+# join_all 就是这么一个：SubReactorPool::join_all() 从来没有定义，谁调一次就是链接
+# 错误，而现在没人调所以永远发现不了。这类声明不会让编译变红，只会让代码库看起来
+# 承诺了它其实没有的能力 —— 和文档写了一个不存在的命令是同一类错误。
+#
+# 判据刻意保守，宁可漏报不误报：一个方法名在全树（src/ 的所有 .h/.hpp/.cpp 加
+# main.cpp，剥掉注释后）里**只出现一次**（就是那条声明本身）才算。定义过它会出现
+# `Class::name(`、调用它会出现 `.name(` / `->name(`，两者都会让计数 >= 2。
+# 两个不同类用同名方法也会互相把对方算进去 —— 那是有意的漏报方向。
+_NON_FUNCTION_WORDS = {
+    "if", "for", "while", "switch", "return", "alignas", "alignof", "decltype",
+    "noexcept", "static_cast", "reinterpret_cast", "dynamic_cast", "const_cast",
+    "explicit", "operator", "sizeof", "throw", "new", "delete", "requires",
+}
+
+
+def class_bodies(text: str):
+    """yield (class_name, body_text)，花括号配平，不用正则猜类边界。"""
+    for m in re.finditer(r"\bclass\s+([A-Za-z0-9_]+)", text):
+        name = m.group(1)
+        start = text.find("{", m.end())
+        if start < 0:
+            continue
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    yield name, text[start + 1:i]
+                    break
+
+
+def check_declared_only_methods(tracker: "Tracker") -> None:
+    header_exts = {".h", ".hpp"}
+    files: list[Path] = []
+    for path in (ROOT / "src").rglob("*"):
+        if path.is_file() and path.suffix in (header_exts | {".cpp"}):
+            files.append(path)
+    if (ROOT / "main.cpp").exists():
+        files.append(ROOT / "main.cpp")
+
+    stripped = {p: strip_hash_free(read(p)) for p in files}
+    all_text = "\n".join(stripped.values())
+
+    for path, text in stripped.items():
+        if path.suffix not in header_exts:
+            continue
+        for cname, body in class_bodies(text):
+            for seg in body.split(";"):
+                # 声明行：有 ( 但没有 { / =（= 会把 inline 定义、纯虚、=delete、默认实参都排除）
+                if "(" not in seg or "{" in seg or "}" in seg or "=" in seg:
+                    continue
+                names = re.findall(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(", seg)
+                if not names:
+                    continue
+                mname = names[-1]
+                if mname == cname or mname.startswith("~") or mname in _NON_FUNCTION_WORDS:
+                    continue
+                if len(re.findall(r"\b" + re.escape(mname) + r"\b", all_text)) <= 1:
+                    tracker.errors.append(
+                        f"{path.relative_to(ROOT)}: {cname}::{mname}() 只有声明，"
+                        "全树没有任何定义或调用点（要么补实现，要么删掉这条声明）"
+                    )
+
+
+def strip_hash_free(text: str) -> str:
+    """剥掉 // 与 /* */ 注释。注释里写的名字会让"出现次数 >= 2"成立，从而漏报，
+    所以这一步必须在计数之前做。"""
+    text = re.sub(r"//[^\n]*", "", text)
+    return re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+
+
 def main() -> int:
     docs_only = "--docs-only" in sys.argv[1:]
     positional = [a for a in sys.argv[1:] if not a.startswith("--")]
@@ -425,6 +500,9 @@ def main() -> int:
         tracker.errors.append("conf/concurrentcache.conf 里读不到 port，文档端口判据无法执行")
     else:
         check_docs(md_texts(), registered, registry_names, conf_port_value, tracker)
+
+    # 8) 只声明未实现的方法（join_all 那一类）。
+    check_declared_only_methods(tracker)
 
     tracker.stale()
 

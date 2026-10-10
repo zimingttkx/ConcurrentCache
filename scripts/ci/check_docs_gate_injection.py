@@ -38,6 +38,8 @@ CASES = [
      '> **默认端口**：`6379`', '> **默认端口**：`16380`'),
     ('7e 版本号脱钩', ['docs/api.md'],
      'concurrentcache_version:4.0.0', 'concurrentcache_version:3.0.0'),
+    ('8 声明未定义的方法', ['src/base/log.h'],
+     'class Logger : public ConfigObserver {', 'class Logger : public ConfigObserver {\npublic:\n    void bogus_declared_only_marker();'),
     ('7f 指向不存在的镜像仓库', ['docs/deployment.md'],
      'docker build -t concurrentcache:latest .',
      'docker pull ghcr.io/someone/concurrentcache:latest'),
@@ -53,6 +55,7 @@ EXPECT = {
     '7d 默认端口写错': '写的默认端口 16380',
     '7e 版本号脱钩': 'docs/api.md 示例写的是 3.0.0',
     '7f 指向不存在的镜像仓库': '没有',
+    '8 声明未定义的方法': 'bogus_declared_only_marker',
 }
 
 
@@ -107,4 +110,4 @@ print('=== 还原后：exit=%d errors=%d ===' % (code, len(errors)))
 if code != 0 or errors or failed:
     print('注入验证不完整：', failed, '条没有只把该红的那条弄红')
     sys.exit(1)
-print('9 条注入全部只让对应判据变红，还原后重新变绿')
+print('%d 条注入全部只让对应判据变红，还原后重新变绿' % len(CASES))
