@@ -73,14 +73,11 @@ namespace cc_server {
 
         std::optional<std::string> list_pop(bool front = false);
 
-        bool list_set(size_t index, const std::string& val);
 
-        std::optional<std::string> list_get(long long index) const;
 
         std::vector<std::string> list_range(long long start, long long stop) const;
 
         // 保留列表指定范围内的元素，删除范围外的所有元素
-        bool list_trim(long long start, long long stop);
 
         size_t list_size() const{ return list_val_.size();}
 

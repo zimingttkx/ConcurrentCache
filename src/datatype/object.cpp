@@ -103,39 +103,6 @@ std::optional<std::string> CacheObject::list_pop(bool front) {
     return result;
 }
 
-bool CacheObject::list_set(size_t index, const std::string& val) {
-    if (type_ != ObjectType::LIST) [[unlikely]] {
-        LOG_WARN(kModule, "list_set - object is not LIST");
-        return false;
-    }
-    if (index >= list_val_.size()) [[unlikely]] {
-        LOG_WARN(kModule, "list_set - index %zu out of range %zu", index, list_val_.size());
-        return false;
-    }
-    list_val_[index] = val;
-    LOG_DEBUG(kModule, "list_set - index=%zu", index);
-    return true;
-}
-
-std::optional<std::string> CacheObject::list_get(long long index) const {
-    if (type_ != ObjectType::LIST) [[unlikely]] {
-        return std::nullopt;
-    }
-    size_t size = list_val_.size();
-    if (size == 0) {
-        return std::nullopt;
-    }
-    long long actual_index = index;
-    if (actual_index < 0) {
-        actual_index = static_cast<long long>(size) + actual_index;
-    }
-    if (actual_index < 0 || static_cast<size_t>(actual_index) >= size) [[unlikely]] {
-        LOG_WARN(kModule, "list_get - index %lld out of range %zu", actual_index, size);
-        return std::nullopt;
-    }
-    return list_val_[static_cast<size_t>(actual_index)];
-}
-
 std::vector<std::string> CacheObject::list_range(long long start, long long stop) const {
     if (type_ != ObjectType::LIST) [[unlikely]] {
         return {};
@@ -172,45 +139,6 @@ std::vector<std::string> CacheObject::list_range(long long start, long long stop
 
     return std::vector<std::string>(list_val_.begin() + actual_start,
                                     list_val_.begin() + actual_stop + 1);
-}
-
-bool CacheObject::list_trim(long long start, long long stop) {
-    if (type_ != ObjectType::LIST) [[unlikely]] {
-        LOG_WARN(kModule, "list_trim - object is not LIST");
-        return false;
-    }
-
-    size_t size = list_val_.size();
-    if (size == 0) {
-        return true;
-    }
-
-    // 处理负索引
-    long long actual_start = start;
-    long long actual_stop = stop;
-
-    if (actual_start < 0) {
-        actual_start = static_cast<long long>(size) + actual_start;
-    }
-    if (actual_stop < 0) {
-        actual_stop = static_cast<long long>(size) + actual_stop;
-    }
-
-    // 边界检查
-    if (actual_start < 0) actual_start = 0;
-    if (actual_stop < 0) actual_stop = 0;
-    if (static_cast<size_t>(actual_start) >= size ||
-        static_cast<size_t>(actual_stop) >= size ||
-        actual_start > actual_stop) [[unlikely]] {
-        LOG_WARN(kModule, "list_trim - invalid range: start=%lld, stop=%lld, size=%zu",
-                 actual_start, actual_stop, size);
-        return false;
-    }
-
-    list_val_.erase(list_val_.begin(), list_val_.begin() + actual_start);
-    list_val_.erase(list_val_.begin() + (actual_stop - actual_start + 1), list_val_.end());
-    LOG_DEBUG(kModule, "list_trim - new_size=%zu", list_val_.size());
-    return true;
 }
 
 // Hash 操作

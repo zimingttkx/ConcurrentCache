@@ -17,7 +17,6 @@ namespace cc_server {
         void stop();
 
         // 等待所有SubReactor线程结束
-        void join_all();
 
         SubReactor* get_next_reactor();
 
