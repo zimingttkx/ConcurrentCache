@@ -105,6 +105,42 @@ def ctest_table_names(readme: str) -> tuple[set[str], int | None]:
     return names, (int(stated.group(1)) if stated else None)
 
 
+def readme_command_tokens(readme: str) -> set[str]:
+    """README § 支持的命令 各表第一格里的命令名（只取每格开头那个标识符）。
+
+    只扫这一节，不扫全文：全文扫会把版本表的 V1.0（截成 V1）、模块表的 ThreadCache
+    之类当成命令名。取「每格第一个 token」而不是「全部 token」，是因为
+    CLUSTER MEET/NODES/INFO 那一格里 NODES/ADDSLOTS 是子命令、不在注册表里，
+    全取会假红。
+    """
+    if "## 支持的命令" not in readme:
+        raise SystemExit("README.md 里找不到 § 支持的命令，检查标题是否被改")
+    sec = readme.split("## 支持的命令", 1)[1].split("\n## ", 1)[0]
+    toks: set[str] = set()
+    for line in sec.splitlines():
+        t = line.strip()
+        if not (t.startswith("|") and t.endswith("|")):
+            continue
+        first = [c.strip() for c in t.strip("|").split("|")][0]
+        m = re.match(r"([A-Z][A-Z0-9_]*)\b", first)
+        if m:
+            toks.add(m.group(1).lower())
+    return toks
+
+
+def deployment_config_rows(text: str) -> dict[str, str]:
+    """docs/deployment.md § 4 配置项 的表格：key -> 整行原文。"""
+    if "## 4. 配置项" not in text:
+        raise SystemExit("docs/deployment.md 里找不到 § 4 配置项，检查标题是否被改")
+    tbl = text.split("## 4. 配置项", 1)[1].split("\n## ", 1)[0]
+    rows: dict[str, str] = {}
+    for line in tbl.splitlines():
+        m = re.match(r"^\|\s*`([a-z0-9_]+)`", line.strip())
+        if m:
+            rows[m.group(1)] = line
+    return rows
+
+
 def check_docs(docs: dict[Path, str], registered: set[str], registry_names: set[str],
                conf_port: int, tracker: "Tracker") -> None:
     """把"文档写的"和"代码/构建/配置里真的有的"当成两张表来对齐。
@@ -503,6 +539,38 @@ def main() -> int:
 
     # 8) 只声明未实现的方法（join_all 那一类）。
     check_declared_only_methods(tracker)
+
+    # 7g) README 的命令表必须是注册表的子集。
+    #
+    # 只做单向的理由写在 readme_command_tokens 的注释里（一行里并排两个命令、
+    # CLUSTER 那格是子命令），覆盖率由 7a) 的 api.md 精确等值负责。这条管的是
+    # 「文档不许写根本不存在的命令」—— #94 修掉的多参数形式就属于这一类。
+    docs_now = md_texts()
+    readme_tokens = readme_command_tokens(docs_now[ROOT / "README.md"])
+    ghost = readme_tokens - registered
+    if ghost:
+        tracker.errors.append(
+            f"README.md § 支持的命令 写了注册表里不存在的命令：{sorted(ghost)}"
+        )
+
+    # 7h) 配置表两向核对：文档不许写代码不认的键，conf 里的键也不许漏文档。
+    #
+    # 已有的 5) 只管 conf -> 代码（配了不生效），这一条补代码/conf -> 文档，并把
+    # 「代码确实不读」与「文档诚实写明未被读取」区分开：后者是诚实，前者才是错。
+    dep_text = docs_now[ROOT / "docs" / "deployment.md"]
+    rows = deployment_config_rows(dep_text)
+    for key, row in sorted(rows.items()):
+        read_by_code = re.search(rf'get(?:Int|String|Bool)\(\s*"{key}"', code_text)
+        marked_unwired = ("未被读取" in row) or ("未读取" in row)
+        if not read_by_code and not marked_unwired:
+            tracker.errors.append(
+                f"docs/deployment.md § 4 列了配置项 {key}，但代码里没人读它，"
+                "行里也没写明「当前未被读取」"
+            )
+    for key in sorted(conf_keys - set(rows)):
+        tracker.errors.append(
+            f"conf/concurrentcache.conf 里有 {key}，但 docs/deployment.md § 4 配置项没写它"
+        )
 
     tracker.stale()
 

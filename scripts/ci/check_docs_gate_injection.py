@@ -38,6 +38,12 @@ CASES = [
      '> **默认端口**：`6379`', '> **默认端口**：`16380`'),
     ('7e 版本号脱钩', ['docs/api.md'],
      'concurrentcache_version:4.0.0', 'concurrentcache_version:3.0.0'),
+    ('7g README 写了不存在的命令', ['README.md'],
+     '| GET key | 获取值 |', '| MSET key value | 批量设置 |\n| GET key | 获取值 |'),
+    ('7h 配置表列了代码不读的键', ['docs/deployment.md'],
+     '| `port` | `6379` |', '| `fake_key_never_read` | `1` | 注入用的假键 |\n| `port` | `6379` |'),
+    ('7h conf 里的键漏出文档', ['docs/deployment.md'],
+     '| `max_entries` | `2000000` | 键数量上限，触发近似 LRU 淘汰。启动时由 `main.cpp` 交给 `GlobalStorage::set_max_entries()`；缺省或 `0` 沿用内置默认，负数视为配错并回退默认。淘汰按条数判断，没有按字节的 maxmemory 口径 |\n', ''),
     ('8 声明未定义的方法', ['src/base/log.h'],
      'class Logger : public ConfigObserver {', 'class Logger : public ConfigObserver {\npublic:\n    void bogus_declared_only_marker();'),
     ('7f 指向不存在的镜像仓库', ['docs/deployment.md'],
@@ -55,6 +61,9 @@ EXPECT = {
     '7d 默认端口写错': '写的默认端口 16380',
     '7e 版本号脱钩': 'docs/api.md 示例写的是 3.0.0',
     '7f 指向不存在的镜像仓库': '没有',
+    '7g README 写了不存在的命令': '写了注册表里不存在的命令',
+    '7h 配置表列了代码不读的键': '列了配置项 fake_key_never_read',
+    '7h conf 里的键漏出文档': '但 docs/deployment.md § 4 配置项没写它',
     '8 声明未定义的方法': 'bogus_declared_only_marker',
 }
 
