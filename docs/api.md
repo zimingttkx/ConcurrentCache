@@ -62,7 +62,8 @@ PING [message]
 | `DECRBY` | `DECRBY key delta` | 减 delta 后的整数值（原子） | O(1) |
 
 > **DEL** 支持批量删除多个 key，返回实际删除成功的数量。
-> **INCR/DECR/INCRBY/DECRBY** 是**原子操作**（读-改-写在分片独占锁内完成，并发调用不丢失更新）：若 key 不存在视为 0；若 delta 无法解析返回 `-ERR value is not an integer or out of range`；四条命令的 64 位溢出统一返回 `-ERR increment or decrement would overflow`；若 key 现值非整数返回 `-ERR value is not an integer`（现值用 `std::stoll` 读，**只要求前缀是整数**：值为 `12abc` 时 INCR 得到 13，Redis 则会报错）；若 key 持有非 STRING 类型返回 `-WRONGTYPE Operation against a key holding the wrong kind of value`。
+> **INCR/DECR/INCRBY/DECRBY** 是**原子操作**（读-改-写在分片独占锁内完成，并发调用不丢失更新）：若 key 不存在视为 0；若 delta 无法解析返回 `-ERR value is not an integer or out of range`；四条命令的 64 位溢出统一返回 `-ERR increment or decrement would overflow`；若 key 现值非整数返回 `-ERR value is not an integer`（现值与 delta 都走**严格**整数解析，整个串被吃掉才算数：`12abc`、`1.5`、` 10`、`+10`
+>   一律被拒。这比 Redis 的 `strtoll` 口径更严 —— 后者会接受前导空白与 `+` 号）；若 key 持有非 STRING 类型返回 `-WRONGTYPE Operation against a key holding the wrong kind of value`。
 > **EXISTS / HSET / SPOP 只接受单个 key（或单个 field/value 对）**，多传参数返回 `-ERR wrong number of arguments for '<cmd>' command`——与 Redis 的多参数形式不同，见 §16。
 
 ## 5. 过期 TTL
@@ -87,9 +88,11 @@ PING [message]
 | `LRANGE` | `LRANGE key start stop` | 元素数组（支持负索引） |
 
 > **LPUSH/RPUSH** 支持一次推入多个值。若 key 当前为 STRING 类型，会自动转换为 LIST（空字符串不保留）。
-> **LRANGE** 的 start/stop 支持负索引（-1 表示最后一个元素）。stop 换算后仍为负时被**夹到 0**：
-> `LRANGE k 0 -3` 在 2 个元素的表上返回下标 0 的元素。Redis 在这种情形返回空列表，本服务器的
-> ZRANGE 也返回空 —— 这是 LRANGE 与 Redis 的一处已知差异。
+> **LRANGE** 的 start/stop 支持负索引（-1 表示最后一个元素）。stop 换算后仍为负时返回**空列表**
+> （`LRANGE k 0 -3` 在 2 个元素的表上是空的），与 Redis 一致。这条裁剪与 ZRANGE 共用同一份实现
+> （`base/range_clip.h` 的 `clip_range`），所以同一个索引表达式不可能在两条命令上给出不同答案 ——
+> 以前 LRANGE 把负 stop 夹到 0、ZRANGE 返回空，只有后者对。起点比表头还靠前时从头算
+> （`LRANGE k -99 99` 给出整张表）。
 > 对非 LIST 类型的 key 执行列表命令返回 `-WRONGTYPE` 错误。
 
 ## 7. 哈希 Hash
@@ -131,7 +134,7 @@ PING [message]
 
 > **ZADD** 支持一次添加多个 score/member 对。若 member 已存在且 score 不同，会更新分数。
 > **ZRANGE** 按排名索引（index）范围查询，start/stop 支持负索引（-1 表示最后一个）；stop 换算后仍为负
-> 直接返回空列表（与上面 LRANGE 的夹到 0 不同，与 Redis 一致）。可选 `WITHSCORES` 参数同时返回分数。
+> 直接返回空列表（与 LRANGE 同一条规则，两边共用 `base::clip_range`）。可选 `WITHSCORES` 参数同时返回分数。
 > **不支持 Redis 6.2+ 的 BYSCORE/BYLEX/REV/LIMIT 选项**。
 > 对非 ZSET 类型的 key 执行有序集合命令返回 `-WRONGTYPE` 错误。
 

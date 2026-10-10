@@ -3,6 +3,7 @@
 
 #include "command.h"
 #include "cache/storage.h"
+#include "base/int_parse.h"
 #include "protocol/resp.h"
 #include "datatype/object.h"
 #include <chrono>
@@ -274,9 +275,8 @@ namespace cc_server {
 
         auto opt = storage.get(key);
         if (opt.has_value() && opt.value().get_string().has_value()) {
-            try {
-                std::stoll(opt.value().get_string().value());
-            } catch (...) {
+            long long prev = 0;
+            if (!base::parse_ll_strict(opt.value().get_string().value(), prev)) {
                 return RespEncoder::encode_error("ERR value is not an integer");
             }
             return RespEncoder::encode_error("ERR increment or decrement would overflow");
@@ -336,7 +336,10 @@ namespace cc_server {
 
             long long delta = 0;
             try {
-                delta = std::stoll(args[2]);
+                if (!base::parse_ll_strict(args[2], delta)) {
+                    return RespEncoder::encode_error(
+                        "ERR value is not an integer or out of range");
+                }
             } catch (...) {
                 return RespEncoder::encode_error("ERR value is not an integer or out of range");
             }
@@ -362,7 +365,10 @@ namespace cc_server {
 
             long long delta = 0;
             try {
-                delta = std::stoll(args[2]);
+                if (!base::parse_ll_strict(args[2], delta)) {
+                    return RespEncoder::encode_error(
+                        "ERR value is not an integer or out of range");
+                }
             } catch (...) {
                 return RespEncoder::encode_error("ERR value is not an integer or out of range");
             }
@@ -649,8 +655,11 @@ namespace cc_server {
 
             long long start, stop;
             try {
-                start = std::stoll(args[2]);
-                stop = std::stoll(args[3]);
+                if (!base::parse_ll_strict(args[2], start) ||
+                    !base::parse_ll_strict(args[3], stop)) {
+                    return RespEncoder::encode_error(
+                        "ERR value is not an integer or out of range");
+                }
             } catch (...) {
                 return RespEncoder::encode_error("ERR invalid integer");
             }
@@ -1225,8 +1234,11 @@ namespace cc_server {
             const std::string& key = args[1];
             long long start, stop;
             try {
-                start = std::stoll(args[2]);
-                stop = std::stoll(args[3]);
+                if (!base::parse_ll_strict(args[2], start) ||
+                    !base::parse_ll_strict(args[3], stop)) {
+                    return RespEncoder::encode_error(
+                        "ERR value is not an integer or out of range");
+                }
             } catch (...) {
                 return RespEncoder::encode_error("ERR invalid integer");
             }
