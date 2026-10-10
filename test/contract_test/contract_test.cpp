@@ -856,8 +856,7 @@ void run_info_memory_contract_tests(int port) {
         EXPECT_TRUE(do_cmd(client, {"INFO", "memory"}, reply));
         EXPECT_TRUE(!reply.is_error());
         const std::string text = reply_text(reply);
-        std::cout << "  INFO memory 前 120 字节: " << text.substr(0, 120) << "
-";
+        std::cout << "  INFO memory 前 120 字节: " << text.substr(0, 120) << std::endl;
         EXPECT_TRUE(text.find("# Memory") != std::string::npos);
         EXPECT_TRUE(text.find("used_memory_rss:") != std::string::npos);
         EXPECT_TRUE(text.find("maxmemory_policy:aru-random-shard-sampling") != std::string::npos);
