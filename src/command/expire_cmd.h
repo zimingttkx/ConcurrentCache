@@ -75,6 +75,10 @@ public:
             // 设置过期时间（转换为毫秒）
             const int64_t ttl_ms = ttl_seconds_to_ms(seconds);
             storage.expire_dict().set(key, ttl_ms);
+            // TTL 是会被写进 RDB 的元数据：Redis 的 EXPIRE/PEXPIRE/EXPIREAT 同样 dirty++。
+            // 不计的话，只有 TTL 流量的实例永远凑不到 rdb-save-threshold 的脏计数，
+            // 基于阈值的快照一次都不触发，重启后 TTL 全按上一份快照来。
+            storage.increment_dirty();
             LOG_INFO(EXPIRE, "EXPIRE - key=%s, seconds=%ld, ttl_ms=%ld",
                     key.c_str(), seconds, ttl_ms);
             return RespEncoder::encode_integer(1);
@@ -253,6 +257,9 @@ public:
 
         // 移除过期时间
         bool success = storage.expire_dict().persist(key);
+        if (success) {
+            storage.increment_dirty();  // 没移除掉任何东西时不算写（返回值也是 0）
+        }
         LOG_INFO(EXPIRE, "PERSIST - key=%s, success=%d", key.c_str(), success);
         return RespEncoder::encode_integer(success ? 1 : 0);
     }

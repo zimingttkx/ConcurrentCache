@@ -54,7 +54,7 @@ flowchart TB
 | `stores_` | `std::vector<unordered_map<string, CacheEntry>>` | 每个分片一个 map |
 | `mutexes_` | `std::unique_ptr<shared_mutex[]>` | 每个分片一把 `std::shared_mutex` |
 | `expire_dict_` | `ExpireDict` | 键 → 过期时间戳（毫秒） |
-| `dirty_counter_` | `std::atomic<size_t>` | 自上次 BGSAVE **启动成功**起的写操作数；`set`/`set_conditional`/`del`/`set_with_expire`/`incrby` 及各容器写路径（统一走 `mutate`）递增；惰性删除调的就是 `del()`（`storage.cpp:52-56` → `:189`），所以过期键被被动清理时**同样**递增脏计数 |
+| `dirty_counter_` | `std::atomic<size_t>` | 自上次 BGSAVE **启动成功**起的写操作数；`set`/`set_conditional`/`del`/`set_with_expire`/`incrby` 及各容器写路径（统一走 `mutate`）递增，EXPIRE/PEXPIRE/EXPIREAT/PERSIST 这些只改 TTL 的命令在 `expire_cmd.h` 里显式 `increment_dirty()`；惰性删除调的就是 `del()`（`storage.cpp:52-56` → `:189`），所以过期键被被动清理时**同样**递增脏计数 |
 | `max_entries_` | `size_t` | 淘汰触发线；默认 `EvictionConfig::kMaxEntries = 2,000,000`，`main.cpp` 启动时读 conf 的 `max_entries`（缺省 0 表示不改）并调 `set_max_entries()` 覆盖 |
 
 **分片定位**：
@@ -134,7 +134,7 @@ flowchart LR
 | `evict_one` | 随机采样单分片 `lock_unique()`（最多试 8 个分片） | 片内已过期优先，否则取 `last_access_time_ms` 最小（见 §5.2） |
 | `get_all_objects*` | 遍历分片 `lock_shared()` | RDB 用 |
 
-**为什么 64 分片？** 代码注释按「CPU 核心数量 × 2」的倍数思路取值（数值为硬编码 64），足以让绝大多数并发请求落到不同分片，锁竞争概率 < 1%。
+**为什么 64 分片？** 代码注释按「CPU 核心数量 × 2」的倍数思路取值（数值为硬编码 64），意图是让并发请求尽量落到不同分片。"锁竞争概率 < 1%"这种数字仓库里没有测量支撑，别再引用；真实竞争水平要看具体键分布，热键全落在同一个分片时 64 也救不了。
 
 ## 4. 过期管理
 
@@ -238,7 +238,7 @@ struct EvictionConfig {
 
 **为什么是采样而不是全局扫描？** 全局最老 key 需要两遍全库扫描（找最老 + 回该分片删除）；在 200 万 key、单轮需淘汰 80 万个的规模下是数十万次全库遍历，且多个写线程并发触发时互相叠加——写入延迟会从微秒级恶化到分钟级。采样版单次代价 O(分片内条目数) ≈ 全库/64，这是 Redis `maxmemory-samples` 的同款思路。
 
-**为什么是"近似" LRU？** 完全 LRU 需要维护全局双向链表，开销大。随机采样分片内最老 key 已能保证良好的命中率（实际场景中冷数据访问频率远低于热数据）。
+**为什么是"近似" LRU？** 完全 LRU 需要维护全局双向链表，开销大。随机采样分片内最老 key 是对开销与精度的折中（采样数上限见 `evict_one` 的实现）。淘汰命中率本身没有测过，别把它当成保证；能说的是它比严格 LRU 省掉了全局链表的维护成本。
 
 ## 6. RDB 集成
 

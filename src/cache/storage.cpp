@@ -403,6 +403,7 @@ namespace cc_server {
 
         // 设置过期时间
         expire_dict_.set(key, ttl_ms);
+        dirty_counter_.fetch_add(1, std::memory_order_relaxed);
         LOG_DEBUG(STORAGE, "Set expire for key=%s, ttl_ms=%ld", key.c_str(), ttl_ms);
     }
 
