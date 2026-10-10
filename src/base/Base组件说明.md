@@ -1,3 +1,11 @@
+> **先说口径**：本文件的代码块是设计稿，与 `src/base/` 现状有出入。2026-10-10 已按源码改正：
+> 日志是六级（TRACE/DEBUG/INFO/WARN/ERROR/FATAL，`log.h:179-186`）、`LOG_*` 宏第一个实参必须
+> 是模块标签、`Config` 的整型解析失败时不记日志（`config.cpp:150-152`）、线程相关配置键是
+> `reactor_count` / `thread_pool_size`（没有 `thread_num`）、信号处理器里调的是
+> `EventLoop::quit()` 不是 `_exit()`。另外 `Logger::rotate()` 实际用 `std::to_string(i)` 拼序号、
+> 以 `std::ios::app | std::ios::out` 打开、并且先 `is_open()` 再动文件（`log.cpp:223-249`），
+> `load()` 打不开文件时是 `return false`（`config.cpp:25-30`）而不是继续往下读。
+
 # base 目录组件详解
 
 本文档详细解释 `src/base` 目录下三个基础组件的设计思想、实现原理和使用方式，帮助初学者理解系统开发中的核心概念。
@@ -283,7 +291,9 @@ int Config::getInt(const std::string& key, int default_value) {
         try {
             return std::stoi(it->second);  // 字符串转整数
         } catch (...) {
-            LOG_ERROR("Invalid integer value for key: %s", key.c_str());
+            // 真实实现这里只有一句注释（config.cpp:150-152）：解析失败就沿用默认值。
+            // 以前这里写的是 LOG_ERROR("Invalid integer ...") —— 那根本编不过，
+            // LOG_ERROR 的第一个实参必须是模块标签
         }
     }
     return default_value;
@@ -298,7 +308,9 @@ Config::instance().load("server.conf");
 
 // 读取配置
 int port = Config::instance().getInt("port", 8080);
-int threads = Config::instance().getInt("thread_num", 4);
+// 真实的键名是 reactor_count 与 thread_pool_size（main.cpp:164-167），
+// conf/concurrentcache.conf 里没有 thread_num 这个键
+int threads = Config::instance().getInt("thread_pool_size", 4);
 std::string level = Config::instance().getString("log_level");
 ```
 
@@ -382,7 +394,7 @@ SignalHandler::getInstance().handle(SIGUSR1, []() {
 
 1. **信号处理函数中应尽量少做操作**：信号可以在任何时刻打断程序，处理函数要尽快返回
 2. **不要在信号处理函数中调用不安全的函数**：如 `printf`、`malloc` 等
-3. **不要在信号处理函数里使用 `LOG_*` 宏**：日志要走 mutex + 流写入，不是 async-signal-safe 的。`main.cpp` 的处理器只做三件事——置 atomic 标志、`write(STDERR_FILENO, ...)`、`_exit()`。日志系统对普通线程是线程安全的，但对信号上下文不是。
+3. **不要在信号处理函数里使用 `LOG_*` 宏**：日志要走 mutex + 流写入，不是 async-signal-safe 的。`main.cpp` 的处理器只做三件事——置 atomic 标志、`write(STDERR_FILENO, ...)`、`g_main_reactor->event_loop()->quit()`（`main.cpp:41-43`；`quit()` 内部只是一次 atomic store）。**没有 `_exit()`**：进程是靠主循环正常退出并依次停掉各组件、最后强制写一次 RDB 收尾的，直接在信号里 `_exit()` 会把那段优雅退出全跳过。日志系统对普通线程是线程安全的，但对信号上下文不是。
 
 ---
 
@@ -664,7 +676,7 @@ callback();  // 调用 lambda
 业务线程调用 log()
         │
         ▼
-检查日志级别（DEBUG/INFO/WARN/ERROR）
+检查日志级别（TRACE/DEBUG/INFO/WARN/ERROR/FATAL，共六级）
         │
         ▼
 格式化日志消息（vsnprintf）

@@ -1,3 +1,14 @@
+> **先说口径**：本文件里的代码块是当初设计时的写法，很多与 `src/network/` 的现状不一致。
+> 2026-10-10 已把以下几处按源码改正：epoll 事件数组与 100ms 超时、MainReactor 就在主线程、
+> `SubReactor::thread_` 是 `std::atomic<std::thread*>`、`Channel` 由 `Connection` 用
+> `unique_ptr` 持有、`remove_connection(int fd)` 的签名与理由、连接表只有写者、
+> 负载均衡用的是 `next_index_` 而不是 `connection_count()`。
+> 另有几处**省略**（不是写错，是没写全）：`handle_write()` 还有 `bytes_written == -1` 的
+> EAGAIN/关闭分支（`connection.cpp:322-332`）；`send_response()` 会在输出缓冲越过高水位时
+> 直接断连（`connection.cpp:370-377`，阈值见 `connection.h` 的 `client_query_buffer_limit` /
+> `client_output_buffer_limit`）；`Channel::handle_event()` 对 HUP 的处理会依次退回
+> `read_cb`、`error_cb`（`channel.cpp:55-71`）。下面这些块里再出现旧写法时以源码为准。
+
 # network 目录组件详解
 
 本文档详细解释 `src/network` 目录下五个网络组件的设计思想、实现原理和协作关系，帮助初学者理解高性能网络编程的核心概念。
@@ -390,8 +401,12 @@ ev.data.fd = fd;
 epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ev);
 
 // 3. 等待事件发生
-struct epoll_event events[1024];
-int n = epoll_wait(epoll_fd, events, 1024, -1);  // -1 永久阻塞
+// events_ 是 EventLoop 的成员，loop() 启动时 resize(65536)（event_loop.cpp:48），
+// 不是栈上数组；超时是 100ms 而不是 -1 —— 这个 100ms 的周期 tick 正是
+// check_config_reload() 与 drain_pending_tasks() 的动力，写 -1 就没有热加载了。
+int n = epoll_wait(epoll_fd_, events_.data(),
+                   static_cast<int>(events_.size()),   // 65536
+                   100                                 // 最多等 100ms
 ```
 
 ### 4.3 Channel 映射表
@@ -701,7 +716,7 @@ void MainReactor::add_new_connection(int client_fd) {
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                        MainReactor                          │
-│                    (独立线程，只做 accept)                    │
+│                      (主线程，只做 accept)                    │
 │  ┌─────────────────────────────────────────────────────┐  │
 │  │  EventLoop (epoll instance)                         │  │
 │  │                                                     │  │
@@ -773,16 +788,20 @@ class SubReactor {
     // SubReactor 自有的 EventLoop（独立 epoll 实例）
     std::unique_ptr<EventLoop> loop_;
 
-    // 独立线程，运行事件循环
-    std::thread* thread_;
+    // loop 跑在 SubReactorPool 为这个 SubReactor 起的线程里；指针是原子的
+    // （sub_reactor.h:36），读写它的线程不止一个
+    std::atomic<std::thread*> thread_{nullptr};
 
     // 这个 SubReactor 管理的所有连接
     std::unordered_map<int, std::unique_ptr<Connection>> connections_;
 
-    // 保护 connections_ 的读写锁
+    // 保护 connections_。今天这张表**只有写者**：register_connection 与
+    // remove_connection 都在归属 loop 线程里拿 unique_lock（sub_reactor.cpp:243/270），
+    // shared_mutex 只是为将来的只读遍历留的口子，不代表存在跨线程共享读
     mutable std::shared_mutex connections_mutex_;
 
-    // 连接计数（原子操作，用于负载均衡）
+    // 连接计数。注意负载均衡**不用**它：SubReactorPool 轮询是 next_index_ 的 fetch_add，
+    // 而 connection_count() 目前在 src 里没有调用方
     std::atomic<size_t> connection_count_;
 };
 ```
@@ -845,8 +864,10 @@ void SubReactor::stop() {
     thread_ = nullptr;
 }
 
-void SubReactor::remove_connection(Connection* conn) {
-    int fd = conn->fd();
+void SubReactor::remove_connection(int fd) {
+    // 参数是 fd 而不是 Connection*：这条是从 Connection::close() 的 close_callback_
+    // 里进来的，回调返回时本对象可能已经析构，而 fd_ 也已经被置 -1（P0-4）。
+    // 所以建连时就把 fd 捕获进回调，这里直接用（sub_reactor.h:31-32 两个函数同理）
 
     // 从 EventLoop 移除
     loop_->remove_channel(conn->channel());

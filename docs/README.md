@@ -22,6 +22,7 @@ docs/
 │   ├── persistence.md          RDB 快照与加载
 │   └── cluster.md              16384 槽 + Gossip + 主从复制
 │
+├── CONTRIBUTING.md             ← 贡献与门禁：required check 有哪些、红了怎么查
 ├── api.md                      ← API 命令手册（46 个命令）
 ├── testing.md                  ← 测试体系（16 个 ctest 用例 + 12 个 Python 脚本）
 └── deployment.md               ← 部署与运维（含性能基准数据）
