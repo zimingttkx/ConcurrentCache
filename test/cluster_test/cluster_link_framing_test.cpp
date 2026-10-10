@@ -38,6 +38,7 @@ namespace {
         int peer_fd = -1;
         bool disconnected = false;
         int delivered = 0;
+        ClusterMsg last;  // 最近一次投递的消息（args 用来验参数帧）
         ClusterLink link;
 
         BusHarness()
@@ -49,7 +50,10 @@ namespace {
                 link.set_fd(link_fd);
                 link.set_disconnect_callback(
                     [this](const std::string&, ClusterLink*) { disconnected = true; });
-                link.set_msg_callback([this](ClusterMsg&&, ClusterLink*) { delivered++; });
+                link.set_msg_callback([this](ClusterMsg&& m, ClusterLink*) {
+                    last = std::move(m);
+                    delivered++;
+                });
             }
         }
 
@@ -66,6 +70,18 @@ namespace {
         void feed(const ClusterMsgHeader& header) {
             const ssize_t written = ::write(peer_fd, &header, sizeof(header));
             EXPECT_EQ(written, static_cast<ssize_t>(sizeof(header)));
+        }
+
+        // 整帧（header + 参数区）一次喂进去
+        void feed_frame(ClusterMsgHeader header, const std::string& payload) {
+            header.magic = 0x43;
+            header.length = static_cast<uint32_t>(sizeof(header) + payload.size());
+            std::snprintf(header.sender_name, sizeof(header.sender_name), "%s", "127.0.0.1:19000");
+            std::string bytes;
+            bytes.append(reinterpret_cast<const char*>(&header), sizeof(header));
+            bytes += payload;
+            const ssize_t written = ::write(peer_fd, bytes.data(), bytes.size());
+            EXPECT_EQ(written, static_cast<ssize_t>(bytes.size()));
         }
     };
 
@@ -337,6 +353,183 @@ void test_bus_partial_header_also_times_out() {
         h.link.disconnect_and_notify();
     }
 }
+// v2 参数帧必须把任意字节的参数原样带回来。
+//
+// 这条是 #37 的正面判据：老框架把参数用裸 0xC0 连接且没有转义，所以一个 value
+// 里只要含 0xC0，副本端收到的就是被切错位的参数——不报错、不重试、日志里也看不出来，
+// 表现为主从静默发散。这里刻意混入 0xC0、'\n'、'\r' 和一个空参数。
+void test_bus_v2_frame_roundtrips_binary_args() {
+    TEST_SUITE("Cluster Bus Framing v2");
+
+    BusHarness h;
+    if (!h.ok()) {
+        EXPECT_TRUE(false);
+        return;
+    }
+
+    const std::vector<std::string> args = {
+        "RESTORE",
+        std::string("k") + static_cast<char>(0xC0) + "\n\r",
+        std::string(1, static_cast<char>(0xC0)),
+        std::string(),
+        "REPLACE",
+    };
+
+    std::string payload;
+    bus_args_encode(args, payload);
+    EXPECT_EQ(payload.size(), bus_args_frame_bytes(args));
+
+    ClusterMsgHeader header;
+    std::memset(&header, 0, sizeof(header));
+    header.version = kBusFramingVersion;
+    header.type = static_cast<uint16_t>(ClusterMsgType::kRepData);
+    h.feed_frame(header, payload);
+    h.link.handle_read();
+
+    EXPECT_EQ(h.delivered, 1);
+    EXPECT_TRUE(!h.disconnected);
+    EXPECT_EQ(h.last.args.size(), args.size());
+    EXPECT_TRUE(h.last.args == args);
+}
+
+// 编码侧算的长度和真实写出去的字节数必须一致：header.length 一旦小于实际帧长，
+// 接收端会把一条帧当两条解（后半截被认成坏 magic），大于则永远等不齐而卡死。
+void test_bus_v2_frame_length_matches_encoder() {
+    TEST_SUITE("Cluster Bus Framing v2");
+
+    std::vector<std::string> args;
+    for (int i = 0; i < 300; ++i) {
+        args.emplace_back(static_cast<size_t>(i % 17) + 1, static_cast<char>('a' + i % 26));
+    }
+    // 用与实现无关的方式算一遍帧长（std::to_string 的位数），两边对不上就是
+    // 编码侧或 header.length 侧算错了
+    const auto digits = [](uint64_t v) { return std::to_string(v).size(); };
+    size_t expected = digits(args.size()) + 1;
+    for (const auto& a : args) {
+        expected += digits(a.size()) + 1 + a.size();
+    }
+    std::string payload;
+    bus_args_encode(args, payload);
+    EXPECT_EQ(payload.size(), expected);
+    EXPECT_EQ(bus_args_frame_bytes(args), expected);
+
+    std::vector<std::string> back;
+    std::string err;
+    EXPECT_TRUE(bus_args_decode(payload.data(), payload.size(), back, err));
+    EXPECT_TRUE(back == args);
+
+    // 少一个字节：最后一圈的载荷不完整 → 必须判失败，不能交出一个截断的参数
+    back.clear();
+    EXPECT_TRUE(!bus_args_decode(payload.data(), payload.size() - 1, back, err));
+    // count 与实际条数不符（300 写成 200）：多出来的字节是"尾随字节"，同样判失败
+    std::string tampered = payload;
+    tampered.replace(0, 3, "200");
+    back.clear();
+    EXPECT_TRUE(!bus_args_decode(tampered.data(), tampered.size(), back, err));
+}
+
+// 版本号为其它值时不能"挑一套规则试试"：任何一套都会解出错位参数并被下游执行，
+// 所以必须当场断链。
+void test_bus_unknown_framing_version_disconnects() {
+    TEST_SUITE("Cluster Bus Framing v2");
+
+    BusHarness h;
+    if (!h.ok()) {
+        EXPECT_TRUE(false);
+        return;
+    }
+
+    ClusterMsgHeader header;
+    std::memset(&header, 0, sizeof(header));
+    header.version = 7;  // 既不是 v1 也不是 v2
+    header.type = static_cast<uint16_t>(ClusterMsgType::kRepData);
+    h.feed_frame(header, "2\n3\nSET\n3\nabc");
+    h.link.handle_read();
+
+    EXPECT_EQ(h.delivered, 0);
+    EXPECT_TRUE(h.disconnected);
+}
+
+// 升级窗口内的兼容路径：v1 帧仍按 0xC0 切分。gossip 的参数是 ASCII，
+// 这条分支只为让还没重启完的老节点继续参与控制面。
+void test_bus_v1_legacy_frame_still_parses() {
+    TEST_SUITE("Cluster Bus Framing v2");
+
+    BusHarness h;
+    if (!h.ok()) {
+        EXPECT_TRUE(false);
+        return;
+    }
+
+    ClusterMsgHeader header;
+    std::memset(&header, 0, sizeof(header));
+    header.version = kBusFramingLegacyVersion;
+    header.type = static_cast<uint16_t>(ClusterMsgType::kPing);
+    h.feed_frame(header, std::string("ping") + static_cast<char>(0xC0) + "pong" + static_cast<char>(0xC0));
+    h.link.handle_read();
+
+    EXPECT_EQ(h.delivered, 1);
+    EXPECT_TRUE(!h.disconnected);
+    EXPECT_EQ(h.last.args.size(), static_cast<size_t>(2));
+    EXPECT_TRUE(h.last.args.size() == 2 && h.last.args[0] == "ping" && h.last.args[1] == "pong");
+}
+
+// 发送侧写进 socket 的字节，必须能被接收侧按 header 里声明的版本解回来。
+//
+// 前面几条是"手工造帧喂进去"，这条反过来：让 send_msg 自己写，再从对端读原始字节。
+// header.length 与真实帧长脱钩、或者 version 没跟着实际用的框架走，只有这条路能发现。
+void test_bus_send_msg_writes_a_decodable_v2_frame() {
+    TEST_SUITE("Cluster Bus Framing v2");
+
+    BusHarness h;
+    if (!h.ok()) {
+        EXPECT_TRUE(false);
+        return;
+    }
+
+    ClusterMsg msg;
+    msg.header.type = static_cast<uint16_t>(ClusterMsgType::kRepData);
+    msg.args.emplace_back("SET");
+    msg.args.emplace_back("bin_key");
+    msg.args.emplace_back(std::string(1, static_cast<char>(0xC0)) + "tail");
+
+    EXPECT_TRUE(h.link.send_msg(msg));
+    h.link.handle_write();
+
+    auto read_exact = [&](size_t want) -> std::string {
+        std::string got;
+        char buf[4096];
+        while (got.size() < want) {
+            // 一次最多只读"还缺多少"：否则会把正文一起吸进来，下一个 read_exact
+            // 就读到了不属于它的数据（CI 上第一次跑就是这样红的：读了 2143 而不是 2120）
+            const size_t need = want - got.size();
+            const size_t room = need < sizeof(buf) ? need : sizeof(buf);
+            const ssize_t n = ::read(h.peer_fd, buf, room);
+            if (n <= 0) break;
+            got.append(buf, static_cast<size_t>(n));
+        }
+        return got;
+    };
+
+    const std::string head_bytes = read_exact(sizeof(ClusterMsgHeader));
+    EXPECT_EQ(head_bytes.size(), sizeof(ClusterMsgHeader));
+    if (head_bytes.size() != sizeof(ClusterMsgHeader)) return;
+
+    ClusterMsgHeader header;
+    std::memcpy(&header, head_bytes.data(), sizeof(header));
+    EXPECT_EQ(header.version, kBusFramingVersion);
+    EXPECT_TRUE(header.length >= sizeof(ClusterMsgHeader));
+    if (header.length < sizeof(ClusterMsgHeader)) return;
+
+    const std::string payload = read_exact(header.length - sizeof(ClusterMsgHeader));
+    EXPECT_EQ(payload.size(), static_cast<size_t>(header.length) - sizeof(ClusterMsgHeader));
+
+    std::vector<std::string> back;
+    std::string err;
+    EXPECT_TRUE(bus_args_decode(payload.data(), payload.size(), back, err));
+    EXPECT_TRUE(back == msg.args);
+}
+
 void run_all_cluster_bus_framing_tests() {
     std::cout << "\n========================================\n";
     std::cout << "Running Cluster Bus Framing Tests\n";
@@ -348,6 +541,11 @@ void run_all_cluster_bus_framing_tests() {
     test_bus_frame_shorter_than_header_disconnects();
     test_bus_send_still_allows_large_replicated_value();
     test_bus_sender_identity_predicate();
+    test_bus_v2_frame_roundtrips_binary_args();
+    test_bus_v2_frame_length_matches_encoder();
+    test_bus_unknown_framing_version_disconnects();
+    test_bus_v1_legacy_frame_still_parses();
+    test_bus_send_msg_writes_a_decodable_v2_frame();
     test_bus_partial_frame_drip_times_out();
     test_bus_partial_frame_timeout_disconnects();
     test_disconnect_still_reports_the_registered_fd();

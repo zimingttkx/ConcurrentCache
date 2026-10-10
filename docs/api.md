@@ -228,9 +228,10 @@ RESTORE <key> <ttl> <serialized-value>
 - `ttl` 单位为毫秒；0 表示永不过期
 - 配套序列化由 `CacheObject::serialize()` 提供：一行类型标签 + 若干条
   `<字节数>\n<原始字节>` 记录，因此成员/字段里含 `\n`、`\r` 不会再被截断
-- 注意：总线本身用裸 `\xC0` 字节分隔参数且没有转义，所以**含 0xC0 的 value 在复制/迁移
-  时仍会在总线层被切断**（这是与载荷框架无关的另一处缺陷，登记在案待修）
 - 载荷任何一帧不完整都算失败（不再"读到哪算哪"交出半个对象）
+- 总线侧同样二进制安全：参数帧自 v2 起是"条数 + 每条 `<字节数>\n<原始字节>`"，
+  不再用裸 `\xC0` 拼接，所以含 0xC0 的 value 不会被切断（见
+  [集群架构 § 7](architecture/cluster.md)）
 - 错误返回：`-ERR invalid TTL`（ttl 非法）/ `-ERR Invalid or malformed serialized payload`
   （反序列化失败）/ `-BUSYKEY Target key name already exists`（key 已存在且未带 REPLACE）
 

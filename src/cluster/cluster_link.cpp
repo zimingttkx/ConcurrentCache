@@ -117,6 +117,122 @@ void ClusterLink::disconnect_and_notify() {
     // 注意：此处 return 后不得再触碰 this 的任何成员。
 }
 
+namespace {
+
+// 十进制位数（0→1、9→1、10→2）。长度字段的字节数由它决定，编码侧与
+// 帧长计算侧必须用同一个算法，否则 header.length 会与真实字节数脱钩 ——
+// 那是 P0-1 那一类"帧读完了"的错位。
+size_t decimal_digits(uint64_t v) {
+    size_t n = 1;
+    while (v >= 10) {
+        v /= 10;
+        ++n;
+    }
+    return n;
+}
+
+// 参数条数的上限。每条约少 2 字节（"0\n"），所以条数不可能超过参数区字节数；
+// 这里再加一道显式额度，避免一个被写坏的 count 让解码循环跑几十亿次。
+constexpr uint64_t kMaxArgsPerFrame = 1u << 20;
+
+} // namespace
+
+size_t bus_args_frame_bytes(const std::vector<std::string>& args) {
+    size_t bytes = decimal_digits(args.size()) + 1;  // "<count>\n"
+    for (const auto& arg : args) {
+        bytes += decimal_digits(arg.size()) + 1 + arg.size();
+    }
+    return bytes;
+}
+
+void bus_args_encode(const std::vector<std::string>& args, std::string& out) {
+    out += std::to_string(args.size());
+    out.push_back('\n');
+    for (const auto& arg : args) {
+        out += std::to_string(arg.size());
+        out.push_back('\n');
+        out.append(arg.data(), arg.size());
+    }
+}
+
+bool bus_args_decode(const char* data, size_t len, std::vector<std::string>& out,
+                     std::string& err) {
+    size_t pos = 0;
+
+    auto read_field = [&](uint64_t& value, const char* what) -> bool {
+        const size_t start = pos;
+        while (pos < len && data[pos] != '\n') {
+            ++pos;
+        }
+        if (pos >= len) {
+            err = std::string("no newline terminating ") + what;
+            return false;
+        }
+        const size_t width = pos - start;
+        if (width == 0 || width > 10) {
+            err = std::string("bad width of ") + what;
+            return false;
+        }
+        uint64_t v = 0;
+        for (size_t i = start; i < pos; ++i) {
+            if (data[i] < '0' || data[i] > '9') {
+                err = std::string("non-digit in ") + what;
+                return false;
+            }
+            v = v * 10u + static_cast<uint64_t>(data[i] - '0');
+        }
+        ++pos;  // 吃掉 '\n'
+        value = v;
+        return true;
+    };
+
+    uint64_t count = 0;
+    if (!read_field(count, "arg count")) {
+        return false;
+    }
+    if (count > kMaxArgsPerFrame || count > len) {
+        err = "implausible arg count";
+        return false;
+    }
+
+    for (uint64_t i = 0; i < count; ++i) {
+        uint64_t arg_len = 0;
+        if (!read_field(arg_len, "arg length")) {
+            return false;
+        }
+        if (arg_len > static_cast<uint64_t>(len - pos)) {
+            err = "arg length exceeds remaining frame bytes";
+            return false;
+        }
+        out.emplace_back(data + static_cast<long>(pos), static_cast<size_t>(arg_len));
+        pos += static_cast<size_t>(arg_len);
+    }
+
+    // 参数区必须被正好消费完。剩下字节说明 count/长度与真实内容不符 ——
+    // 与其把多余字节当成一个参数收进来，不如判畸形：错位的参数会被下游执行成
+    // 另一条命令，那比断链严重得多。
+    if (pos != len) {
+        err = "trailing bytes after last arg";
+        return false;
+    }
+    return true;
+}
+
+void bus_args_decode_legacy(const char* data, size_t len, std::vector<std::string>& out) {
+    std::string current_arg;
+    for (size_t i = 0; i < len; ++i) {
+        if (data[i] == '\xC0') {
+            out.push_back(current_arg);
+            current_arg.clear();
+        } else {
+            current_arg.push_back(data[i]);
+        }
+    }
+    if (!current_arg.empty()) {
+        out.push_back(current_arg);
+    }
+}
+
 bool ClusterLink::send_msg(const ClusterMsg& msg) {
     if (!connected_.load()) {
         LOG_WARN(CLUSTER, "Cannot send msg to disconnected link: %s", node_name_.c_str());
@@ -135,22 +251,23 @@ bool ClusterLink::send_msg(const ClusterMsg& msg) {
         }
     }
 
-    // 计算总长度（header + 每个参数再加 1 字节的 \xC0 分隔符）。
+    // 计算总长度（header + v2 参数帧）。
     // 用 size_t 累加后再校验，不能像原来那样直接 += 到 uint32 的 header.length 上：
     // 参数够多时它会回绕成一个小值，接收端于是提前判定"帧读完了"、后续字节流永久错位
     // ——那正是 P0-1 从 uint16 换成 uint32 时没有根治的那一半。
     // 上限与接收端 read_complete() 的 kMaxPacketBytes 对称：自己不能发出会被对端
     // 判为畸形并断链的帧。
-    size_t frame_bytes = sizeof(ClusterMsgHeader);
-    for (const auto& arg : msg.args) {
-        frame_bytes += arg.size() + 1;
-    }
+    // 帧长与实际写入字节数共用 bus_args_* 这一套算法，两边不会各算各的。
+    const size_t frame_bytes = sizeof(ClusterMsgHeader) + bus_args_frame_bytes(msg.args);
     if (frame_bytes > kMaxPacketBytes) {
         LOG_ERROR(CLUSTER, "Refusing to send frame of %zu bytes to %s: exceeds bus limit %u",
                   frame_bytes, node_name_.c_str(), kMaxPacketBytes);
         return false;
     }
     header.length = static_cast<uint32_t>(frame_bytes);
+    // 参数区是按 v2 写的，所以版本也必须由这里定死：不能信调用方留在 msg 里的值，
+    // 否则一个 msg.version = 1 会让接收端用 0xC0 规则去切 v2 帧，解出一堆错位参数。
+    header.version = kBusFramingVersion;
 
     // 添加诊断日志（仅在非心跳消息时）
     if (header.type != 1 && header.type != 2) {
@@ -165,10 +282,10 @@ bool ClusterLink::send_msg(const ClusterMsg& msg) {
         std::lock_guard<std::mutex> lock(send_mutex_);
         send_buffer_.append(reinterpret_cast<const char*>(&header), sizeof(header));
 
-        for (const auto& arg : msg.args) {
-            send_buffer_.append(arg.data(), arg.size());
-            send_buffer_.append("\xC0", 1);  // 参数分隔符
-        }
+        std::string frame;
+        frame.reserve(bus_args_frame_bytes(msg.args));
+        bus_args_encode(msg.args, frame);
+        send_buffer_.append(frame.data(), frame.size());
     }
 
     // 注意：不在此处调用 handle_write()。EventLoop 已通过 enable_writing()
@@ -489,25 +606,27 @@ bool ClusterLink::decode_msg() {
         return false;
     }
 
-    // 解析参数：header 之后的数据以 \xC0 分隔
-    size_t args_size = msg.header.length - kHeaderSize;
-    if (args_size > 0) {
-        const char* args_start = data + kHeaderSize;
-        const char* args_end = args_start + args_size;
-
-        std::string current_arg;
-        for (const char* p = args_start; p < args_end; ++p) {
-            if (*p == '\xC0') {
-                msg.args.push_back(current_arg);
-                current_arg.clear();
-            } else {
-                current_arg += *p;
-            }
+    // 解析参数区。v2 是"条数 + 每条 <字节数>\n<原始字节>"；v1 是裸 \xC0 切分，
+    // 只作为升级窗口内旧对端的兼容路径保留（旧节点的 gossip 参数是 ASCII，
+    // 不含 0xC0，所以控制面照常；数据面本来就会被 0xC0 切断，那正是这次改的东西）。
+    // 其它版本号一律当畸形——按任何一套规则去解都可能解出错位参数并被下游执行。
+    const size_t args_size = msg.header.length - kHeaderSize;
+    const char* args_start = data + kHeaderSize;
+    if (msg.header.version == kBusFramingVersion) {
+        std::string err;
+        if (!bus_args_decode(args_start, args_size, msg.args, err)) {
+            LOG_ERROR(CLUSTER, "Malformed v2 args frame from %s (%zu bytes): %s",
+                      node_name_.c_str(), args_size, err.c_str());
+            return false;
         }
-        // 如果末尾没有分隔符，添加最后一个参数
-        if (!current_arg.empty()) {
-            msg.args.push_back(current_arg);
+    } else if (msg.header.version == kBusFramingLegacyVersion) {
+        if (args_size > 0) {
+            bus_args_decode_legacy(args_start, args_size, msg.args);
         }
+    } else {
+        LOG_ERROR(CLUSTER, "Unsupported cluster bus framing version %u from %s",
+                  static_cast<unsigned>(msg.header.version), node_name_.c_str());
+        return false;
     }
 
     // 跳过已处理的数据

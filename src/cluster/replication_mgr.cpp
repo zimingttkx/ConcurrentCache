@@ -288,9 +288,10 @@ bool ReplicationMgr::send_replication_args(const std::string& replica_name,
         return false;
     }
 
-    // 修复 P1-2a：把命令编码为 RESP 数组文本（二进制安全），整段作为单个
-    // kRepData 参数传输。RESP bulk string 自带长度前缀，key/value 中的空格、
-    // \xC0（bus 参数分隔符）、\n（serialize 多行文本）都不会再被截断。
+    // 修复 P1-2a：把命令编码为 RESP 数组文本，整段作为单个 kRepData 参数传输。
+    // RESP bulk string 的长度前缀解决了命令行**内部**的空格与换行；而参数穿过总线
+    // 时以前会被裸分隔符切断（含 0xC0 的 value 于是静默丢到副本外），现在由
+    // cluster_link.h 的 v2 长度前缀参数帧兜住。
     std::string resp_cmd = RespEncoder::encode_array(args);
     std::vector<std::string> bus_args = {resp_cmd};
     return conn->send_command_to_node(replica_name, bus_args);
