@@ -4,6 +4,7 @@
 //
 
 #include "main_reactor.h"
+#include "base/server_stats.h"
 #include "sub_reactor_pool.h"
 #include "base/log.h"
 
@@ -92,6 +93,9 @@ void MainReactor::handle_accept() {
 }
 
 void MainReactor::add_new_connection(int client_fd) {
+    // 只在真正接管这条连接之后计数：accept 失败、EAGAIN 都不算。
+    ServerStats::instance().record_connection_accepted();
+
     // 步骤1：设置非阻塞
     int flags = fcntl(client_fd, F_GETFL, 0);
     fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);

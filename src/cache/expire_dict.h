@@ -98,6 +98,12 @@ public:
     size_t size() const;
 
     /**
+     * @brief 还没过期的条目数 + 它们的平均剩余 TTL（毫秒）。
+     * 没有存活条目时 avg_ttl_ms 为 0，不做除零。
+     */
+    void stats(size_t& live_count, int64_t& avg_ttl_ms) const;
+
+    /**
      * @brief 检查键是否存在（不考虑是否过期）
      */
     bool contains(const std::string& key) const;
