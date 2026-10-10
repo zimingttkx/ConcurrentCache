@@ -105,7 +105,6 @@ namespace cc_server {
          * @brief 原子写封装：写临时文件后 rename（内部调用 save）
          * @note 公开给需要显式原子保存的调用方使用
          */
-        bool save_to_temp_and_rename(const std::string& filepath, GlobalStorage& storage);
 
         /**
          * @brief 获取 BGSAVE 是否正在进行
@@ -148,7 +147,6 @@ namespace cc_server {
         /**
          * @brief 获取保存路径
          */
-        const std::string& get_filepath() const { return filepath_; }
 
         /**
          * @brief 等待后台保存完成（同步等待子进程）

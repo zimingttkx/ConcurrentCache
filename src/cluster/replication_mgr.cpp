@@ -179,17 +179,6 @@ void ReplicationMgr::cleanup_replication_buffer() {
               new_start_offset, repl_buffer_.size());
 }
 
-void ReplicationMgr::update_replica_ack_offset(const std::string& replica_name, int64_t offset) {
-    std::shared_lock<std::shared_mutex> lock(replicas_mutex_);
-
-    auto it = replicas_.find(replica_name);
-    if (it != replicas_.end()) {
-        it->second->repl_offset = offset;
-        it->second->last_ack_time = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-    }
-}
-
 bool ReplicationMgr::send_rdb_to_replica(const std::string& replica_name) {
     if (rdb_send_in_progress_.load()) {
         LOG_WARN(CLUSTER, "RDB send already in progress");

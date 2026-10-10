@@ -35,7 +35,6 @@ namespace cc_server {
 
         std::vector<std::string> getStackTrace();
 
-        void printStackTrace();
 
     private:
 

@@ -192,24 +192,6 @@ namespace cc_server {
      * - 不能使用 exit()，信号处理中不安全
      * - 使用 _exit(1) 直接终止进程
      */
-    void SignalHandler::printStackTrace() {
-        fprintf(stderr, "\n");
-        fprintf(stderr, "========================================\n");
-        fprintf(stderr, "SIGSEGV caught! Printing stack trace...\n");
-        fprintf(stderr, "========================================\n");
-
-        auto stack = getStackTrace();
-        for (const auto& frame : stack) {
-            fprintf(stderr, "%s\n", frame.c_str());
-        }
-
-        fprintf(stderr, "========================================\n");
-        fprintf(stderr, "Process terminating. Check the stack trace above.\n");
-        fprintf(stderr, "========================================\n");
-
-        _exit(1);
-    }
-
     /**
      * SIGSEGV 处理函数（V2 新增，静态）
      *

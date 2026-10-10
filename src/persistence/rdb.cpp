@@ -367,11 +367,6 @@ static std::string escape_windows_arg(const std::string& arg) {
 
 #endif
 
-bool RdbPersistence::save_to_temp_and_rename(const std::string& filepath, GlobalStorage& storage) {
-    // 原子写实现：写临时文件后 rename（详见 save()）
-    return save(filepath, storage);
-}
-
 bool RdbPersistence::wait_for_bgsave(int timeout_ms) {
     if (!is_bgsave_in_progress()) {
         return true;

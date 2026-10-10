@@ -112,7 +112,6 @@ public:
     std::string execute_bus_command_line(const std::string& cmd_line);
 
     // 更新副本的确认偏移量
-    void update_replica_ack_offset(const std::string& replica_name, int64_t offset);
 
     // 获取当前主节点的复制偏移量
     int64_t get_master_repl_offset() const { return master_repl_offset_.load(); }
@@ -128,7 +127,6 @@ public:
     std::string get_master_runid() const { return master_runid_; }
 
     // 更新主节点复制偏移量（副本收到后更新）
-    void set_master_repl_offset(int64_t offset) { master_repl_offset_.store(offset); }
 
     // 获取复制状态
     SyncState get_sync_state() const { return sync_state_.load(); }

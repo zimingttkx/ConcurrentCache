@@ -71,7 +71,6 @@ flowchart LR
 | `save_mutex_` | `std::mutex` | 串行化同步 save 与后台 save，防止并发写同一文件 |
 | `save(filepath, storage)` | `bool` | 同步保存（阻塞；原子写：.tmp + fsync + rename，见 §5.1） |
 | `save_in_background(filepath, storage)` | `bool` | 异步保存（进程内 detached 线程） |
-| `save_to_temp_and_rename(filepath, storage)` | `bool` | 公开 API，直接转发 `save` |
 | `load(filepath, storage)` | `bool` | 启动时加载 |
 | `wait_for_bgsave(timeout_ms)` | `bool` | 等待 BGSAVE 完成 |
 
