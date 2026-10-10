@@ -51,18 +51,6 @@ struct ClusterMsgHeader {
     uint8_t slot_map[16384 / 8]; // 槽位图 (2048 bytes)
 };
 
-// 集群总线消息
-struct ClusterMsg {
-    ClusterMsgHeader header;
-    std::vector<std::string> args;  // 消息参数
-
-    ClusterMsg() {
-        memset(&header, 0, sizeof(header));
-        header.magic = 0x43;  // 'C'
-        header.version = kBusFramingVersion;
-    }
-};
-
 // 参数区帧格式的协议版本。
 //
 // v1 把多个参数用裸 0xC0 字节拼起来且没有任何转义 —— 而复制/迁移的参数里
@@ -77,6 +65,19 @@ struct ClusterMsg {
 // 因此混版本期间**数据面**（复制/迁移）不受支持，需要整集群一起升级。
 constexpr uint16_t kBusFramingVersion = 2;
 constexpr uint16_t kBusFramingLegacyVersion = 1;
+
+// 集群总线消息
+struct ClusterMsg {
+    ClusterMsgHeader header;
+    std::vector<std::string> args;  // 消息参数
+
+    ClusterMsg() {
+        memset(&header, 0, sizeof(header));
+        header.magic = 0x43;  // 'C'
+        header.version = kBusFramingVersion;
+    }
+};
+
 
 // 参数区编码后的字节数（先算长度再一次性写，避免 send_msg 与接收端各算一套）。
 size_t bus_args_frame_bytes(const std::vector<std::string>& args);
