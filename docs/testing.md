@@ -60,7 +60,11 @@
 
 `ci/known-failures.txt` 是基线名单，规则是**每一项都必须当前真的失败**，否则脚本报"已经不再触发，请删掉这一行"。所以名单只能变短，把缺陷修掉的证据就是名单少一行。
 
-`scripts/ci/check_consistency.py` 检查四件事：命令注册表与复制写白名单是否互相自洽（注册表由 `command-table-probe` 在运行时回答，不信正则）、`test/` 下每个 `.cpp` 是否属于某个 target 或在名单里、`conf` 里的键是否真被代码读取、端口在 conf / Dockerfile `EXPOSE` / Dockerfile `HEALTHCHECK` 三处是否一致（README 不参与比对）。
+`scripts/ci/check_consistency.py` 检查这几件事：命令注册表与复制写白名单是否互相自洽（注册表由 `command-table-probe` 在运行时回答，不信正则）、`test/` 下每个 `.cpp` 是否属于某个 target 或在名单里、每个 ctest target 有没有真的被某个标签选到、`conf` 里的键是否真被代码读取、端口在 conf / Dockerfile `EXPOSE` / Dockerfile `HEALTHCHECK` 三处是否一致（README 不参与这一条）。
+
+第 7 组是**文档 ↔ 现实**：`docs/api.md` 的命令索引与总数必须等于注册表、README 的 ctest 表必须等于 `CC_TESTS`、指向 `.md` 的相对链接必须能解析、文档里`redis-cli -p <总线端口>` 这种把总线端口当客户端口的写法要判红、默认端口与 `concurrentcache_version` 必须与代码/conf 一致、文档让人拉的镜像仓库地址必须有工作流真的往那儿推。
+
+这组判据自己也可能坏（写坏的正则会永远绿），所以 `scripts/ci/check_docs_gate_injection.py` 会往文档里逐条注入错误、要求**只有对应那一条**报 `::error::`、然后还原；它作为 `consistency` job 的一个步骤每天跟着跑。
 
 ## 3. 快速运行
 
