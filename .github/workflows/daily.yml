@@ -171,13 +171,12 @@ jobs:
       # 吞掉失败的成本是：一个绿色 Job 里藏着一个没人看得见的红点。脚本侧的修法
       # （读到能解析为止 + 超时/关闭/nil 分开返回 + 失败时打节点日志尾巴）在同一次
       # 提交里。Full-cluster 那条也从 continue-on-error 改成真实结果。
-      # cluster_stress_test.py 以前恒 return 0（阶梯表里的错误率只打印，节点在压测中
-      # 死掉也不会红）。阶梯本身是探极限的，随 runner 负载浮动，不该当判据——所以
-      # 判据换成三条与机器快慢无关的：压测中没有节点死掉、压测后 SET/GET 仍正常、
-      # 压测后当场写的 20 个键能原样读回（刻意不抽查预热键：压测会不断造新键，越过 max_entries*0.9 就按 LRU 淘汰，那是配置规定的行为不是缺陷）。阶梯继续只报告。      # cluster_stress_test.py 以前恒 return 0：阶梯表里的错误率/QPS 只打印，节点在压测
-      # 中途死掉也不会红。阶梯本身是探极限的、随 runner 负载浮动，不该当判据（那是 #49
-      # 里"把排程巧合当不变量"的同一类错误），所以阶梯继续只报告；判据换成三条与机器
-      # 快慢无关的：压测中没有节点进程退出、压测后 SET/GET 仍正常、压测后新写的键能原样读回。
+      # cluster_stress_test.py 以前恒 return 0：阶梯表里的错误率/QPS 只打印，节点在压测中途
+      # 死掉也不会红。阶梯本身是探极限的、随 runner 负载浮动，不该当判据（那是 #49 里
+      # "把排程巧合当不变量"的同一类错误），所以阶梯继续只报告；判据换成三条与机器快慢无关的：
+      # 压测中没有节点进程退出、压测后 SET/GET 仍正常、压测后新写的 20 个键能原样读回
+      # （刻意不抽查预热键：压测会不断造新键，越过 max_entries*0.9 就按 LRU 淘汰，
+      # 那是配置规定的行为不是缺陷）。
       - name: Cluster and replication e2e
         run: |
           python3 test/e2e_test/e2e_failover_test.py
@@ -229,12 +228,11 @@ jobs:
           name: e2e-reports
           path: |
             **/*_report.json
-            **/comparison_report.json
           retention-days: 14
           if-no-files-found: ignore
 
-  # 与真 redis-server 对比。runner 给的 Redis 版本与文档要求的 7.0.15 未必一致，
-  # 所以版本差异只作观察，不判红。
+  # 与真 redis-server 对比。runner 装的是 Ubuntu 24.04 仓库的
+  # `5:7.0.15-1ubuntu0.24.04.5`，正好就是文档口径的 7.0.15（job 日志里 apt 那几行可核）。
   redis-compat:
     if: ${{ !contains(github.event.inputs.skipjobs, 'redis') }}
     runs-on: ubuntu-24.04
@@ -258,6 +256,17 @@ jobs:
       # ——两种都需要有人看，不该显示成绿。
       - name: Compare against Redis
         run: python3 test/e2e_test/comparison_test.py
+
+      # 报告以前只在日志里：判红的时候想对比两份 nightly 只能翻日志，而 e2e job 那边
+      # 虽然列了 comparison_report.json，它并不跑 comparison_test.py，产物其实来自这里。
+      - name: Upload comparison report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: redis-comparison-report
+          path: test/e2e_test/comparison_report.json
+          retention-days: 14
+          if-no-files-found: warn
 
   # 可移植性：Redis 在 ci.yml 里跑老发行版与 arm。这里先补两条最可能藏问题的。
   portability:
