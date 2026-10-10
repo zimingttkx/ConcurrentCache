@@ -1421,7 +1421,10 @@ namespace cc_server {
     public:
         std::string execute(const std::vector<std::string>& args) override {
             auto& rdb = RdbPersistence::instance();
-            std::string section = (args.size() >= 2) ? args[1] : "server";
+            // 不带参数的 INFO 必须等于 INFO all（Redis 的口径）。以前默认只回 server 段，
+            // 裸 INFO 只有 65 字节：按 Redis 习惯调 INFO 再抓 used_memory_rss /
+            // rdb_changes_since_last_save 的监控脚本，会一个字段都读不到。
+            std::string section = (args.size() >= 2) ? args[1] : "all";
 
             std::string result;
             if (section == "server" || section == "all") {

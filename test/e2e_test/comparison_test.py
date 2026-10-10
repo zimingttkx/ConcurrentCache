@@ -970,7 +970,17 @@ class FunctionalTester:
         await c.connect()
         r = await c.execute("INFO")
         await c.close()
-        ok = r is not None and len(str(r)) > 20
+        # 这条判据以前是 len(r) > 20 —— 裸 INFO 只回 # Server 段（65 字节）也能过，
+        # 等于把一个真实的兼容缺陷藏在一个永远绿的断言后面。现在要求默认输出确实包含
+        # 各段：Redis 的 INFO 不带参数就是全段汇总。
+        info_text = str(r) if r is not None else ''
+        ok = (r is not None
+              and len(info_text) > 300
+              and '# Server' in info_text
+              and '# Stats' in info_text
+              and '# Persistence' in info_text
+              and '# Memory' in info_text
+              and '# Keyspace' in info_text)
         return (f"INFO length={len(str(r)) if r else 0}", ok, "应返回非空字符串")
 
     # ── 类型转换 ──
