@@ -92,8 +92,7 @@
 
 ```
 src/memorypool/
-├── memory_pool.h       # 主头文件（整合所有组件）
-├── memory_pool.cpp    # 空文件（作为整合入口）
+├── memory_pool.h       # 主头文件（整合所有组件，header-only，无对应 .cpp）
 │
 ├── size_class.h/cpp   # 大小分类（29个固定档次）
 ├── free_list.h/cpp    # 空闲链表（头插头取O(1)）

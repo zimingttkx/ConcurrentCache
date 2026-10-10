@@ -4,7 +4,7 @@
 
 | 文档状态 | 维护者 | 最后更新 | 适用版本 |
 |---------|--------|---------|---------|
-| Active | ConcurrentCache Team | 2026-09 | V3.x |
+| Active | ConcurrentCache Team | 2026-10 | V4.x |
 
 ---
 
@@ -22,8 +22,8 @@ docs/
 │   ├── persistence.md          RDB 快照与加载
 │   └── cluster.md              16384 槽 + Gossip + 主从复制
 │
-├── api.md                      ← API 命令手册（44 个命令）
-├── testing.md                  ← 测试体系（12 C++ + 11 Python）
+├── api.md                      ← API 命令手册（46 个命令）
+├── testing.md                  ← 测试体系（16 个 ctest 用例 + 11 个 Python 脚本）
 └── deployment.md               ← 部署与运维（含性能基准数据）
 ```
 
@@ -31,7 +31,7 @@ docs/
 
 | 身份 | 推荐阅读顺序 | 预估时长 |
 |------|------------|---------|
-| **新加入项目** | [项目 README](../../README.md) → `architecture/overview.md` → `architecture/network.md` → `architecture/storage.md` → `api.md` | 60 min |
+| **新加入项目** | [项目 README](../README.md) → `architecture/overview.md` → `architecture/network.md` → `architecture/storage.md` → `api.md` | 60 min |
 | **后端开发** | `architecture/overview.md` → `architecture/storage.md` → `api.md` → `testing.md` | 40 min |
 | **架构师** | `architecture/overview.md` → `architecture/cluster.md` → `architecture/persistence.md` | 30 min |
 | **运维 / SRE** | `deployment.md` → `architecture/overview.md` → `api.md` | 25 min |
@@ -48,19 +48,19 @@ docs/
 | [`storage.md`](architecture/storage.md) | `GlobalStorage` 64 分片 + `std::shared_mutex`、`ExpireDict` 过期字典、`ExpirationChecker` 定期清理、ARU 淘汰 | 改存储、调并发瓶颈 |
 | [`memory-pool.md`](architecture/memory-pool.md) | `SizeClass` 29 级、`ThreadCache` 无锁分配、`CentralCache` 细粒度锁、`PageCache` Span 管理 | 改内存池、分析碎片 |
 | [`persistence.md`](architecture/persistence.md) | RDB 魔数 `CCRD`、5 类型序列化、原子保存（.tmp+rename）、`RdbScheduler` 周期+阈值触发、优雅退出保存 | 改持久化、查数据丢失 |
-| [`cluster.md`](architecture/cluster.md) | `ClusterServer` 单例、16384 槽 CRC16、`ClusterGossip` Ping/Pong/Meet/Fail、`ReplicationMgr` RESTORE 流全量同步 + backlog、帧校验与 Link 断开顺序、客观下线+投票 | 部署集群、排查主从 |
+| [`cluster.md`](architecture/cluster.md) | `ClusterServer` 单例、16384 槽 CRC16、`ClusterGossip` Ping/Pong/Meet/Fail、`ReplicationMgr` RESTORE 流全量同步 + backlog、帧校验与 Link 断开顺序、客观下线+投票、总线对端身份校验 | 部署集群、排查主从 |
 
 ### 3.2 API
 
 | 文档 | 内容 | 何时看 |
 |------|------|-------|
-| [`api.md`](api.md) | 全部 44 个命令语法、参数、RESP 响应、错误码、客户端示例、不支持特性清单 | 写客户端代码、查命令格式 |
+| [`api.md`](api.md) | 全部 46 个命令语法、参数、RESP 响应、错误码、客户端示例、不支持特性清单 | 写客户端代码、查命令格式 |
 
 ### 3.3 测试
 
 | 文档 | 内容 | 何时看 |
 |------|------|-------|
-| [`testing.md`](testing.md) | 12 个 C++ 测试套件、11 个 Python E2E 脚本（含 Redis 对比测试）、Sanitizer 用法、CI 流程 | 加新功能写测试、跑回归 |
+| [`testing.md`](testing.md) | 16 个 ctest 用例（17 个 C++ target，含 1 个探针）、11 个 Python E2E 脚本（含 Redis 对比测试）、Sanitizer 用法、CI 流程 | 加新功能写测试、跑回归 |
 
 ### 3.4 部署与运维
 

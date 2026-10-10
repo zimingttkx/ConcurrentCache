@@ -29,7 +29,7 @@
 │  RespParser / RespEncoder (RESP 2.0)        │
 ├─────────────────────────────────────────────┤
 │  命令层 (src/command/)                       │
-│  CommandFactory + 44 个 Command 子类          │
+│  CommandFactory + 46 个 Command 子类          │
 ├─────────────────────────────────────────────┤
 │  缓存层 (src/cache/ + src/datatype/)         │
 │  GlobalStorage(64分片) + CacheObject(5类型)   │
@@ -53,7 +53,7 @@
 | 入口 | `main.cpp` | `main()` | 信号注册 → 加载配置 → 启动组件 → 阻塞 MainReactor |
 | 网络 | `src/network/` | `MainReactor`、`SubReactorPool`、`EventLoop`、`Connection`、`Channel`、`Buffer` | 端口监听、连接分发、I/O 多路复用、读写缓冲 |
 | 协议 | `src/protocol/` | `RespParser`、`RespEncoder` | RESP 2.0 解析/编码 |
-| 命令 | `src/command/` | `Command` 基类、`CommandFactory` 单例 | 44 个命令注册、参数校验、调用存储层 |
+| 命令 | `src/command/` | `Command` 基类、`CommandFactory` 单例 | 46 个命令注册、参数校验、调用存储层 |
 | 存储 | `src/cache/` | `GlobalStorage`、`CacheObject`、`ExpireDict`、`ExpirationChecker` | 64 分片哈希表、5 数据类型、过期管理、ARU 随机分片采样淘汰（单轮上限 1024） |
 | 持久化 | `src/persistence/` | `RdbPersistence`、`RdbScheduler` | RDB 写入/读取、自动保存调度 |
 | 集群 | `src/cluster/` | `ClusterServer`、`ClusterState`、`ClusterNode`、`ClusterBus`、`ClusterGossip`、`ReplicationMgr` | 槽位管理、Gossip、主从复制、故障转移 |
@@ -143,7 +143,7 @@ Client ──TCP──► MainReactor (accept)
 |--------|---------|
 | `GlobalStorage` 全局唯一 | Magic Static 单例 + `delete` 拷贝构造 |
 | 每分片独立加锁 | 64 把 `std::shared_mutex` + 哈希分片 |
-| `Connection` 生命周期 ≤ `EventLoop` | `SubReactor` 持有 `unique_ptr<Connection>`；关闭走「先回调后关 fd」防泄漏 |
+| `Connection` 生命周期 ≤ `EventLoop` | `SubReactor` 持有 `unique_ptr<Connection>`；关闭顺序固定为「置 `closed_` → 注销 Channel → **关 fd** → 触发 `close_callback_`」——回调返回后 `this` 可能已析构，故不得再访问任何成员，回调侧改用建连时捕获的 `client_fd`（见 network.md §3.4） |
 | 畸形输入不杀进程 | 协议错误回错断开；命令执行/事件分发双层 try/catch 兜底 |
 | `Command` 实例独立 | `CommandFactory` 存储模板 + `clone()` 创建新实例 |
 | 过期键最终被删除 | 惰性删除（get 时）+ 周期删除（100ms 周期、25ms 预算内反复抽样）双重保证 |

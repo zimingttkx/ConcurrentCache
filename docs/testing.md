@@ -2,7 +2,7 @@
 
 > **测试体系**：C++ 单元/集成测试 + Python E2E 测试（含对比测试）
 > **入口**：`test/CMakeLists.txt`（C++ 测试目标） + `test/e2e_test/run_all_tests.py`（E2E 驱动）
-> **测试统计**：12 个 C++ 可执行文件 + 11 个 Python 脚本
+> **测试统计**：17 个 C++ 可执行 target（其中 16 个登记进 CTest，另有 1 个是给一致性脚本用的 `command-table-probe` 探针）+ 11 个 Python 脚本
 
 ## 1. 概览
 
@@ -60,7 +60,7 @@
 
 `ci/known-failures.txt` 是基线名单，规则是**每一项都必须当前真的失败**，否则脚本报"已经不再触发，请删掉这一行"。所以名单只能变短，把缺陷修掉的证据就是名单少一行。
 
-`scripts/ci/check_consistency.py` 检查四件事：命令注册表与复制写白名单是否互相自洽（注册表由 `command-table-probe` 在运行时回答，不信正则）、`test/` 下每个 `.cpp` 是否属于某个 target 或在名单里、`conf` 里的键是否真被代码读取、端口在 conf / Dockerfile / README 之间是否一致。
+`scripts/ci/check_consistency.py` 检查四件事：命令注册表与复制写白名单是否互相自洽（注册表由 `command-table-probe` 在运行时回答，不信正则）、`test/` 下每个 `.cpp` 是否属于某个 target 或在名单里、`conf` 里的键是否真被代码读取、端口在 conf / Dockerfile `EXPOSE` / Dockerfile `HEALTHCHECK` 三处是否一致（README 不参与比对）。
 
 ## 3. 快速运行
 
@@ -273,13 +273,13 @@ TEST_SUITE("GlobalStorage Basic Operations") {
 
 ### 5.9 集群
 
-**可执行文件**：`cluster-tests`（含 3 个源文件）
+**可执行文件**：`cluster-tests`（单个源文件 `cluster_test/cluster_test.cpp`）
 
-- 节点 Gossip 心跳
-- 哈希槽分配
-- PSYNC 握手
-- 复制偏移量
-- 故障检测
+- `ClusterNode` / `ClusterState` 的槽位归属与增删
+- `keyToSlot()` 落在 `[0, 16383]`
+- `ClusterServer` 单例与槽表查询
+
+> 复制/PSYNC **不在这里测**：`cluster_replication_test.cpp` 与 `cluster_strict_test.cpp` 因为要碰 `ReplicationMgr::add_to_replication_buffer()`（private）而没有接入构建，`test/CMakeLists.txt` 里写明了原因。真正的端到端复制/迁移验证在 `test/e2e_test/e2e_cluster_full_test.py`（daily 档）。
 
 ## 6. Python E2E 脚本
 
@@ -342,7 +342,7 @@ cmake .. -DCMAKE_BUILD_TYPE=Debug -DENABLE_TSAN=ON && cmake --build build
 cmake .. -DCMAKE_BUILD_TYPE=Debug -DENABLE_UBSAN=ON && cmake --build build
 ```
 
-> 三种 Sanitizer **不可同时启用**。
+> ASan 与 TSan **不能同时启用**（`CMakeLists.txt` 显式 `FATAL_ERROR`）；UBSan 可以与二者任一叠加。
 
 | Sanitizer | 典型报告 | 排查 |
 |-----------|---------|------|
@@ -354,11 +354,12 @@ cmake .. -DCMAKE_BUILD_TYPE=Debug -DENABLE_UBSAN=ON && cmake --build build
 
 文件：`.github/workflows/ci.yml`
 
-- **触发**：push / PR 到 `main` / `master`
+- **触发**：push / PR 到 `main` / `master`；同 `concurrency` group 内旧 run 会被取消（`main` 上的 run 不取消自己）
 - **环境**：`ubuntu-24.04` + `cmake` + `build-essential` + `zlib1g-dev`
-- **步骤**：`cmake .. -DCMAKE_BUILD_TYPE=Release` → `cmake --build build --parallel 2` → 上传 binary artifact（保留 1 天）
+- **7 个 job**（`ci.yml`）：`build-release`（`--parallel "$(nproc)"`，上传二进制）、`build-assert`（保留 `assert` 的构建）、`gate-tests`（`ctest -L gate`）、`contract-tests`（`ctest -L contract`，非 required）、`consistency`（构建 `command-table-probe` 后跑 `scripts/ci/check_consistency.py`）、`asan-smoke`（ASan 构建 + `ctest -L "gate|contract"`）、`docker-build`（镜像冒烟）
+- **required checks**：分支规则集 `main-gate` 里锁了 6 条（build-release / build-assert / gate-tests / consistency / asan-smoke / docker-build）；`contract-tests` 可见但不拦合并
 
-> 当前 CI **仅构建**，不运行测试套件。回归测试需在本地或 PR 审查时手动执行。
+> 重档（TSan/UBSan、长压测、e2e、与真 Redis 的对比、多架构编译）在 `daily.yml`，每天定时 + `workflow_dispatch` 触发，不拦 PR。
 
 ## 10. 故障排查
 
@@ -375,5 +376,5 @@ cmake .. -DCMAKE_BUILD_TYPE=Debug -DENABLE_UBSAN=ON && cmake --build build
 ## 11. 另见
 
 - [架构总览 § 7 性能特征](architecture/overview.md)
-- [部署 § 2.4 Sanitizer 选项](../deployment.md)
-- [API 文档](../api.md) — 命令级测试输入
+- [部署 § 2.4 Sanitizer 选项](deployment.md)
+- [API 文档](api.md) — 命令级测试输入

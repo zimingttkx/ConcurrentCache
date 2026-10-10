@@ -1358,7 +1358,7 @@ namespace cc_server {
             std::string result;
             if (section == "server" || section == "all") {
                 result += "# Server\r\n";
-                result += "concurrentcache_version:3.0.0\r\n";
+                result += "concurrentcache_version:4.0.0\r\n";
                 result += "os:Linux\r\n";
                 result += "arch_bits:64\r\n";
             }

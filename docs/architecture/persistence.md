@@ -121,7 +121,7 @@ flowchart TB
     C1 -->|No| SL
     C2 -->|No| SL
     DO --> BG[save_in_background<br/>进程内 detached 线程]
-    BG --> RES[成功启动后立即<br/>reset_dirty_count]
+    BG --> RES[成功启动后 CAS<br/>consume_dirty_count]
     RES --> SL
     BG --> BT[后台线程 save<br/>完成后自行更新 stats]
 ```
@@ -131,9 +131,9 @@ flowchart TB
 ```text
 1. if rdb.is_bgsave_in_progress(): return   // 防并发
 2. rdb.save_in_background(rdb_path, storage)  // 启动后台线程
-3. 启动成功 → 立即 storage.reset_dirty_count()
-   （重置的是【保存启动时刻】的脏计数，而非完成时刻——
-    否则 threshold==1 时每轮调度都会重复触发 BGSAVE）
+3. 启动成功 → 立即 storage.consume_dirty_count(dirty_snapshot)
+   （CAS 扣掉【保存启动时刻】已观测到的那部分，而非完成时刻整体清零——
+    否则 threshold==1 时每轮调度都会重复触发 BGSAVE，且启动期间的新写入会被漏计）
 4. stats 由后台线程保存完成后自行更新
 ```
 
@@ -147,7 +147,7 @@ flowchart TB
 | 失败处理 | 返回错误给客户端 | 更新 `last_bgsave_status` |
 | 实现 | `RdbPersistence::save` | 内部调用 `save`，在 detached 线程执行 |
 
-> **为什么不用 fork？** 多线程进程 + 自定义内存池下 `fork()` 有死锁/UB 风险（子进程可能复制到持锁状态的堆），因此**刻意**改为进程内后台线程快照，仅 Windows 分支保留子进程方案。代价是后台线程与写请求竞争分片锁（大库保存期间写延迟可能上升）。
+> **为什么不用 fork？** 多线程进程下 `fork()` 有死锁/UB 风险（子进程可能复制到持锁状态的堆）（子进程可能复制到持锁状态的堆），因此**刻意**改为进程内后台线程快照，仅 Windows 分支保留子进程方案。代价是后台线程与写请求竞争分片锁（大库保存期间写延迟可能上升）。
 
 ### 5.1 原子保存流程（`save()` 内部）
 
@@ -286,7 +286,7 @@ sequenceDiagram
 | 同步/异步保存不并发写文件 | `save_mutex_` 串行化 |
 | 磁盘上永远是完整文件 | `.tmp` 写入 + fsync + 原子 `rename`（§5.1） |
 | 写后脏计数递增 | `set/del/set_with_expire/incrby` 在 `GlobalStorage` 内部递增（注意：EXPIRE 命令直改 `expire_dict_` 的路径**不**递增脏计数） |
-| 脏计数重置时机 | BGSAVE **启动成功时**立即 reset（而非完成时），防 threshold==1 时每轮重复触发 |
+| 脏计数扣减时机 | BGSAVE **启动成功时**用 `consume_dirty_count(观测值)` 扣减（而非完成时清零），防 threshold==1 时每轮重复触发，也不吞掉启动期间的新写入 |
 | 启动前已恢复 | `load()` 在 `SubReactor.start()` 之后、`ExpirationChecker.start()` 之前 |
 | 优雅退出保存 | `main.cpp` 关闭流程最后 `rdb.save(path, storage)` |
 | 5 类型全支持 | `RdbValueType` 枚举 + 各自序列化方法 |

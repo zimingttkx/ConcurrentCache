@@ -143,7 +143,9 @@ sudo systemctl start concurrentcache
 | `cluster_replica_validity_factor` | `10` | 从节点失联判定倍率 |
 | `cluster_require_full_coverage` | `false` | 槽位不全时是否拒绝服务 |
 | `cluster_bind_addr` | `127.0.0.1` | 集群 bus 绑定地址 |
-| `log_file` / `log_max_size` / `log_max_files` | `./logs/concurrentcache.log` / 100MB / 5 | 日志轮转（**当前仅占位**，Logger 尚未读取） |
+| `log_file` | `./logs/concurrentcache.log` | 日志文件路径；非空时 `main.cpp` 调 `Logger::setFile()`，日志才会落盘（为空则只出控制台） |
+| `log_max_size` | `104857600`（100MB） | 单个日志文件轮转阈值，经 `Logger::setRotation()` 生效 |
+| `log_max_files` | 5 | **当前未被读取**：`main.cpp` 调 `setRotation(max_bytes, 5)` 时把保留数硬编码成 5 |
 
 **示例配置**：
 
@@ -157,24 +159,26 @@ rdb_save_interval = 300
 rdb_dirty_threshold = 1000
 max_entries = 5000000
 cluster_enabled = true
-cluster_node_timeout = 5000
+cluster_node_timeout = 15000
 ```
 
 > 任何配置项缺失会使用默认值（`main.cpp` 中显式兜底）。
 
 ## 5. Docker 部署
 
-### 5.1 使用预构建镜像
+### 5.1 使用镜像
+
+本仓库的 CI 只有 `docker-build` 这一个冒烟 job（构建成功即通过），**没有推送镜像的工作流**，所以不存在可直接 `docker pull` 的预构建镜像。请先本地构建（§5.2），再运行：
 
 ```bash
-docker pull ghcr.io/zimingttkx/concurrentcache:latest
+docker build -t concurrentcache:latest .
 docker run -d \
   --name concurrentcache \
   -p 6379:6379 \
   -v $(pwd)/data:/app/data \
   -v $(pwd)/conf/concurrentcache.conf:/app/conf/concurrentcache.conf:ro \
   --restart unless-stopped \
-  ghcr.io/zimingttkx/concurrentcache:latest
+  concurrentcache:latest
 
 docker exec concurrentcache redis-cli -p 6379 PING
 # PONG
@@ -195,7 +199,7 @@ docker build -t concurrentcache:latest .
 
 构建过程（`Dockerfile`）：
 
-1. **builder 阶段**：`gcc:14` + `cmake` + `ninja-build` + `zlib1g-dev` → cmake Release 构建
+1. **builder 阶段**：`gcc:12` + `cmake` + `ninja-build` + `zlib1g-dev` → cmake Release 构建
 2. **runtime 阶段**：`debian:bookworm-slim` + `zlib1g` + `ca-certificates` + `redis-tools` → 复制二进制 + conf
 
 ### 5.3 Docker Compose
@@ -206,15 +210,16 @@ docker build -t concurrentcache:latest .
 # docker-compose.yml
 services:
   concurrentcache:
-    image: ghcr.io/dingziming/concurrentcache:latest
+    build: .
+    image: concurrentcache:local
     ports:
-      - "16379:16379"
+      - "6379:6379"       # 客户端端口；集群总线端口 16379 需另行映射
     volumes:
       - ./data:/app/data
       - ./conf/concurrentcache.conf:/app/conf/concurrentcache.conf:ro
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "redis-cli", "-p", "16379", "PING"]
+      test: ["CMD", "redis-cli", "-p", "6379", "PING"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -230,25 +235,27 @@ docker-compose up -d
 
 每个节点使用独立配置文件，分别启动：
 
-```bash
-# 节点 A（默认配置，端口 16379）
-./concurrentcache-server &
+每个节点两个端口：客户端端口 `port`，总线端口自动等于它 + 10000。三个节点的推荐布局是客户端 6379 / 6380 / 6381（总线即 16379 / 16380 / 16381）。
 
-# 节点 B（准备 conf/node_b.conf，port=16380）
-cp conf/concurrentcache.conf conf/node_b.conf
-# 修改 conf/node_b.conf 中 port = 16380
-# 修改 conf/node_b.conf 中 cluster_enabled = true
-./concurrentcache-server &
+```bash
+# 节点 A（默认 conf，客户端端口 6379）
+./concurrentcache-server --config conf/concurrentcache.conf &
+
+# 节点 B：改 conf/node_b.conf 的 port = 6380 且 cluster_enabled = true
+./concurrentcache-server --config conf/node_b.conf &
+
+# 也可以不改配置文件，直接用命令行覆盖端口（--port 会被解析并校验 1..65535）
+./concurrentcache-server --config conf/concurrentcache.conf --port 6381 &
 ```
 
-> **注意**：当前不支持 `--port` 命令行参数，多节点部署需准备独立配置文件。
+> `--config` 指定的文件读不到时进程以退出码 1 失败（不静默回落）；不指定 `--config` 时默认路径缺失才回落到内置默认值。
 
 ### 6.2 加入集群
 
 节点 A 启动后，在节点 B 上执行：
 
 ```bash
-redis-cli -p 16380 CLUSTER MEET 127.0.0.1 16379
+redis-cli -p 6380 CLUSTER MEET 127.0.0.1 6379
 ```
 
 重复执行直到所有节点互相认识。
@@ -257,20 +264,20 @@ redis-cli -p 16380 CLUSTER MEET 127.0.0.1 16379
 
 ```bash
 # 节点 A 负责 0-5460
-redis-cli -p 16379 CLUSTER ADDSLOTS 0 1 2 ... 5460
+redis-cli -p 6379 CLUSTER ADDSLOTS 0 1 2 ... 5460
 
 # 节点 B 负责 5461-10922
-redis-cli -p 16380 CLUSTER ADDSLOTS 5461 ... 10922
+redis-cli -p 6380 CLUSTER ADDSLOTS 5461 ... 10922
 
 # 节点 C 负责 10923-16383
-redis-cli -p 16381 CLUSTER ADDSLOTS 10923 ... 16383
+redis-cli -p 6381 CLUSTER ADDSLOTS 10923 ... 16383
 ```
 
 ### 6.4 配置主从
 
 ```bash
 # 在从节点上
-redis-cli -p 16384 CLUSTER REPLICATE <master-node-name>
+redis-cli -p 6382 CLUSTER REPLICATE <master-node-name>
 ```
 
 详见 [集群架构 § 5 主从复制](architecture/cluster.md)。
@@ -318,11 +325,11 @@ sudo systemctl status concurrentcache
 ### 8.1 INFO 命令
 
 ```bash
-redis-cli -p 16379 INFO server
-redis-cli -p 16379 INFO stats
-redis-cli -p 16379 INFO persistence
-redis-cli -p 16379 INFO keyspace
-redis-cli -p 16379 INFO all
+redis-cli -p 6379 INFO server
+redis-cli -p 6379 INFO stats
+redis-cli -p 6379 INFO persistence
+redis-cli -p 6379 INFO keyspace
+redis-cli -p 6379 INFO all
 ```
 
 ### 8.2 关键指标
@@ -339,7 +346,7 @@ redis-cli -p 16379 INFO all
 ### 8.3 调试命令
 
 ```bash
-redis-cli -p 16379 DEBUG OBJECT key   # 查看对象类型
+redis-cli -p 6379 DEBUG OBJECT key   # 查看对象类型
 # 注意：DEBUG SLEEP 已被禁用（会阻塞事件循环），返回 -ERR DEBUG SLEEP is not supported
 ```
 
@@ -349,7 +356,7 @@ redis-cli -p 16379 DEBUG OBJECT key   # 查看对象类型
 
 | 症状 | 排查 |
 |------|------|
-| 端口占用 | `lsof -i :16379` / `ss -tlnp \| grep 16379` |
+| 端口占用 | `lsof -i :6379` / `ss -tlnp \| grep 6379`（别忘了总线端口 16379 = 客户端端口 + 10000，它也要放行） |
 | 配置文件语法错 | 检查 `conf/concurrentcache.conf` 每行 `key = value` 格式 |
 | ZLIB 未找到 | `apt install zlib1g-dev`（构建时）/ `zlib1g`（运行时） |
 | C++20 报错 | `g++ --version`（需 ≥ 12） |
@@ -387,7 +394,8 @@ gdb -p <pid>
 | ThreadPool ×N | `condition_variable.wait` |
 | ExpirationChecker | `std::this_thread::sleep_for(100ms)` |
 | RdbScheduler | `std::this_thread::sleep_for(1s)` |
-| ClusterServer Timer | `epoll_wait`（复用 MainReactor loop） |
+| ClusterConnection 心跳 | `sleep_for(1s)`（该线程驱动 `on_timer()` 与 `executeFailover()`，不是复用某个 EventLoop） |
+| ClusterBus 链路 | 由心跳线程与各 link 的 fd 直接收发，不额外占 reactor 线程 |
 
 ### 9.4 数据恢复
 
@@ -396,8 +404,8 @@ gdb -p <pid>
 ./concurrentcache-server
 
 # 强制保存
-redis-cli -p 16379 SAVE    # 同步保存
-redis-cli -p 16379 BGSAVE  # 异步保存
+redis-cli -p 6379 SAVE    # 同步保存
+redis-cli -p 6379 BGSAVE  # 异步保存
 ```
 
 ## 10. 升级与回滚
@@ -418,8 +426,8 @@ cp /tmp/concurrentcache-server /opt/concurrentcache/
 sudo systemctl start concurrentcache
 
 # 5. 验证
-redis-cli -p 16379 PING
-redis-cli -p 16379 DBSIZE
+redis-cli -p 6379 PING
+redis-cli -p 6379 DBSIZE
 ```
 
 ### 10.2 回滚

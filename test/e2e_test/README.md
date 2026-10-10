@@ -6,8 +6,8 @@
 
 | 脚本 | 功能描述 |
 |------|---------|
-| `e2e_connection_storm.py` | 海量连接洪峰测试 - 瞬间发起 10000+ 并发 TCP 连接 |
-| `e2e_high_concurrency_load.py` | 超高并发读写压测 - 模拟 1000 虚拟用户持续压测 |
+| `e2e_connection_storm.py` | 海量连接洪峰测试 - 默认 2000 条并发 TCP 连接（`--connections` 可调到万级） |
+| `e2e_high_concurrency_load.py` | 并发读写压测 - 默认 5 个虚拟用户 x 20 条命令，`--users`/`--commands` 可调高 |
 | `e2e_consistency_check.py` | 并发正确性与竞态校验 - 多协程并发修改同一 Key |
 | `e2e_chaos_test.py` | 异常与混沌测试 - TCP Reset、巨大 Payload、畸形协议 |
 | `run_all_tests.py` | 运行全部测试并生成汇总报告 |
@@ -48,28 +48,28 @@ python3 run_all_tests.py
 **目标**：验证极限连接数下服务端不崩溃
 
 **参数**：
-- `--connections`: 目标连接数（默认 10000）
-- `--batch-size`: 每批连接数（默认 500）
+- `--connections`: 目标连接数（默认 2000）
+- `--batch-size`: 每批连接数（默认 200）
+- `--port`: 服务端端口（默认 6379）
 
 **通过标准**：
-- 成功建立 10000+ 连接
 - 服务端未崩溃
-- 90%+ 连接 PING 响应成功
+- PING 成功率 > 70%
 
 ### 2. High Concurrency Load Test (`e2e_high_concurrency_load.py`)
 
 **目标**：模拟真实用户负载，输出 QPS/延迟统计
 
 **参数**：
-- `--users`: 虚拟用户数（默认 1000）
-- `--commands`: 每用户命令数（默认 100）
+- `--users`: 虚拟用户数（默认 5）
+- `--commands`: 每用户命令数（默认 20）
+- `--port`: 服务端端口（默认 6379）
 
 **命令配比**：70% GET / 20% SET / 10% DEL
 
-**通过标准**：
-- QPS > 1000
-- P99 延迟 < 500ms
-- 错误率 < 5%
+**通过标准**（脚本自身的判据）：
+- 错误率 ≤ 15% 且 QPS > 0
+- P99 等延迟只统计输出，不参与判定
 
 ### 3. Data Consistency Check (`e2e_consistency_check.py`)
 
@@ -81,7 +81,7 @@ python3 run_all_tests.py
 - 场景 C：读写并发，一边写一边读
 
 **通过标准**：
-- 场景 A：最终值严格等于 10000
+- 场景 A：10 协程 × 100 次读-改-写，理论上限 1000；最终值 ≤ 1000 即通过（小于 1000 表示竞态丢更新，属预期），超过 1000 才判失败
 - 场景 B：最终值是某个有效写入值
 - 场景 C：无异常值读取
 

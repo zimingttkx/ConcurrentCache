@@ -54,8 +54,8 @@ flowchart TB
 | `stores_` | `std::vector<unordered_map<string, CacheEntry>>` | 每个分片一个 map |
 | `mutexes_` | `std::unique_ptr<shared_mutex[]>` | 每个分片一把 `std::shared_mutex` |
 | `expire_dict_` | `ExpireDict` | 键 → 过期时间戳（毫秒） |
-| `dirty_counter_` | `std::atomic<size_t>` | 自上次成功启动 BGSAVE 起的写操作数 |
-| `max_entries_` | `size_t` | `EvictionConfig::kMaxEntries = 2,000,000`（默认；注意 conf 中的 `max_entries` 配置**未接线**——`set_max_entries` 无调用方，运行期恒为此值） |
+| `dirty_counter_` | `std::atomic<size_t>` | 自上次 BGSAVE **启动成功**起的写操作数；`set`/`set_conditional`/`del`/`set_with_expire`/`incrby` 及各容器写路径（统一走 `mutate`）递增，过期键被动清理不递增 |
+| `max_entries_` | `size_t` | 淘汰触发线；默认 `EvictionConfig::kMaxEntries = 2,000,000`，`main.cpp` 启动时读 conf 的 `max_entries`（缺省 0 表示不改）并调 `set_max_entries()` 覆盖 |
 
 **分片定位**：
 
@@ -276,7 +276,7 @@ storage.set_with_expire(key, obj, 剩余ttl_ms);
 | 单实例 | `static GlobalStorage& instance()`（Magic Static） + `delete` 拷贝 |
 | 分片数与锁数一致 | `mutexes_ = std::make_unique<shared_mutex[]>(num_shards_)` |
 | 过期键不会返回 | GET 时检查 `expire_dict_.is_expired()` 与 `CacheEntry::expire_at_ms` → 删除后再读 |
-| `dirty_counter` 单调递增直至 `reset_dirty_count()` | `fetch_add(1, memory_order_relaxed)` |
+| `dirty_counter` 递增，BGSAVE 启动成功时按观测值 CAS 扣减（`consume_dirty_count()`） | `fetch_add(1, memory_order_relaxed)` |
 | 写操作后 `dirty_counter++` | `set`/`del`/`set_with_expire`/`incrby` 内部递增（含 INCR 原子路径） |
 | WRONGTYPE 类型保护 | 所有类型敏感命令执行前检查 `CacheObject::type()` |
 | 淘汰单次代价有界 | 随机分片采样（O(全库/64)），单轮上限 1024 |

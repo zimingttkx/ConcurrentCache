@@ -40,7 +40,7 @@ flowchart LR
 1. `epoll_wait` 返回 listen socket 可读
 2. 循环 `accept4(..., SOCK_NONBLOCK)` 直到 `EAGAIN`（日志打印客户端 ip）
 3. 对每个新 fd：`add_new_connection(fd)` → 再次 `fcntl(O_NONBLOCK)` → `SubReactorPool::get_next_reactor()` 获取下一个 SubReactor
-4. **在 MainReactor 线程内直接跨线程调用** `sub_reactor->add_connection(fd)`：创建 `Connection`、设置回调、`enable_reading()` 并注册到该 SubReactor 的 `EventLoop`（跨线程安全靠 `EventLoop::channels_mutex_` + `SubReactor::connections_mutex_`）
+4. `sub_reactor->add_connection(client_fd)` **不就地登记**，而是把登记动作交给目标 SubReactor 自己的线程：内部调 `EventLoop::queue_in_loop(register_connection)` 把任务压入 `pending_tasks_` 并 `wakeup()` 写唤醒 pipe。真正的 `Connection` 创建、回调设置、`enable_reading()`、`Channel` 注册全部在 SubReactor 线程内完成，所以 `connections_` 只被它自己写，`channels_` 也只被本 loop 增删（`channels_mutex_` 保护的是别的线程读侧）。accept 线程因此不会与目标 loop 并发操作连接表。
 
 ### 2.2 SubReactorPool
 
@@ -109,16 +109,21 @@ SubReactor 本身没有 `loop()`/`epoll_wait`——线程体就是 `EventLoop::l
 
 ```cpp
 void EventLoop::loop() {
-    while (!quit_.load(std::memory_order_acquire)) {
-        check_config_reload();          // 距上次检查 ≥10s 才真正 reload
+    while (true) {
         if (quit_) break;               // 退出检查点 1
         int n = epoll_wait(epoll_fd_, events_.data(),
                            events_.size(), 100 /*ms*/);
+        if (quit_) break;               // 退出检查点 2：quit 后最迟一轮就退出
+        check_config_reload();          // 距上次检查 ≥10s 才真正 reload
+        // 先跑别的线程投递的任务，再分发本轮事件。放在这里而不是 handle_wakeup()
+        // 里，是因为 n==0（超时）会直接 continue，那样排在队列里的连接登记
+        // 永远没人做。
+        drain_pending_tasks();
         if (n < 0) {
             if (errno == EINTR) continue;
             break;                      // epoll 自身故障，退出循环
         }
-        if (quit_) break;               // 退出检查点 2：quit 后最迟一轮就退出
+        if (n == 0) continue;           // 超时
         for (int i = 0; i < n; ++i) {
             if (events_[i].data.fd == wakeup_fd_) {
                 handle_wakeup();   // 消费 pipe 中的字节
@@ -141,6 +146,8 @@ void EventLoop::loop() {
 ```
 
 > **为什么事件分发要兜底 catch？** 回调链深处（客户端命令执行、cluster 消息解析）抛出的异常若一路上抛会触发 `std::terminate`——单个畸形输入不应能击穿服务器。异常在这里被吞掉并记录，事件循环继续。
+>
+> **为什么待办任务在 `epoll_wait` 之后、事件分发之前排空？** `queue_in_loop()` 只加锁入队 + 写唤醒 pipe；若只在 `handle_wakeup()` 里排空，那么一次唤醒事件被 `n==0` 超时路径或退出路径跳过时，排队的连接登记就永远没人执行。
 >
 > **为什么要有两个退出检查点？** 只在循环头检查的话，`quit()` 后最坏要等 100ms 超时或一轮事件处理完才退出；epoll_wait 返回后立即复查，保证 quit 最迟一轮生效——`join()` 不会卡住。
 
@@ -441,12 +448,12 @@ sequenceDiagram
 
 | 组件 | OS 线程 | 访问的共享状态 | 同步方式 |
 |------|---------|---------------|---------|
-| `MainReactor` | 1 个 | `SubReactorPool::get_next_reactor()` 的 `next_index_`；跨线程调用 `SubReactor::add_connection` | atomic；`channels_mutex_` + `connections_mutex_` |
+| `MainReactor` | 1 个 | `SubReactorPool::get_next_reactor()` 的 `next_index_`；向目标 loop 投递 `register_connection` 任务 | atomic；`pending_tasks_mutex_` + `channels_mutex_` |
 | `SubReactor` | N 个 | 连接表（MainReactor 线程写、SubReactor 线程读） | `std::shared_mutex` |
 | `ThreadPool` | `thread_pool_size` 个 | 任务队列 | mutex + condvar |
 | `ExpirationChecker` | 1 个 | `GlobalStorage` 分片 | `std::shared_mutex` |
 | `RdbScheduler` | 1 个 | `GlobalStorage` 分片 | `std::shared_mutex` |
-| `ClusterServer` | 0（复用 MainReactor EventLoop） | `ClusterState` | `std::shared_mutex` 多把 |
+| `ClusterServer` | 1 个心跳线程（`ClusterConnection::start_heartbeat()`，1s 周期驱动 `on_timer()` → 故障检测 / `executeFailover()`）+ ClusterBus 链路复用 SubReactor 之外的独立 fd | `ClusterState` | `std::shared_mutex` 多把 |
 
 **注**：`SubReactorPool` 是 Meyers 单例。
 

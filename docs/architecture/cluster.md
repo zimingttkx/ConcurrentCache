@@ -191,10 +191,10 @@ sequenceDiagram
 ```mermaid
 stateDiagram-v2
     [*] --> kNone: 初始
-    kNone --> kConnect: 收到 REPLICAOF
-    kConnect --> kHandshake: TCP 建立
-    kHandshake --> kSync: 发送 PSYNC
-    kSync --> kSendingRdb: 主发全量快照（RESTORE 流）
+    kNone --> kConnect: CLUSTER REPLICATE 记主
+    kConnect --> kHandshake: 总线链路就绪
+    kHandshake --> kSync: 副本发 REPLSYNC:<node>
+    kSync --> kSendingRdb: 主发全量快照（逐 key RESTORE）
     kSendingRdb --> kConnected: 快照完成 + backlog 回放
     kConnected --> kConnected: 持续增量复制（RESP 数组命令流）
 ```
@@ -206,7 +206,7 @@ stateDiagram-v2
 | 成员 | 类型 | 说明 |
 |------|------|------|
 | `replicas_` | `unordered_map<string, shared_ptr<ReplicaInfo>>` | 副本列表（主端维护） |
-| `repl_buffer_` | `vector<ReplicationBufferEntry>` | 10MB 环形缓冲 |
+| `repl_buffer_` | `vector<ReplicationBufferEntry>` | 复制 backlog（**不是环形缓冲**：超 10MB 时 `cleanup_replication_buffer()` 抹掉前一半条目并抬高 `repl_buffer_start_offset_`，落后的副本此后无法续传，会静默发散） |
 | `master_repl_offset_` | `atomic<int64_t>` | 主节点当前偏移量 |
 | `sync_state_` | `atomic<SyncState>` | 副本端同步阶段 |
 | `master_ip_/port_/runid_` | string/int | 副本端记录的主节点 |
@@ -226,7 +226,7 @@ struct ReplicaInfo {
 };
 ```
 
-**环形缓冲**：
+**backlog 缓冲（非环形，会抹旧数据）**：
 
 ```cpp
 static constexpr size_t kReplicationBufferSize = 10 * 1024 * 1024;  // 10MB
@@ -248,24 +248,29 @@ std::vector<ReplicationBufferEntry> repl_buffer_;
 
 副本端：
   1. handle_replication_command(cmd_line)
-     优先按 RESP 数组解析（二进制安全）；旧格式（空格分割）仅作兼容回退
-  2. 在本地执行相同命令
-  3. 回复 REPLCONF ACK offset
+     优先按 RESP 数组解析；旧格式（空格分割）仅作兼容升级窗口内旧主节点的回退
+  2. CommandFactory::create(cmd) → execute(args) 在本地执行相同命令
 ```
 
-**为什么复制命令必须是 RESP 数组而不是空格拼接？** value 可能包含空格、`\xC0`（bus 参数分隔符）、`\n`（`serialize()` 多行文本）——文本拼接会被截断/错位，RESP bulk string 自带长度前缀，完全二进制安全。
+**没有 ACK 回路**：副本执行完不回任何确认，主节点也不记已送达偏移；`REPLCONF`
+在本服务器已被显式拒绝（见 `api.md` §13），集群代码从不发它。所以复制是
+「发出即认为已复制」，断链期间的写入不会被补齐。
+
+**为什么复制命令必须是 RESP 数组而不是空格拼接？** value 可能含空格或 `\n`
+（`serialize()` 的多行文本）——文本拼接会被截断/错位，RESP bulk string 自带长度前缀。
+但要注意这一层只解决了**命令行内部**的分隔：总线消息本身仍把多个参数用裸 `\xC0`
+字节拼接且**没有转义**，所以 payload 含 `0xC0` 的写在总线层会被切断（登记在案的缺陷）。
 
 ### 5.3 复制协议命令
 
 | 命令 | 方向 | 用途 |
 |------|------|------|
-| `PSYNC ? -1` | 副本 → 主 | 全量同步请求 |
-| `PSYNC <runid> <offset>` | 副本 → 主 | 增量同步请求 |
-| `+FULLRESYNC <runid> <offset>` | 主 → 副本 | 全量同步响应（RESTORE 流跟随） |
-| `+CONTINUE` | 主 → 副本 | 增量同步成功 |
-| `REPLSYNC:<replica_name>` | 副本 → 主 | bus 侧全量同步触发（kRepData） |
-| `REPLCONF listening-port <port>` | 副本 → 主 | 注册端口 |
-| `REPLCONF ACK <offset>` | 副本 → 主 | 确认偏移 |
+| `REPLSYNC:<replica_name>` | 副本 → 主 | bus 侧全量同步触发（kRepData），主收到后调 `send_rdb_to_replica()` |
+| `RESTORE key ttl_ms payload REPLACE` | 主 → 副本 | 全量快照，逐 key（RESP 数组，保类型 + 带 TTL） |
+| `<写命令> args…` | 主 → 副本 | 增量复制（RESP 数组），副本端经 `CommandFactory` 执行 |
+| `CCREQ <id> <RESP 命令>` / `CCRESP <id> <RESP 回复>` | 双向 | 总线上的请求/回复往返（`CLUSTER MIGRATE` 用它等目标确认） |
+
+`PSYNC` / `SYNC` / `REPLCONF` **不在内部复制路径上**：它们只在客户端口暴露，而本服务器对这三条一律返回错误、不接受外部副本（`api.md` §13）。集群内部的主从关系由 `CLUSTER REPLICATE` + 总线建立，与 Redis 的副本握手是两套东西。
 
 ## 6. 故障检测与转移
 
@@ -318,7 +323,7 @@ flowchart TB
 
 | 项 | 值 |
 |----|---|
-| 监听端口 | `server_port + 10000`（默认 16379 + 10000 = 26379） |
+| 监听端口 | `server_port + 10000`（客户端默认端口 6379 → 总线默认 16379） |
 | 协议 | TCP + 自定义二进制帧 |
 | 用途 | 节点间消息转发（PING/PONG/FAIL/复制命令） |
 
@@ -371,7 +376,7 @@ header 之后是参数区，各参数以 `\xC0` 分隔。
 4. 回调返回后绝不访问任何成员
 ```
 
-所有断开路径（读错误 / 对端关闭 / 写错误 / 协议错误）都必须走这个顺序；`handle_write` 在持有 `send_mutex_` 时只置断开标志，解锁后再触发回调（回调里的析构会再拿这把锁）。bus 侧（`ClusterBus`）在断开回调中销毁 link 并**注销其 Channel**；下游回调收到的 link 参数为 `nullptr`（bus 自管的 Channel 由 bus 注销，自连链路由 `ClusterConnection` 注销）。
+读错误 / 对端关闭 / 写错误 / 协议错误 / 主动 stop 这些路径走的是这个顺序；**唯一的例外**是 `ClusterBus` 给每条链路挂的 fd 错误回调，它只调 `raw_link->disconnect()`（不触发通知），所以纯 fd 错误而下一次读写事件没发生的链路会滞留在 `links_` 表里、Channel 也不注销——这是登记在案的缺陷，别把它当成已保证的不变量；`handle_write` 在持有 `send_mutex_` 时只置断开标志，解锁后再触发回调（回调里的析构会再拿这把锁）。bus 侧（`ClusterBus`）在断开回调中销毁 link 并**注销其 Channel**；下游回调收到的 link 参数为 `nullptr`（bus 自管的 Channel 由 bus 注销，自连链路由 `ClusterConnection` 注销）。
 
 ## 8. 客户端重定向
 
@@ -404,8 +409,8 @@ std::string ClusterServer::checkRedirect(const std::string& key) const {
 | 单实例 | `ClusterServer::instance()` Magic Static |
 | 槽表与节点表一致 | 所有修改都加 `slots_mutex_` + `mutex_` |
 | 同一时刻只有一个从节点晋升 | epoch 单调递增 + 投票多数 |
-| 复制不丢命令 | 快照期 backlog + 10MB 环形缓冲 + offset 确认 |
-| 复制流二进制安全 | 命令以 RESP 数组编码传输（长度前缀，无歧义分隔） |
+| 复制不丢命令（尽力而为） | 快照期 per-replica backlog + 回放；注意 backlog 超 10MB 会抹掉前一半，且没有 ACK/offset 确认回路，断链期间不补发 |
+| 复制流二进制安全（受限于总线分帧） | 命令行以 RESP 数组编码传输（长度前缀）；但总线消息的多个参数用裸 `0xC0` 拼接且无转义，含该字节的值仍会被切断 |
 | 非法 bus 帧不阻塞事件循环 | `length` 下限/上限校验，违规即断链 |
 | Link 销毁不产生悬空回调 | `disconnect_and_notify()` 固定断开顺序 + bus 注销 Channel |
 | 网络消息解析异常不杀进程 | gossip 安全解析 + kRepData 执行 catch + EventLoop 兜底 catch |
@@ -417,11 +422,13 @@ std::string ClusterServer::checkRedirect(const std::string& key) const {
 `conf/concurrentcache.conf`：
 
 ```ini
-cluster_enabled = true
-cluster_node_timeout = 5000
+cluster_enabled = false        # 随仓库发布的 conf 是 false，需手动打开
+# cluster_node_timeout 可配，代码默认 15000（毫秒）；不写就用默认值
 ```
 
-`CLUSTER MEET <ip> <port>` 动态加入集群（`cluster_cmd.cpp`）。
+`CLUSTER MEET <ip> <port>` 动态加入集群（`cluster_cmd.cpp`），`<ip>` 允许是主机名（会先解析）。总线端口固定为客户端端口 + 10000，无需单独配置。
+
+**总线对端身份**分两个平面：控制面（gossip 消息）按报文里的 `sender_name` 与字面 IP 比对，数据面（复制写）要求发送方是成员表里已知的节点，非成员的数据消息被丢弃并计入 `CLUSTER INFO` 的 `cluster_bus_identity_rejected`。入站链路以 `handshake:<ip>:<临时端口>` 登记，握手完成后**不会改名也不会回收**——`CLUSTER INFO` 用 `cluster_handshake_nodes` 把这个堆积量报出来，但链路数本身没有上限。另：`cluster_stats_messages_received` 目前是硬编码 `0`，不是真实计数。
 
 ## 11. 性能与调优
 

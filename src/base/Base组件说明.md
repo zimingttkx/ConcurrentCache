@@ -129,7 +129,7 @@ app.log.3
 **轮转算法**：
 
 ```cpp
-void Logger::rotateFile() {
+void FileSink::rotate() {   // 轮转归 FileSink（log.h），不是 Logger 的方法
     file_.close();  // 1. 关闭当前文件
 
     // 2. 移动历史：app.log.2 → app.log.3, app.log.1 → app.log.2
@@ -153,7 +153,7 @@ void Logger::rotateFile() {
 **解决**：使用 `std::put_time()` + `std::chrono`。
 
 ```cpp
-std::string Logger::getTimestamp() {
+std::string Format::timestamp() {   // 定义在 src/base/format.h，Logger 调用它取时间戳
     auto now = std::chrono::system_clock::now();
     auto time_t = std::chrono::system_clock::to_time_t(now);
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -183,10 +183,11 @@ Logger::instance().setFile("logs/server.log");
 Logger::instance().setRotation(100 * 1024 * 1024, 5);
 
 // 使用日志宏（printf 风格）
-LOG_DEBUG("connection fd=%d", fd);      // 调试信息
-LOG_INFO("server started on port %d", 8080);  // 一般信息
-LOG_WARN("slow connection");            // 警告
-LOG_ERROR("recv failed: %s", strerror(errno));  // 错误
+// 宏的第一参数是模块标签（CACHE/NETWORK/CLUSTER/...），第二参数才是格式串
+LOG_DEBUG(NETWORK, "connection fd=%d", fd);          // 调试信息
+LOG_INFO(NETWORK, "server started on port %d", 8080); // 一般信息
+LOG_WARN(STORAGE, "slow connection");                  // 警告
+LOG_ERROR(NETWORK, "recv failed: %s", strerror(errno));// 错误
 
 // 程序退出前确保所有日志写入
 Logger::instance().flush();
@@ -214,7 +215,7 @@ log_level = INFO
 配置系统也使用单例模式，确保全局只有一份配置数据：
 
 ```cpp
-Config& Config::getInstance() {
+Config& Config::instance() {
     static Config instance;
     return instance;
 }
@@ -293,12 +294,12 @@ int Config::getInt(const std::string& key, int default_value) {
 
 ```cpp
 // 加载配置文件
-Config::getInstance().load("server.conf");
+Config::instance().load("server.conf");
 
 // 读取配置
-int port = Config::getInstance().getInt("port", 8080);
-int threads = Config::getInstance().getInt("thread_num", 4);
-std::string level = Config::getInstance().getString("log_level");
+int port = Config::instance().getInt("port", 8080);
+int threads = Config::instance().getInt("thread_num", 4);
+std::string level = Config::instance().getString("log_level");
 ```
 
 ---
@@ -353,24 +354,35 @@ class SignalHandler {
 ### 3.4 使用示例
 
 ```cpp
-// 注册 SIGINT 处理：优雅退出
-SignalHandler::getInstance().handle(SIGINT, []() {
-    LOG_INFO("收到 SIGINT，开始优雅退出...");
-    EventLoop::getInstance().quit();
+// SignalHandler 提供"信号 → std::function 回调"的注册能力：
+SignalHandler::getInstance().handle(SIGUSR1, []() {
+    LOG_INFO(signal, "收到 SIGUSR1");
 });
 
-// 注册 SIGTERM 处理：快速退出
-SignalHandler::getInstance().handle(SIGTERM, []() {
-    LOG_INFO("收到 SIGTERM，快速退出...");
-    exit(0);
-});
+// 但 main.cpp 的 SIGINT/SIGTERM 没有走这条回调通道：回调里那些动作
+// （写日志、quit 事件循环）不是 async-signal-safe 的，所以 main.cpp 自己
+// 用 std::signal() 装了一个只置 atomic 标志的处理器：
+//
+//   std::signal(SIGINT, signal_handler);
+//   std::signal(SIGTERM, signal_handler);
+//   void signal_handler(int) {
+//       if (!g_running.exchange(false)) return;   // 只做 atomic store
+//       write(STDERR_FILENO, msg, len);           // write 是信号安全的
+//       g_main_reactor->event_loop()->quit();     // quit() 内部也只是 atomic store
+//   }
+//
+// EventLoop 也没有 getInstance()——它是被 MainReactor/SubReactor 持有的对象，
+// 要拿到它只能经由保存下来的 reactor 指针。
+//
+// SignalHandler::getInstance().init() 负责另外两件事：忽略 SIGPIPE、
+// 注册 SIGSEGV 处理器（打印堆栈后退出）。
 ```
 
 ### 3.5 注意事项
 
 1. **信号处理函数中应尽量少做操作**：信号可以在任何时刻打断程序，处理函数要尽快返回
 2. **不要在信号处理函数中调用不安全的函数**：如 `printf`、`malloc` 等
-3. **日志系统本身是线程安全的**：可以在信号处理函数中使用 `LOG_*` 宏
+3. **不要在信号处理函数里使用 `LOG_*` 宏**：日志要走 mutex + 流写入，不是 async-signal-safe 的。`main.cpp` 的处理器只做三件事——置 atomic 标志、`write(STDERR_FILENO, ...)`、`_exit()`。日志系统对普通线程是线程安全的，但对信号上下文不是。
 
 ---
 
