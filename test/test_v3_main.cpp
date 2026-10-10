@@ -15,6 +15,7 @@ void run_all_cluster_bus_framing_tests();
 void run_all_thread_cache_tests();
 void run_all_resp_format_tests();
 void run_all_config_tests();
+void run_all_range_int_parse_tests();
 // void run_all_command_tests();  // 暂时禁用
 
 }  // namespace testing
@@ -72,6 +73,10 @@ int main(int argc, char* argv[]) {
 
         if (run_all || run_storage) {
             cc_server::testing::run_all_storage_tests();
+        }
+
+        if (run_all) {
+            cc_server::testing::run_all_range_int_parse_tests();
         }
 
         if (run_all) {

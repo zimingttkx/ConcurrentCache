@@ -1,4 +1,5 @@
 #include "datatype/object.h"
+#include "base/range_clip.h"
 #include <charconv>
 #include <cmath>
 #include <cstdio>
@@ -124,18 +125,14 @@ std::vector<std::string> CacheObject::list_range(long long start, long long stop
         actual_stop = static_cast<long long>(size) + actual_stop;
     }
 
-    // 边界检查
-    if (actual_start < 0) actual_start = 0;
-    if (actual_stop < 0) actual_stop = 0;
-    if (static_cast<size_t>(actual_start) >= size) {
+    // 边界裁剪与 ZRANGE 共用 base::clip_range（Redis 语义：stop 落到末尾之前就是空）
+    long long clipped_start = 0;
+    long long clipped_stop = 0;
+    if (!base::clip_range(size, actual_start, actual_stop, clipped_start, clipped_stop)) {
         return {};
     }
-    if (static_cast<size_t>(actual_stop) >= size) {
-        actual_stop = static_cast<long long>(size) - 1;
-    }
-    if (actual_start > actual_stop) {
-        return {};
-    }
+    actual_start = clipped_start;
+    actual_stop = clipped_stop;
 
     return std::vector<std::string>(list_val_.begin() + actual_start,
                                     list_val_.begin() + actual_stop + 1);
@@ -347,12 +344,14 @@ std::vector<std::pair<std::string, double>> CacheObject::zset_range_by_index(lon
         actual_stop = static_cast<long long>(size) + actual_stop;
     }
 
-    // 边界裁剪
-    if (actual_start < 0) actual_start = 0;
-    if (actual_stop < 0) return {};
-    if (static_cast<size_t>(actual_start) >= size) return {};
-    if (static_cast<size_t>(actual_stop) >= size) actual_stop = static_cast<long long>(size) - 1;
-    if (actual_start > actual_stop) return {};
+    // 边界裁剪：与 list_range 同一份实现，同一个索引不可能在两条命令上给出不同答案
+    long long clipped_start = 0;
+    long long clipped_stop = 0;
+    if (!base::clip_range(size, actual_start, actual_stop, clipped_start, clipped_stop)) {
+        return {};
+    }
+    actual_start = clipped_start;
+    actual_stop = clipped_stop;
 
     std::vector<std::pair<std::string, double>> result;
     result.reserve(static_cast<size_t>(actual_stop - actual_start + 1));

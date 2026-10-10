@@ -1,4 +1,5 @@
 #include "storage.h"
+#include "base/int_parse.h"
 #include "base/log.h"
 #include <mutex>
 #include <cassert>
@@ -529,11 +530,11 @@ namespace cc_server {
             if (!str_val.has_value()) {
                 return std::nullopt;  // 非字符串值（列表/哈希等）→ 调用方应回 WRONGTYPE
             }
-            try {
-                val = std::stoll(str_val.value());
-            } catch (...) {
+            long long parsed = 0;
+            if (!base::parse_ll_strict(str_val.value(), parsed)) {
                 return std::nullopt;  // 非整数 → 调用方应回 "value is not an integer"
             }
+            val = parsed;
         }
 
         // 溢出检查：delta > 0 时 val > INT64_MAX - delta 会溢出
