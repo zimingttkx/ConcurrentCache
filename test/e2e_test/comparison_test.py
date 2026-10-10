@@ -400,7 +400,7 @@ appendonly no
         except Exception:
             return "unknown"
 
-    def get_memory_rss_settled(self, port, rounds=6, interval=0.4, tolerance=0.02):
+    def get_memory_rss_settled(self, port, rounds=20, interval=0.5, tolerance=0.02):
         """反复采样直到 RSS 收敛，返回 (值, 是否收敛)。
 
         这一段跑在性能测试之后：FLUSHDB 只删逻辑条目，glibc 把大块（>128KB 的那些走 mmap）
@@ -1474,8 +1474,10 @@ class MemoryTester:
 
         await asyncio.sleep(1.0)
 
-        mem_full_cc = self.server_mgr.get_memory_rss(self.cc_port)
-        mem_full_redis = self.server_mgr.get_memory_rss(self.redis_port)
+        # 满载也用同一个口径采到收敛：以前空载多轮、满载单次，两个数不在同一基准上，
+        # 差值本身就是错的（nightly 实测给出过 空载1119.4 / 满载1119.4 这种一模一样的值）
+        mem_full_cc, _ = self.server_mgr.get_memory_rss_settled(self.cc_port)
+        mem_full_redis, _ = self.server_mgr.get_memory_rss_settled(self.redis_port)
 
         delta_cc = mem_full_cc - mem_empty_cc
         delta_redis = mem_full_redis - mem_empty_redis
