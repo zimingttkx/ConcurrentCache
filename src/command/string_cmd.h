@@ -1287,7 +1287,15 @@ namespace cc_server {
                 return RespEncoder::encode_error("ERR BGSAVE already in progress");
             }
 
+            // 与调度器同一套扣减语义：先取观测值，保存成功后 CAS 扣掉它，
+            // 保存期间新到的写仍留在计数里（Redis 也是保存成功后归零 dirty）。
+            // 以前 SAVE/BGSAVE 命令完全不扣，只有调度器自己触发时才 consume，
+            // 于是手动保存之后 INFO 的 rdb_dirty_count 一直挂着旧值 —— 运维看到
+            // "有未保存的写"而数据其实早已落盘，同时调度器的阈值规则会立刻再触发
+            // 一次全量快照（threshold 配得很小时尤其明显）。
+            const size_t observed = GlobalStorage::instance().get_dirty_count();
             if (rdb.save(dump_path, GlobalStorage::instance())) {
+                GlobalStorage::instance().consume_dirty_count(observed);
                 return RespEncoder::encode_simple_string("OK");
             }
             return RespEncoder::encode_error("ERR failed to save RDB");
@@ -1310,7 +1318,10 @@ namespace cc_server {
                 return RespEncoder::encode_error("ERR BGSAVE already in progress");
             }
 
+            const size_t observed = GlobalStorage::instance().get_dirty_count();
             if (rdb.save_in_background(dump_path, GlobalStorage::instance())) {
+                // 启动成功即扣减，与 RdbScheduler 的时机一致（persistence.md 记的就是这条规则）
+                GlobalStorage::instance().consume_dirty_count(observed);
                 return RespEncoder::encode_simple_string("Background saving started");
             }
             return RespEncoder::encode_error("ERR bgsave failed");
