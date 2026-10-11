@@ -107,10 +107,12 @@ class ChaosTester:
         测试用例 2：巨大 Payload
         发送超大 Value（如 50MB 字符串）
         """
-        print("\n[Test 2] 超大 Payload (50MB)")
+        print("\n[Test 2] 超大 Payload (50MB) —— 断言的是「按配置拒绝」这个契约")
 
         passed = True
         error_msg = ""
+        outcome = "connect-failed"
+        reply_head = ""
 
         # 生成 50MB 的纯 ASCII 数据（不包含 \r \n 等特殊字符）
         huge_value = "X" * (50 * 1024 * 1024)
@@ -133,32 +135,85 @@ class ChaosTester:
             writer.write(cmd)
             await asyncio.wait_for(writer.drain(), timeout=10.0)
 
-            # 等待响应（可能超时或被拒绝）
+            # 等响应。这里的三种结局都是"服务端按配置办事"：
+            # conf 的 client_query_buffer_limit = 16777216（16MB），输入缓冲越过这个高水位时
+            # Connection 直接 close()（connection.cpp:50-63，docs/deployment.md 的配置表也这么写）。
+            # 50MB 的命令**应该**被拒 —— 以前把任何异常都记成失败，于是这一行永远红：
+            # writer.wait_closed() 对一条已被服务端 reset 的连接就是会抛 ConnectionResetError。
             try:
                 response = await asyncio.wait_for(reader.readline(), timeout=3.0)
-                print(f"[Test 2] 收到响应: {response[:50]}")
+                if response:
+                    outcome = "replied"
+                    reply_head = response[:50]
+                else:
+                    outcome = "closed"      # 对端干净关闭
             except asyncio.TimeoutError:
-                print("[Test 2] 响应超时（可能是正常的）")
-
-            writer.close()
-            await writer.wait_closed()
-
+                outcome = "timeout"
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                outcome = "reset"           # 服务端已经 RST 掉我们，正常结局
+        except ConnectionResetError as e:
+            outcome = "reset"
+            error_msg = str(e)
         except Exception as e:
             passed = False
             error_msg = str(e)
 
+        # 拒绝必须真的发生：真把 50MB 收下了才说明高水位没生效
+        rejected = outcome in ("closed", "reset", "timeout")
+        if outcome == "replied":
+            passed = False
+            error_msg = f"超限写入没有被拒绝，服务端回了 {reply_head!r}"
+
         # 检查服务端存活
         alive = await self.check_server_alive()
 
-        print(f"[Test 2] 服务端存活: {alive}")
-        print(f"[Test 2] 结果: {'PASS' if passed and alive else 'FAIL'}")
+        # 拒绝得干净吗：超限的键不该存在，别的连接该照常工作
+        key_absent, ops_ok = await self._probe_after_rejection()
+
+        passed = passed and rejected and alive and key_absent and ops_ok
+
+        print(f"[Test 2] 结局: {outcome}，服务端存活: {alive}，"
+              f"huge_key 未落库: {key_absent}，正常读写可用: {ops_ok}")
+        print(f"[Test 2] 结果: {'PASS' if passed else 'FAIL'}")
 
         return {
             "test": "huge_payload",
             "payload_size_mb": 50,
-            "passed": passed and alive,
+            "outcome": outcome,
+            "server_alive": alive,
+            "oversized_key_absent": key_absent,
+            "normal_ops_ok": ops_ok,
+            "passed": passed,
             "error": error_msg,
         }
+
+    async def _probe_after_rejection(self):
+        """超限请求被拒之后，用一条新连接确认没有残留、且服务照常。"""
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(self.host, self.port), timeout=2.0
+            )
+            writer.write(b"*2\r\n$6\r\nEXISTS\r\n$8\r\nhuge_key\r\n")
+            await writer.drain()
+            exists_reply = await asyncio.wait_for(reader.readline(), timeout=2.0)
+            writer.write(b"*3\r\n$3\r\nSET\r\n$7\r\nnorm_ok\r\n$3\r\n456\r\n")
+            await writer.drain()
+            set_reply = await asyncio.wait_for(reader.readline(), timeout=2.0)
+            writer.write(b"*2\r\n$3\r\nGET\r\n$7\r\nnorm_ok\r\n")
+            await writer.drain()
+            await asyncio.wait_for(reader.readline(), timeout=2.0)   # $3
+            get_reply = await asyncio.wait_for(reader.readline(), timeout=2.0)
+            writer.close()
+            await writer.wait_closed()
+        except Exception as e:
+            print(f"[Test 2] 复检连接失败: {e}")
+            return False, False
+        key_absent = exists_reply.strip() == b':0'
+        ops_ok = set_reply.strip() == b'+OK' and get_reply.strip() == b'456'
+        return key_absent, ops_ok
 
     async def test_malformed_resp(self) -> Dict:
         """
