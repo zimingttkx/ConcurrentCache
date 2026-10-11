@@ -126,7 +126,7 @@ python3 run_all_tests.py
 
 **测试用例**：
 1. TCP Half-Close（RST 断开）
-2. 巨大 Payload（50MB）
+2. 巨大 Payload（50MB）—— 断言「按配置拒绝」：`conf` 的 `client_query_buffer_limit = 16MB`，服务端在输入缓冲越线时关掉该连接，所以 50MB **必须**被拒；脚本检查的是拒绝得干净（进程存活、`huge_key` 没落库、另开连接 SET/GET 照常），而不是"没抛异常"
 3. 畸形 RESP 协议
 4. 快速连接断开（1000 连接/秒）
 5. 并发异常请求

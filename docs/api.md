@@ -340,6 +340,7 @@ $-1\r\n                      Nil
 | `$`/`*` 头部的长度行不是数字 | `invalid number in protocol header` |
 | 负长度不是 `-1` | `invalid negative length` |
 | Bulk string 长度 > 512MB | `bulk string length exceeds limit` |
+| 单条连接的输入缓冲 > `client_query_buffer_limit`（默认 16MB，仓库 conf 同值） | 不回协议错误，**直接断开该连接**（`connection.cpp` 的高水位检查）。所以 512MB 那个上限在默认配置下够不着：当前能写进来的最大 value 实际由这条 16MB 决定，要放行更大的 value 得同时调这个键（`0` = 不限制） |
 | 数组长度 > 1,048,576（1024×1024）个元素 | `array length exceeds limit`（`resp.cpp:92`） |
 
 > 注意：**不支持 inline 命令**——直接发送裸文本（如 `PING\r\n`）首字节为 `P`，会被按协议错误拒绝并断开。必须使用 RESP 数组格式。
